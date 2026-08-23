@@ -1,349 +1,349 @@
-# Trawler 🌊
+# Trawler
 
-> **A high-performance, modular, and fault-tolerant web crawling and data extraction library in Kotlin.**
+Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-Trawler is designed from the ground up as a general-purpose, asynchronous scraping framework powered by Kotlin Coroutines, PostgreSQL persistence, and adaptive anti-bot bypass. It decouples discovery, transport, extraction, and persistence into clean, pluggable extension points.
+> **Project status: Phase 1 implementation-ready.** The parent/core Maven boundary and project rules are established; no production crawler implementation exists yet. APIs shown in planning documents are design targets, not released code.
 
----
+The governing product rule is:
 
-## 📑 Table of Contents
+> **Core owns coordination. Extensions own policy. The host owns data.**
 
-- [Key Features](#-key-features)
-- [System Architecture](#-system-architecture)
-- [Repository & Plan Structure](#-repository--plan-structure)
-- [Architectural Guidelines](#-architectural-guidelines)
-- [Quick Start](#-quick-start)
-- [Engine Configuration DSL](#-engine-configuration-dsl)
-- [Writing a Source Plugin](#-writing-a-source-plugin)
-- [PostgreSQL Storage & Schemas](#-postgresql-storage--schemas)
-- [Adaptive Anti-Bot & FlareSolverr](#-adaptive-anti-bot--flaresolverr)
-- [Building & Testing](#-building--testing)
+This rule is not aspirational wording. It is the boundary against which every implementation change is reviewed.
 
----
+## Source of truth
 
-## ✨ Key Features
+Read these documents before changing the project:
 
-- **⚡ Multi-Source Parallelism & Politeness:** Crawl multiple distinct sources concurrently with independent rate limiters, token buckets, and adaptive jitter per domain.
-- **🛡️ Adaptive Challenge Resolution:** Automatically detect Cloudflare Turnstile/v2, DataDome, and Akamai challenges. Solves once via FlareSolverr using a domain-scoped single-flight lock and propagates session cookies across all workers.
-- **💾 PostgreSQL Atomic State & Crash Recovery:** Resilient checkpointing state machine (`QUEUED` ➔ `IN_PROGRESS` ➔ `COMPLETED` / `FAILED` / `RETRY_SCHEDULED`). Automatic stale-lock reclamation prevents orphaned jobs.
-- **📦 Immutable Raw HTTP Cache & Offline Re-extraction:** All raw byte responses and HTTP headers are archived in PostgreSQL, enabling 100% offline re-parsing when extraction schemas evolve without making live network requests.
-- **🧩 Pluggable Pipeline Architecture:** Deep interceptor chains for discovery feeds/sitemaps, TLS fingerprinting, content transforms, SimHash deduplication, language filtering, and multi-sink dispatching (Postgres, WARC, Vector DBs).
+1. [AGENTS.md](AGENTS.md) — mandatory repository rules for humans and coding agents.
+2. [FINAL-PLAN.md](plans/FINAL-PLAN.md) — authoritative architecture and phased implementation plan.
+3. [Architecture](docs/ARCHITECTURE.md) — concise architectural invariants and dependency boundaries.
+4. [Modules and artifacts](docs/MODULES.md) — concrete Maven packaging and bundling decisions.
+5. [Dependencies](docs/DEPENDENCIES.md) — approved dependencies, ownership, and admission rules.
+6. [Development and quality](docs/DEVELOPMENT.md) — workflow, verification, and test policy.
+7. [Documentation rules](docs/DOCUMENTATION.md) — required documentation for every feature or decision.
 
----
+If documentation conflicts, use this precedence:
 
-## 🏛️ System Architecture
-
-Trawler is organized into five decoupled subsystems coordinated by the central `ScraperEngine`:
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                          ScraperEngine                                           │
-│                       (SupervisorScope / Dispatchers.IO / Event Bus)                             │
-├──────────────────────────────┬───────────────────────────────────┬───────────────────────────────┤
-│    1. Discovery Subsystem    │   2. Transport & Interceptors     │   3. Extraction & Transform   │
-│  ┌────────────────────────┐  │  ┌─────────────────────────────┐  │  ┌─────────────────────────┐  │
-│  │ SourcePlugin.discover()│  │  │ Proxy Router / TLS Engine   │  │  │ SourcePlugin.extract()  │  │
-│  │ Sitemap & RSS Crawlers │  │  │ RateLimiter & Politeness    │  │  │ Readability Extractor   │  │
-│  │ Wayback Fallback       │  │  │ Cache Interceptor (Postgres)│  │  │ SimHash / Language Gate │  │
-│  └───────────┬────────────┘  │  │ Challenge Resolvers (Solver)│  │  │ Media Downloader        │  │
-│              │               │  └──────────────┬──────────────┘  │  └────────────┬────────────┘  │
-└──────────────┼───────────────┴─────────────────┼─────────────────┴───────────────┼───────────────┘
-               ▼                                 ▼                                 ▼
-┌──────────────────────────────┐ ┌───────────────────────────────┐ ┌───────────────────────────────┐
-│     Checkpoint Store         │ │        Raw Cache Store        │ │         Item Sinks            │
-│ (State, Locks, Crash Recovery│ │ (Immutable HTTP Transactions) │ │ (PostgreSQL, WARC, Vectors)   │
-└──────────────────────────────┘ └───────────────────────────────┘ └───────────────────────────────┘
+```text
+explicit user instruction
+  > AGENTS.md
+  > plans/FINAL-PLAN.md
+  > focused documents under docs/
+  > README.md
+  > historical discussion or examples
 ```
 
-### Execution Lifecycle
+The old design drafts were consolidated into `plans/FINAL-PLAN.md` and are not implementation authority.
 
-```
-[Lease Checkpoint Batch] ──► [Check Raw Cache Table]
-                                      │
-               ┌──────────────────────┴──────────────────────┐
-          (Cache Hit)                                   (Cache Miss)
-               │                                             │
-               │                                    [Acquire Rate Limit]
-               │                                             │
-               │                                    [Execute Transport Chain]
-               │                                             │
-               │                                    [Detect Challenge?]
-               │                                     ├── Yes: Solve & Escalate
-               │                                     └── No: Continue
-               │                                             │
-               │                                    [Save to Raw Cache]
-               │                                             │
-               └──────────────────────┬──────────────────────┘
-                                      │
-                          [Execute Extractor Chain]
-                                      │
-                         [Apply Transform Plugins]
-                                      │
-                        [Batch Dispatch to Sinks]
-                                      │
-                     [Mark Checkpoint: COMPLETED]
-```
+## Product definition
 
----
+Trawler coordinates:
 
-## 📂 Repository & Plan Structure
+- engine and pipeline lifecycle;
+- structured concurrency and cancellation;
+- typed pipeline composition;
+- bounded work execution;
+- extension startup and shutdown;
+- immutable request, response, and context contracts;
+- capability and configuration validation;
+- generic lifecycle events.
 
-To maintain architectural clarity and preserve end-goal alignment, the repository includes foundational plans and guidelines:
+The host application or installed extensions decide:
 
-- [`plans/ORIGINAL-REQUEST.md`](plans/ORIGINAL-REQUEST.md): The original client specification, requirements, philosophy, and reference use case.
-- [`plans/PLAN-1.md`](plans/PLAN-1.md): Comprehensive system design, interfaces, data contracts, and PostgreSQL schemas.
+- what to crawl;
+- when to run;
+- how to discover requests;
+- how requests are transported;
+- how responses are interpreted;
+- which type `T` is produced;
+- how `T` is transformed and validated;
+- whether responses or operational state are persisted;
+- where `T` is delivered or stored.
 
-```
-Trawler
-├── README.md                      # Project documentation and guidelines
-├── plans/
-│   ├── ORIGINAL-REQUEST.md        # Original problem statement & reference use case
-│   └── PLAN-1.md                  # Comprehensive architectural blueprint
-├── pom.xml                        # Maven configuration
-└── src/
-    ├── main/kotlin/com/rmjtromp/trawler/
-    │   ├── core/                  # Engine, storage, transport, politeness, transform
-    │   └── plugins/               # Reusable & reference source plugins
-    └── test/kotlin/               # Unit & integration tests
-```
+## Non-negotiable boundaries
 
----
+The following rules apply to every implementation:
 
-## 🏛️ Architectural Guidelines
+1. `TrawlerEngine` is non-generic; each registered `Pipeline<T>` is typed.
+2. A produced value remains `T` through extraction, transformation, validation, and output.
+3. Core never converts user data to `JsonNode`, a generic entity envelope, or a database row.
+4. Core never owns user record keys, schemas, entity tables, or serialization choices.
+5. Crawl state, response storage, and produced-data output are independent contracts.
+6. PostgreSQL, Ktor, Jackson, Jsoup, FlareSolverr, browser libraries, and domain models are adapter/example concerns.
+7. Adapter dependencies point toward core. Core must never depend on an adapter.
+8. Retry, pacing, concurrency, identity, canonicalization, deduplication, recrawl, scope, safety, robots behavior, scheduling, and ordering are replaceable policies.
+9. Built-ins are replaceable conveniences, never hidden mandatory behavior.
+10. Optional features validate the capabilities of installed adapters and fail fast when unsupported.
+11. Structured concurrency, cancellation propagation, deterministic cleanup, and bounded resources are core invariants.
+12. Trawler makes no generic exactly-once delivery claim.
 
-Core design invariants and guidelines for development:
+See [AGENTS.md](AGENTS.md) for the enforceable version of these rules.
 
-1. **Library-First Scope:** Never hardcode domain/website parsing logic in the core engine. All site-specific scrapers must be implemented as `SourcePlugin<T>` modules.
-2. **Coroutines & Structured Concurrency:** No blocking threads (`Thread.sleep()` is strictly forbidden). Always use `SupervisorScope`, `Flow`, and non-blocking delays/channels.
-3. **Mandatory Persistence & Caching:** All states must be transactionally checkpointed in PostgreSQL, and raw responses must be saved in `raw_http_cache` for zero-network offline reprocessing.
-4. **Politeness Isolation:** Each source must possess independent rate limiters, token buckets, and automatic `Retry-After` compliance.
-5. **FlareSolverr Coordination:** Anti-bot challenge resolution must use single-flight domain locks and session cookie propagation.
+## Architecture at a glance
 
----
-
-## 🚀 Quick Start
-
-### Engine Configuration DSL
-
-```kotlin
-import com.rmjtromp.trawler.core.engine.ScraperEngine
-import com.rmjtromp.trawler.core.model.CachePolicy
-import kotlin.time.Duration.Companion.days
-import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.minutes
-import kotlin.time.Duration.Companion.seconds
-
-val engine = ScraperEngine.create {
-    // Concurrency & Coroutines
-    concurrency {
-        globalMaxConcurrency = 64
-        staleLockTimeout = 5.minutes
-    }
-
-    // Storage & PostgreSQL Persistence
-    storage {
-        usePostgresStorage {
-            dataSource = hikariDataSource
-            checkpointBatchSize = 100
-        }
-        installSink(PostgresEntitySink(hikariDataSource))
-    }
-
-    // Transport & Anti-Bot Escalation
-    transport {
-        defaultTimeout = 30.seconds
-        adaptiveEscalation {
-            detector = CompositeChallengeDetector(CloudflareDetector(), DataDomeDetector())
-            resolver = FlareSolverrResolver(endpoint = "http://127.0.0.1:8191")
-            cooldownPeriod = 15.minutes
-        }
-    }
-
-    // Source Plugin Registration
-    registerSource(PapiamentoNewsPlugin()) {
-        politeness {
-            maxConcurrency = 4
-            delay = 1500.milliseconds
-            jitter = 400.milliseconds
-            respectRetryAfter = true
-        }
-        cache {
-            defaultTtl = 7.days
-            policy = CachePolicy.CACHE_FIRST
-        }
-        discovery {
-            enableSitemapDiscovery = true
-            enableRssPolling = true
-            pollInterval = 10.minutes
-        }
-    }
-}
-
-// Start crawling asynchronously
-engine.start()
+```text
+                         TrawlerEngine
+                  lifecycle + orchestration
+                              │
+                    typed registrations
+                              │
+            ┌─────────────────┴─────────────────┐
+            │                                   │
+       Pipeline<A>                         Pipeline<B>
+            │                                   │
+       Discovery*                          Discovery*
+            ↓                                   ↓
+       CrawlRequest                        CrawlRequest
+            ↓                                   ↓
+   policies + middleware              policies + middleware
+            ↓                                   ↓
+        Transport                           Transport
+            ↓                                   ↓
+       CrawlResponse                       CrawlResponse
+            ↓                                   ↓
+       Extractor<A>                        Extractor<B>
+            ↓                                   ↓
+ Transform/Validator<A>*             Transform/Validator<B>*
+            ↓                                   ↓
+       Produced<A>                        Produced<B>
+            ↓                                   ↓
+        Output<A>*                         Output<B>*
 ```
 
----
+Optional shared services—state store, response store, observers, clock, scheduler integration, and concurrency coordination—must not inspect or serialize `A` or `B`.
 
-## 🔌 Writing a Source Plugin
+## Core versus adapters
 
-A source plugin implements `SourcePlugin<T>` to provide URL discovery and content extraction:
+The initial core must be usable with:
 
-```kotlin
-class ExampleNewsPlugin : SourcePlugin<ArticleEntity> {
-    override val sourceId: String = "example_news"
-    override val domain: String = "example.com"
-    override val defaultCacheDuration: Duration = 7.days
+- Kotlin/JVM;
+- Kotlin coroutines;
+- in-memory state;
+- a caller-provided transport;
+- a caller-provided extractor;
+- callback output or direct `Flow<Produced<T>>` collection;
+- no SQL database;
+- no response archive;
+- no scheduler;
+- no JSON library;
+- no web-specific policy.
 
-    override fun discover(context: CrawlContext): Flow<CrawlRequest> = flow {
-        // Emit initial seed URLs or fetch sitemaps/RSS feeds
-        emit(
-            CrawlRequest(
-                id = UUID.randomUUID().toString(),
-                url = "https://example.com/feed.xml",
-                sourceId = sourceId,
-                entityType = "rss_feed"
-            )
-        )
-    }
+`trawler-core` also ships lightweight official implementations that require no additional technology dependency. They are opt-in and replaceable:
 
-    override fun canExtract(response: CrawlResponse): Boolean {
-        return response.url.contains("/articles/")
-    }
+- in-memory state;
+- seed and caller-provided `Flow` discovery;
+- callback/no-output collection;
+- no-response, in-memory, and bounded JDK file response/output implementations using caller codecs;
+- common generic policies;
+- a coroutine scheduler with fixed-delay, fixed-rate, daily timezone-aware, immediate-first-run, and overlap behavior.
 
-    override suspend fun extract(
-        response: CrawlResponse,
-        context: CrawlContext
-    ): ExtractionResult<ArticleEntity> {
-        val html = response.utf8Body()
-        val doc = Jsoup.parse(html)
+Optional adapters may later provide:
 
-        val title = doc.selectFirst("h1.entry-title")?.text() ?: return ExtractionResult.Ignored("Missing title")
-        val content = doc.selectFirst("div.entry-content")?.text() ?: return ExtractionResult.Ignored("Missing body")
+- Ktor HTTP transport;
+- public-web safety and robots policies;
+- PostgreSQL durable state and fenced leases;
+- PostgreSQL, object-store, or WARC response storage;
+- PostgreSQL, queue, or outbox-backed outputs;
+- RSS/Atom, sitemap, pagination, or specialized discovery;
+- FlareSolverr or browser challenge resolution;
+- SLF4J, Micrometer, or OpenTelemetry observers;
+- specialized external scheduling integrations when the built-in coroutine scheduler is insufficient.
 
-        val article = ArticleEntity(
-            url = response.url,
-            title = title,
-            content = content,
-            publishedAt = Instant.now()
-        )
+The presence of an adapter in the repository never makes it mandatory for core users.
 
-        return ExtractionResult.Success(items = listOf(article))
-    }
-}
+## Maven packaging strategy
+
+Trawler uses logical extension boundaries everywhere, but only a few cohesive physical artifacts:
+
+```text
+trawler-parent                 build/version management only
+└── trawler-core               engine + lightweight dependency-free built-ins
+
+planned when implemented:
+├── trawler-web                Ktor + cohesive public-web behavior
+├── trawler-postgres           PostgreSQL-backed state/response/output
+└── specialized artifacts      browser, FlareSolverr, OpenTelemetry, WARC
 ```
 
----
+A small extension does not receive its own Maven artifact merely because it is replaceable. The built-in scheduler, in-memory state, seed discovery, callback output, and generic policies are bundled in `trawler-core`.
 
-## 🗄️ PostgreSQL Storage & Schemas
+A separate artifact is used when a capability introduces an external technology stack, heavy operational/security footprint, or meaningful independent compatibility boundary. See [docs/MODULES.md](docs/MODULES.md) for the complete decision matrix.
 
-Trawler requires PostgreSQL for state tracking and caching. Execute the following DDL to initialize the required tables:
+## Scope
 
-```sql
--- 1. Checkpoint & State Management Table
-CREATE TABLE IF NOT EXISTS crawl_checkpoints (
-    request_id VARCHAR(64) PRIMARY KEY,
-    source_id VARCHAR(64) NOT NULL,
-    url TEXT NOT NULL,
-    url_hash CHAR(64) NOT NULL, -- SHA-256 for fast indexed lookups
-    entity_type VARCHAR(64) NOT NULL,
-    priority INT NOT NULL DEFAULT 1,
-    status VARCHAR(24) NOT NULL DEFAULT 'QUEUED',
-    locked_by_worker VARCHAR(64),
-    locked_at TIMESTAMP WITH TIME ZONE,
-    attempts INT NOT NULL DEFAULT 0,
-    max_attempts INT NOT NULL DEFAULT 3,
-    last_error TEXT,
-    next_retry_at TIMESTAMP WITH TIME ZONE,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-);
+### In scope
 
-CREATE INDEX IF NOT EXISTS idx_checkpoints_lease 
-ON crawl_checkpoints (source_id, status, priority DESC, next_retry_at)
-WHERE status IN ('QUEUED', 'RETRY_SCHEDULED');
+- A reusable library for constructing different scraping systems.
+- Multiple unrelated typed pipelines in one engine.
+- One-shot, finite, and daemon-style execution primitives.
+- Replaceable policies and focused extension contracts.
+- Optional durable recurring crawling with resources, jobs, attempts, checkpoints, and fenced leases.
+- Optional response caching, history, and replay.
+- Optional public-web safety defaults.
+- Honest, explicit delivery and recovery guarantees.
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_dedup 
-ON crawl_checkpoints (source_id, url_hash);
+### Out of scope for core
 
--- 2. Raw HTTP Response Cache (Immutable History for Zero-Network Reprocessing)
-CREATE TABLE IF NOT EXISTS raw_http_cache (
-    id BIGSERIAL PRIMARY KEY,
-    source_id VARCHAR(64) NOT NULL,
-    url_hash CHAR(64) NOT NULL,
-    url TEXT NOT NULL,
-    status_code INT NOT NULL,
-    headers JSONB NOT NULL,
-    response_body BYTEA NOT NULL,
-    is_compressed BOOLEAN NOT NULL DEFAULT FALSE,
-    fetched_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMP WITH TIME ZONE,
-    transport_metadata JSONB DEFAULT '{}'::jsonb
-);
+- Website-specific selectors or content models.
+- A mandatory database or serialization format.
+- A mandatory scheduler or execution time.
+- A universal scraped-record schema.
+- Mandatory response retention.
+- Mandatory robots, anti-bot, proxy, browser, or public-network behavior.
+- A built-in administration UI or hosted control plane.
+- Claims of exactly-once external delivery.
+- Hidden network calls from discovery or extraction plugins.
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_cache_lookup 
-ON raw_http_cache (source_id, url_hash);
+## Current repository state
 
-CREATE INDEX IF NOT EXISTS idx_raw_cache_expiry 
-ON raw_http_cache (expires_at) 
-WHERE expires_at IS NOT NULL;
+The repository intentionally contains project setup and architecture documentation only.
 
--- 3. Extracted Entity Record Sink Table
-CREATE TABLE IF NOT EXISTS extracted_entities (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_id VARCHAR(64) NOT NULL,
-    request_id VARCHAR(64) REFERENCES crawl_checkpoints(request_id) ON DELETE SET NULL,
-    url TEXT NOT NULL,
-    entity_type VARCHAR(64) NOT NULL,
-    payload JSONB NOT NULL,
-    content_hash CHAR(64) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_entities_lookup 
-ON extracted_entities (source_id, entity_type);
-
-CREATE INDEX IF NOT EXISTS idx_entities_content_hash 
-ON extracted_entities (source_id, content_hash);
+```text
+Trawler/
+├── AGENTS.md                  mandatory contributor and agent rules
+├── CLAUDE.md                  symlink to AGENTS.md
+├── README.md                  project overview and status
+├── pom.xml                    Maven parent and reactor
+├── trawler-core/
+│   ├── pom.xml                implementation-ready core artifact
+│   └── README.md              core-specific scope and starting point
+├── docs/
+│   ├── ARCHITECTURE.md        concise architecture contract
+│   ├── MODULES.md             Maven artifact ownership and split rules
+│   ├── DEPENDENCIES.md        dependency inventory and admission policy
+│   ├── DEVELOPMENT.md         workflow and quality gates
+│   ├── DOCUMENTATION.md       documentation requirements
+│   └── decisions/             architecture decision records
+└── plans/
+    └── FINAL-PLAN.md          authoritative implementation plan
 ```
 
----
+Do not add empty production packages or placeholder classes merely to resemble the future layout. Structure should appear when a phase genuinely implements it.
 
-## 🛡️ Adaptive Anti-Bot & FlareSolverr
+## Build baseline
 
-When scraping sites protected by Cloudflare Turnstile or other WAFs:
+Requirements:
 
-```
-Standard HTTP (Fast) ───[Challenge Detected (403/503)]───► Single-Flight Mutex ───► FlareSolverr / Headless
-        ▲                                                                                   │
-        │                                                                                   │
-        └───────────── Session Re-injection (Cookies, User-Agent, Fingerprint) ◄────────────┘
-```
+- JDK 17 or newer capable of targeting JVM 17;
+- Maven 3.9 or newer;
+- UTF-8 source and reporting output.
 
-1. Outbound requests run via lightweight HTTP client.
-2. If a challenge is encountered, the domain's **Single-Flight Mutex** is locked.
-3. One worker triggers FlareSolverr to solve the challenge.
-4. The cleared cookies (`cf_clearance`), headers, and session tokens are saved in `SessionRegistry`.
-5. Concurrent workers immediately resume without duplicate solves.
+Compile the current project:
 
----
-
-## 🛠️ Building & Testing
-
-### Build with Maven
 ```bash
 mvn clean compile
 ```
 
-### Run Tests
+Package and run all configured Maven lifecycle checks:
+
 ```bash
-mvn test
+mvn clean verify
 ```
 
----
+Until the first production source is implemented, Maven reports that the `trawler-core` JAR is empty. This is expected and must not be hidden with placeholder classes or resources; it disappears when Phase 1 adds real contracts.
 
-## 📜 License & Acknowledgments
+There is currently no runnable main class and no production implementation. Do not document a run command until one exists.
 
-Trawler is developed as a high-performance open-source Kotlin crawling library. Contributions and plugins are welcome!
+## Dependencies
+
+The `trawler-core` runtime dependency set is deliberately minimal:
+
+| Dependency | Scope | Approved use |
+|---|---|---|
+| Kotlin standard library | Compile/runtime | Kotlin language runtime. |
+| Kotlin coroutines core | Compile/runtime | Structured concurrency, suspending lifecycle, `Flow`, channels, and cancellation. |
+
+There are currently no logging, JSON, SQL, HTTP, HTML parsing, anti-bot, or test dependencies. They were removed because no implemented component justified them and several would violate core isolation if treated as universal.
+
+Every future dependency requires:
+
+- an implemented, in-scope need;
+- the narrowest owning module or adapter;
+- an entry in [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md);
+- license and maintenance review;
+- confirmation that an existing dependency or standard library cannot reasonably provide the capability;
+- verification that it does not leak adapter types into core public APIs.
+
+Dependencies may not be added “for later,” for convenience, or because a draft plan mentioned them.
+
+## Quality policy
+
+High quality is a release property, not a claim. Every change must preserve:
+
+- architectural boundaries;
+- type safety;
+- deterministic lifecycle and cleanup;
+- bounded memory, queues, concurrency, and I/O;
+- explicit failure and delivery semantics;
+- compatibility or an intentional documented break;
+- accurate documentation;
+- reproducible verification.
+
+No change is complete merely because it compiles.
+
+### Tests
+
+Repository policy requires explicit owner authorization before an agent adds or refactors automated tests. Agents must not infer permission from an implementation request.
+
+When tests are authorized:
+
+- test externally observable contracts, not private implementation trivia;
+- cover failure, cancellation, boundary, and recovery behavior—not only happy paths;
+- use deterministic clocks/randomness and controlled transports;
+- do not access live third-party sites in the default suite;
+- do not weaken assertions or delete coverage to make a change pass;
+- document intentionally untested risk.
+
+When tests are not authorized, compilation, static inspection, and focused manual verification remain mandatory, and the handoff must state that automated tests were not added or run.
+
+Full rules are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+## Documentation policy
+
+Documentation is part of the feature. Every implemented capability must update the relevant documents in the same change.
+
+At minimum, a feature must document:
+
+- purpose and non-goals;
+- public contracts and ownership;
+- configuration and defaults;
+- lifecycle and state transitions;
+- capability requirements;
+- concurrency and cancellation behavior;
+- failure and retry semantics;
+- persistence, delivery, and duplicate guarantees;
+- security, privacy, and retention implications;
+- operational verification;
+- known limitations.
+
+Architectural decisions that affect multiple components require an ADR under `docs/decisions/`. See [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md).
+
+## Contribution workflow
+
+Before changing anything:
+
+1. Read `AGENTS.md` and the relevant architecture documents.
+2. Inspect the current repository and preserve unrelated work.
+3. Identify the owning layer: core, policy, adapter, output, example, or documentation.
+4. State required capabilities and dependency impact.
+5. Confirm that the requested work belongs to the current delivery phase.
+
+Before handing off:
+
+1. Verify only the changed scope.
+2. Run the applicable Maven lifecycle checks.
+3. Check formatting, warnings, and documentation accuracy.
+4. Confirm core has not gained adapter or domain dependencies.
+5. Report exactly what changed, what was verified, and what remains unverified.
+
+Agents must work on the currently checked-out branch. They must not create branches, commits, tags, or pull requests unless explicitly requested.
+
+## Security and legal posture
+
+Trawler will provide optional safe public-web policies, but the host remains responsible for authorization, site terms, robots policy selection, privacy, credential handling, and data retention.
+
+Secrets must never be committed, logged, archived by default, placed in examples, or included in diagnostic events. Security behavior that appears safe but can be bypassed by redirects, DNS changes, plugin-owned clients, or middleware ordering is not acceptable.
+
+## License
+
+No project license has been selected yet. Until a license file is added, do not describe Trawler as open source or assume redistribution rights.

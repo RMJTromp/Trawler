@@ -1,8 +1,11 @@
 # Trawler — Final Implementation Plan
 
-> **Status:** Authoritative implementation plan  
-> **Repository baseline:** Maven/Kotlin skeleton; no production source files currently exist  
-> **Inputs reconciled:** `PLAN-4.md`, `TRAWLER_GAP_REVIEW.md`, and `TRAWLER_GENERIC_ARCHITECTURE_REVIEW.md`  
+> **Status:** Authoritative implementation plan
+>
+> **Repository baseline:** Maven/Kotlin skeleton; no production source files currently exist
+>
+> **Inputs reconciled:** `PLAN-4.md`, `TRAWLER_GAP_REVIEW.md`, and `TRAWLER_GENERIC_ARCHITECTURE_REVIEW.md`
+>
 > **Precedence:** `TRAWLER_GENERIC_ARCHITECTURE_REVIEW.md` controls every conflict. This document supersedes the other plans for implementation decisions.
 
 ---
@@ -68,6 +71,7 @@ The first core release must provide:
 - type-safe pipeline registration;
 - typed extraction, same-type transforms, validation, and typed outputs;
 - direct `runOnce` execution;
+- a replaceable built-in coroutine scheduler for common fixed-delay, fixed-rate, and daily timezone-aware triggers;
 - an in-memory state implementation suitable for one process;
 - replaceable transport, discovery, identity, deduplication, retry, concurrency, pacing, scope, budget, and authorization contracts;
 - generic lifecycle events and observers;
@@ -103,7 +107,7 @@ Optional adapters may add:
 - response retention and replay;
 - persistent operational overrides and health state;
 - durable outbox-backed outputs;
-- scheduling integrations.
+- external scheduling integrations beyond the bundled coroutine scheduler.
 
 ### 3.4 Explicitly not required for the first core release
 
@@ -683,7 +687,7 @@ suspend fun awaitIdle()
 suspend fun shutdown()
 ```
 
-Scheduling sits above `runOnce`. Hosts may use cron, Quartz, Spring, Kubernetes, Airflow, or manual calls without installing a Trawler scheduler.
+Scheduling sits above `runOnce`. `trawler-core` ships a replaceable coroutine scheduler for common trigger patterns, but no scheduler activates unless selected. Hosts may instead use cron, Quartz, Spring, Kubernetes, Airflow, or manual calls.
 
 ### 12.2 Minimal in-memory run
 
@@ -854,78 +858,87 @@ These configurations use the same core. The DSL is a thin builder over immutable
 
 ---
 
-## 16. Built-ins and adapter roadmap
+## 16. Built-ins and module roadmap
 
-Built-ins should be delivered as independent components:
+Logical extension boundaries do not map one-to-one to Maven artifacts. Trawler uses a small number of cohesive physical modules:
 
 ```text
+trawler-parent
+    build/version/dependency/plugin management only
+
 trawler-core
-trawler-state-memory
+    engine + contracts
+    in-memory state
+    no-response and memory response stores
+    seed / caller-Flow discovery
+    callback / no-output collection
+    bounded JDK file response/output implementations with caller codecs
+    lightweight generic policy implementations
+    built-in coroutine scheduler
 
-trawler-transport-ktor
-trawler-policy-web
+trawler-web                         added when Phase 3 implementation begins
+    Ktor transport
+    HTTP middleware and redirects
+    public-web safety and robots
+    HTTP retry/pacing/cookie behavior
+    RSS/Atom and sitemap discovery
 
-trawler-state-postgres
-trawler-response-memory
-trawler-response-files
-trawler-response-postgres
+trawler-postgres                    added when Phase 4 implementation begins
+    durable resources/jobs/attempts/leases
+    run/checkpoint/optional harvest state
+    optional PostgreSQL response store
+    optional PostgreSQL output and outbox
 
-trawler-output-callback
-trawler-output-files
-trawler-output-jdbc
-trawler-output-outbox
-
-trawler-discovery-seed
-trawler-discovery-rss
-trawler-discovery-sitemap
-
-trawler-antibot-flaresolverr
-trawler-observability-slf4j
-trawler-observability-otel
-trawler-scheduling-coroutines
-
-trawler-examples
+specialized artifacts              created only on implementation demand
+    trawler-antibot-flaresolverr
+    trawler-transport-browser
+    trawler-observability-otel
+    trawler-warc
 ```
 
-Physical Maven modules may be introduced when the first external adapter dependency is added. Before then, packages must enforce the same dependency direction. Once Ktor/JDBC/Jackson/Jsoup is introduced, module separation is preferred so consumers of core do not inherit unused technology.
+The built-in scheduler is part of `trawler-core`, not a separate tiny artifact. It must support manual/finite triggering, fixed delay, fixed rate, daily local time with timezone, optional immediate first run, explicit overlap behavior, cancellation, and pipeline selection. It remains opt-in and replaceable; a host may instead call `runOnce` from Quartz, Spring, Kubernetes, cron, or custom code.
 
-Jackson, if used, belongs only in adapters/examples that choose it. PostgreSQL migrations live only in PostgreSQL modules. Reference content models and language-specific logic live only in examples.
+A separate artifact is justified by an external dependency stack, heavy operational/security footprint, independent ecosystem compatibility, or meaningful ability for most users to omit it. Small size, replaceability, or a focused interface alone is insufficient.
+
+`trawler-web` groups cohesive HTTP behavior rather than splitting Ktor, robots, RSS, sitemap, and web policies into tiny modules. `trawler-postgres` groups capabilities that share the PostgreSQL/JDBC/pool/migration stack while keeping each capability independently activated. Depending on it must not automatically enable response archival, output persistence, health state, or outbox delivery.
+
+Create `trawler-bom` when at least two runtime artifacts are ready for publication. All artifacts initially use one coordinated project version. Do not create a depends-on-everything artifact or placeholder module.
+
+Jackson or another codec, if used, belongs only to the adapter selecting it. PostgreSQL migrations live only in `trawler-postgres`. Reference content models and language-specific logic live only in non-runtime examples.
 
 ---
 
 ## 17. Repository layout target
 
 ```text
+pom.xml                                  trawler-parent reactor
+
 trawler-core/
-  engine/          lifecycle, registration, run coordination
-  model/           request, response, produced value, contexts
-  pipeline/        typed binding and DSL
-  discovery/       contract and checkpoint capability
-  extraction/      extractor/result contracts
-  transform/       transform/validator contracts
-  output/          typed output contracts and composition
-  policy/          focused replaceable policy contracts
-  transport/       transport/router/middleware contracts
-  state/           focused state capability contracts
-  response/        response-store contracts
-  event/           generic events and observer contract
-  extension/       optional lifecycle and registry support
+  pom.xml
+  src/main/kotlin/.../
+    engine/                              lifecycle and run coordination
+    model/                               generic request/response/contexts
+    pipeline/                            typed binding and DSL
+    discovery/                           contracts and generic built-ins
+    extraction/                          extractor/result contracts
+    transform/                           transform/validator contracts
+    output/                              contracts and lightweight built-ins
+    policy/                              contracts and generic built-ins
+    transport/                           transport/router/middleware contracts
+    state/                               capability contracts and memory store
+    response/                            contracts and lightweight stores
+    schedule/                            contract and coroutine implementation
+    event/                               generic events and observer contract
+    extension/                           lifecycle and registry support
 
-adapters/
-  state-memory/
-  state-postgres/
-  transport-ktor/
-  response-*/
-  output-*/
-  discovery-*/
-  policy-web/
-  antibot-flaresolverr/
-  observability-*/
+trawler-web/                             created with Phase 3 code
+trawler-postgres/                        created with Phase 4 code
+trawler-<specialized>/                   created only with requested implementation
 
-examples/
+examples/                                not a runtime dependency
 ```
 
-Do not create one class or module per box without need; boundaries exist to protect ownership and dependency direction.
+Package names may be consolidated when a layer is small. Do not create one class, package, or module per diagram box merely to reproduce this tree. Physical packaging rules are maintained in `docs/MODULES.md`.
 
 ---
 
@@ -941,14 +954,15 @@ Work:
 - align README claims with actual implementation status and this plan;
 - confirm JDK/Kotlin/Maven baseline from the working `pom.xml` rather than copying stale version tables;
 - remove or relocate dependencies that imply core serialization/storage requirements before core implementation;
-- establish initial package/module boundaries;
+- establish `trawler-parent` and the implementation-ready `trawler-core` module;
+- record the cohesive module strategy in `docs/MODULES.md` and ADR-0004;
 - define resource, job, lease, attempt, response, produced value, engine run, and pipeline run precisely.
 
 Exit gate:
 
-- Maven compiles on the selected JDK;
+- the Maven reactor builds `trawler-parent` and `trawler-core` on the selected JDK;
 - documentation no longer claims unimplemented adapters are current mandatory features;
-- core's dependency boundary is enforceable;
+- core's dependency boundary is enforceable and only Kotlin/coroutines are on its runtime dependency tree;
 - terminology is consistent.
 
 ### Phase 1 — Typed core contracts and composition
@@ -984,27 +998,30 @@ Work:
 - implement attempt ownership distinct from claiming;
 - implement callback/no-output collection modes;
 - implement generic events, observers, run results, cancellation, and cleanup;
-- implement `runOnce`, `awaitIdle`, and shutdown semantics.
+- implement `runOnce`, `awaitIdle`, and shutdown semantics;
+- implement the opt-in coroutine scheduler with fixed delay, fixed rate, daily local time/timezone, immediate-first-run, overlap, cancellation, and pipeline-selection behavior.
 
 Exit gate:
 
 - a custom discovery, transport, extractor, transform, and callback output run end to end;
 - a second run may revisit a completed resource according to recrawl policy;
 - cancellation releases permits and closes extensions;
+- a caller can schedule `runOnce` with the bundled scheduler or invoke it directly without scheduling;
 - the engine works with no database, response store, scheduler, JSON library, or web policy.
 
 ### Phase 3 — Policy set, Ktor adapter, and public-web preset
 
-**Goal:** Provide a practical, replaceable HTTP crawling configuration.
+**Goal:** Provide a practical, replaceable HTTP crawling configuration in `trawler-web`.
 
 Work:
 
-- implement Ktor transport behind core contracts;
+- create `trawler-web` and implement Ktor transport behind core contracts;
 - implement request/response middleware chains;
 - implement replaceable identity, canonicalization, active dedup, retry, failure classification, work ordering, concurrency, pacing, cooldown, scope, and budget defaults;
 - implement redirect hop policy re-entry and safe credential handling;
 - implement public-web safety and robots adapters;
-- implement seed discovery adapter;
+- use the seed discovery bundled in core;
+- keep robots, web safety, RSS/sitemap foundations, and HTTP defaults cohesive inside `trawler-web` rather than splitting tiny artifacts;
 - keep retry ownership outside the transport.
 
 Exit gate:
@@ -1016,11 +1033,11 @@ Exit gate:
 
 ### Phase 4 — Durable state adapter
 
-**Goal:** Add optional restart and multi-process guarantees without changing core API ownership.
+**Goal:** Add optional restart and multi-process guarantees in `trawler-postgres` without changing core API ownership.
 
 Work:
 
-- implement the corrected resource/job/attempt PostgreSQL model;
+- create `trawler-postgres` and implement the corrected resource/job/attempt model;
 - implement durable engine/pipeline runs;
 - implement atomic active-work dedup;
 - implement fenced leases, renewal, reclaim, and stale-writer rejection;
@@ -1047,7 +1064,7 @@ Work:
 - implement atomic enqueue/checkpoint where the adapter supports it and a replay-safe fallback contract otherwise;
 - implement discovery admission (`BacklogFirst`, `Continuous`, watermarks);
 - implement optional harvest strategies and conservative completion;
-- implement RSS/Atom and sitemap adapters through engine-controlled transport;
+- implement RSS/Atom and sitemap components inside `trawler-web` through engine-controlled transport;
 - add paginated/custom strategy hooks;
 - implement budgets that preserve resumable state;
 - add optional persistent pipeline eligibility, overrides, health, and circuit breaker adapters.
@@ -1066,11 +1083,12 @@ Exit gate:
 
 Work:
 
-- implement memory, file, and/or PostgreSQL response-store adapters according to demand;
+- implement memory and bounded JDK file response/output components in `trawler-core` using caller-supplied codecs;
+- implement PostgreSQL response/output/outbox components inside `trawler-postgres`, independently activated;
 - implement cache policies outside core;
 - implement replay only for replay-capable stores;
 - ensure replay creates no normal crawl jobs and performs no network requests;
-- implement file/JDBC outputs using caller-supplied serializers or mappers;
+- implement file/PostgreSQL outputs using caller-supplied serializers or mappers;
 - implement optional buffered, retrying, idempotent, and outbox decorators;
 - define independent retention policies inside relevant adapters.
 
@@ -1090,7 +1108,7 @@ Candidates, prioritized by actual demand:
 - FlareSolverr challenge resolver and session single-flight;
 - browser transport;
 - cookie/session/credential stores;
-- scheduling adapter;
+- external scheduler integrations beyond the bundled coroutine scheduler;
 - plugin/source probing and persistent resolution;
 - proxy and client-identity providers;
 - OpenTelemetry/Micrometer observers;
@@ -1130,6 +1148,7 @@ The generic core and selected adapters are complete only when all applicable sta
 - [ ] Checkpoints are opaque, codec-versioned, and advance only after accepted work.
 - [ ] Historical/incremental harvesting is optional and never claims completion after abandonment or unsettled work.
 - [ ] Scheduling is optional; finite `runOnce` works without a scheduler.
+- [ ] A built-in replaceable coroutine scheduler covers fixed delay, fixed rate, daily timezone-aware triggers, immediate-first-run, overlap, cancellation, and pipeline selection.
 - [ ] Redirect hops rerun destination safety, authorization, pacing, and credential policy.
 - [ ] Robots and public-network safety are replaceable policies offered in a safe preset.
 - [ ] Anti-bot support is optional and vendor-neutral in core.
