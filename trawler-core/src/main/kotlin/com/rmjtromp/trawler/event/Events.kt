@@ -41,6 +41,10 @@ public enum class CrawlerEventType {
     RESPONSE_STORE_FAILED,
     CONFIGURATION_REJECTED,
     CAPABILITY_WARNING,
+    SCHEDULER_TRIGGERED,
+    SCHEDULER_TRIGGER_SKIPPED,
+    SCHEDULER_TRIGGER_REJECTED,
+    SCHEDULER_RUN_FAILED,
 }
 
 /** Immutable identifiers and safe metadata shared by crawler events. */

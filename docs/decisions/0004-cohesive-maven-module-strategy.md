@@ -41,7 +41,12 @@ Trawler uses:
 - `trawler-postgres` for PostgreSQL-backed state, response, output, and outbox implementations that share one database stack;
 - separate artifacts only for specialized/heavy integrations such as FlareSolverr, browser transport, OpenTelemetry, or WARC.
 
-The built-in coroutine scheduler, in-memory state, seed/Flow discovery, callback output, bounded JDK file response/output implementations, and generic policies ship in `trawler-core`. They remain explicitly selected and replaceable and introduce no technology dependency beyond Kotlin, coroutines, and the JDK.
+The built-in coroutine scheduler, in-memory state, seed/Flow discovery,
+callback/no-output/flow output, in-memory response store, and generic policies
+ship in `trawler-core`. Phase 2 implements these selected built-ins; bounded
+JDK file response/output remains planned. They remain explicitly selected and
+replaceable and introduce no technology dependency beyond Kotlin, coroutines,
+and the JDK.
 
 Modules use one coordinated project version. A BOM is added when multiple runtime artifacts are published. Placeholder modules are forbidden.
 

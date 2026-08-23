@@ -7,6 +7,7 @@ import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.model.RequestContext
 import com.rmjtromp.trawler.model.immutableSnapshot
 import com.rmjtromp.trawler.policy.AuthorizationPolicy
+import com.rmjtromp.trawler.policy.BuiltInPolicies
 import com.rmjtromp.trawler.policy.Clock
 import com.rmjtromp.trawler.policy.ConcurrencyPolicy
 import com.rmjtromp.trawler.policy.CrawlBudgetPolicy
@@ -26,6 +27,15 @@ import com.rmjtromp.trawler.response.ResponseStore
 import com.rmjtromp.trawler.response.ResponseStoreCapability
 import com.rmjtromp.trawler.state.CrawlStateCapability
 import com.rmjtromp.trawler.state.CrawlStateStore
+import com.rmjtromp.trawler.state.AttemptStore
+import com.rmjtromp.trawler.state.InMemoryCrawlStateStore
+import com.rmjtromp.trawler.state.PipelineScopedWorkQueueStore
+import com.rmjtromp.trawler.state.ResourceHistoryStore
+import com.rmjtromp.trawler.state.WorkCancellationStore
+import com.rmjtromp.trawler.state.WorkQueueStore
+import com.rmjtromp.trawler.state.LeaseStore
+import com.rmjtromp.trawler.state.WorkOrderingStore
+import com.rmjtromp.trawler.state.WorkQueueStatus
 import com.rmjtromp.trawler.transport.RequestMiddleware
 import com.rmjtromp.trawler.transport.ResponseMiddleware
 import com.rmjtromp.trawler.transport.Transport
@@ -112,6 +122,13 @@ public class Pipeline<T : Any>(
     public val validators: List<Validator<T>> = immutableSnapshot(validators)
     public val outputs: List<OutputBinding<T>> = immutableSnapshot(outputs)
     public val extensions: List<ExtensionLifecycle> = immutableSnapshot(extensions)
+
+    /**
+     * Captures this pipeline's type-sensitive execution owner at the internal
+     * heterogeneous registration boundary. The owner retains `T`; the
+     * registry never accepts or stores a produced value.
+     */
+    internal fun runtimeRegistration(): PipelineRegistration = TypedPipelineRegistration(this)
 }
 
 /**
@@ -543,7 +560,9 @@ public class PipelineBuilder<T : Any> public constructor(
 public fun <T : Any> pipeline(
     id: String,
     configure: PipelineBuilder<T>.() -> Unit,
-): Pipeline<T> = PipelineBuilder<T>(id).apply(configure).build()
+): Pipeline<T> = PipelineBuilder<T>(id).apply(configure).build(
+    PipelineDefaults(policies = BuiltInPolicies.ordinary()),
+)
 
 /**
  * Immutable engine configuration containing heterogeneous typed pipelines.
@@ -556,7 +575,7 @@ public fun <T : Any> pipeline(
  */
 public class EngineConfiguration(
     pipelines: List<Pipeline<*>>,
-    stateStore: CrawlStateStore,
+    stateStore: CrawlStateStore? = null,
     responseStore: ResponseStore? = null,
     observers: List<Observer> = emptyList(),
     extensions: List<ExtensionLifecycle> = emptyList(),
@@ -568,10 +587,17 @@ public class EngineConfiguration(
     defaultPolicies: PipelinePolicies? = null,
     defaultRequestMiddlewares: List<RequestMiddleware> = emptyList(),
     defaultResponseMiddlewares: List<ResponseMiddleware> = emptyList(),
+    runtimeOptions: EngineRuntimeOptions = EngineRuntimeOptions(),
 ) {
     private val registry: HeterogeneousPipelineRegistry = HeterogeneousPipelineRegistry.from(pipelines)
 
-    public val stateStore: CrawlStateStore = stateStore
+    public val stateStore: CrawlStateStore = stateStore ?: InMemoryCrawlStateStore(
+        maxQueueSize = runtimeOptions.maxQueueSize,
+        maxRetainedJobs = runtimeOptions.maxRetainedJobs,
+        maxRetainedResources = runtimeOptions.maxRetainedResources,
+        leaseDuration = runtimeOptions.leaseDuration,
+        clock = clock,
+    )
     public val responseStore: ResponseStore? = responseStore
     public val observers: List<Observer> = immutableSnapshot(observers)
     public val extensions: List<ExtensionLifecycle> = immutableSnapshot(extensions)
@@ -581,6 +607,11 @@ public class EngineConfiguration(
     public val requiredResponseCapabilities: Set<ResponseStoreCapability> = immutableSet(requiredResponseCapabilities)
     public val defaultTransportRouter: TransportRouter? = defaultTransportRouter
     public val defaultPolicies: PipelinePolicies? = defaultPolicies
+    public val runtimeOptions: EngineRuntimeOptions = runtimeOptions
+
+    /** Executable typed owners retained only for the internal runtime boundary. */
+    internal val pipelineRegistrations: List<PipelineRegistration>
+        get() = registry.registrations
 
     public val pipelines: List<Pipeline<*>>
         get() = registry.pipelines
@@ -632,6 +663,8 @@ public class EngineConfigurationBuilder public constructor() {
     private var randomConfigured = false
     private var requestMiddlewareReplacement: List<RequestMiddleware>? = null
     private var responseMiddlewareReplacement: List<ResponseMiddleware>? = null
+    private var runtimeOptions: EngineRuntimeOptions = EngineRuntimeOptions()
+    private var runtimeConfigured = false
 
     /** Sets the single effective state store; use [replaceStateStore] explicitly thereafter. */
     public fun stateStore(store: CrawlStateStore): EngineConfigurationBuilder {
@@ -717,6 +750,21 @@ public class EngineConfigurationBuilder public constructor() {
         return this
     }
 
+    /** Sets bounded runtime options once; use [replaceRuntime] to replace them. */
+    public fun runtime(options: EngineRuntimeOptions): EngineConfigurationBuilder {
+        recordEngineSingle("runtime", runtimeConfigured)
+        runtimeOptions = options
+        runtimeConfigured = true
+        return this
+    }
+
+    /** Explicitly replaces bounded runtime options. */
+    public fun replaceRuntime(options: EngineRuntimeOptions): EngineConfigurationBuilder {
+        runtimeOptions = options
+        runtimeConfigured = true
+        return this
+    }
+
     /** Sets the clock once; use [replaceClock] for explicit replacement. */
     public fun clock(clock: Clock): EngineConfigurationBuilder {
         recordEngineSingle("clock", clockConfigured)
@@ -798,7 +846,7 @@ public class EngineConfigurationBuilder public constructor() {
         }
         return EngineConfiguration(
             pipelines = prepared.registry.pipelines,
-            stateStore = requireNotNull(stateStore),
+            stateStore = prepared.stateStore,
             responseStore = responseStore,
             observers = immutableSnapshot(observers),
             extensions = immutableSnapshot(extensions),
@@ -807,27 +855,28 @@ public class EngineConfigurationBuilder public constructor() {
             requiredStateCapabilities = immutableSet(requiredStateCapabilities),
             requiredResponseCapabilities = immutableSet(requiredResponseCapabilities),
             defaultTransportRouter = defaultTransportRouter,
-            defaultPolicies = defaultPolicies,
+            defaultPolicies = prepared.defaults.policies,
             defaultRequestMiddlewares = prepared.defaults.requestMiddlewares,
             defaultResponseMiddlewares = prepared.defaults.responseMiddlewares,
+            runtimeOptions = runtimeOptions,
         )
     }
 
     private fun prepare(): PreparedConfiguration {
         val defaults = PipelineDefaults(
             transportRouter = defaultTransportRouter,
-            policies = defaultPolicies,
+            policies = defaultPolicies ?: BuiltInPolicies.ordinary(runtimeOptions.workerCount, clock),
             requestMiddlewares = requestMiddlewareReplacement ?: requestMiddlewares,
             responseMiddlewares = responseMiddlewareReplacement ?: responseMiddlewares,
         )
         val issues = builderIssues.toMutableList()
-        if (stateStore == null) {
-            issues += ConfigurationIssue(
-                path = "engine.stateStore",
-                code = ConfigurationIssueCode.MISSING_REQUIRED_EXTENSION,
-                message = "Exactly one effective crawl state store is required",
-            )
-        }
+        val effectiveStateStore = stateStore ?: InMemoryCrawlStateStore(
+            maxQueueSize = runtimeOptions.maxQueueSize,
+            maxRetainedJobs = runtimeOptions.maxRetainedJobs,
+            maxRetainedResources = runtimeOptions.maxRetainedResources,
+            leaseDuration = runtimeOptions.leaseDuration,
+            clock = clock,
+        )
 
         val builtRegistrations = mutableListOf<PipelineRegistration>()
         registrations.forEach { registration ->
@@ -839,7 +888,7 @@ public class EngineConfigurationBuilder public constructor() {
         }
 
         issues += ConfigurationValidator.validateEngineSelections(
-            stateStore = stateStore,
+            stateStore = effectiveStateStore,
             responseStore = responseStore,
             observers = observers,
             extensions = extensions,
@@ -852,6 +901,7 @@ public class EngineConfigurationBuilder public constructor() {
         return PreparedConfiguration(
             defaults = defaults,
             registry = HeterogeneousPipelineRegistry(builtRegistrations),
+            stateStore = effectiveStateStore,
             issues = sortedIssues(issues),
         )
     }
@@ -872,6 +922,32 @@ public class EngineConfigurationBuilder public constructor() {
 public class TrawlerEngine public constructor(
     public val configuration: EngineConfiguration,
 ) {
+    private val runtime: EngineRuntime = EngineRuntime(configuration)
+
+    /** Runs selected pipelines once and returns an aggregate lifecycle result. */
+    public suspend fun runOnce(request: RunRequest = RunRequest()): RunResult = runtime.runOnce(request)
+
+    /**
+     * Waits for all finite engine runs currently owned by this engine to
+     * settle. The default timeout is bounded by [EngineRuntimeOptions].
+     * Returns `false` when the bound expires.
+     */
+    public suspend fun awaitIdle(timeout: java.time.Duration = configuration.runtimeOptions.awaitIdleTimeout): Boolean =
+        runtime.awaitIdle(timeout)
+
+    /** Starts the selected built-in coroutine scheduler without activating one during construction. */
+    public suspend fun startDaemon(config: DaemonConfig = DaemonConfig()): EngineHandle =
+        runtime.startDaemon(config, com.rmjtromp.trawler.schedule.CoroutineScheduler())
+
+    /** Starts a caller-selected scheduler as a structured daemon child. */
+    public suspend fun startDaemon(
+        scheduler: com.rmjtromp.trawler.schedule.Scheduler,
+        config: DaemonConfig = DaemonConfig(),
+    ): EngineHandle = runtime.startDaemon(config, scheduler)
+
+    /** Cooperatively stops daemon triggers, active runs, extensions, and owned resources. */
+    public suspend fun shutdown(): Unit = runtime.shutdown()
+
     /** Builds a non-generic engine from the configuration DSL. */
     public companion object {
         public operator fun invoke(configure: EngineConfigurationBuilder.() -> Unit): TrawlerEngine =
@@ -886,6 +962,7 @@ public enum class ConfigurationIssueCode {
     DUPLICATE_SINGLE_EXTENSION,
     DUPLICATE_ORDERED_EXTENSION,
     MISSING_REQUIRED_EXTENSION,
+    MISSING_RUNTIME_CAPABILITY,
     UNSUPPORTED_CAPABILITY,
 }
 
@@ -910,6 +987,7 @@ public class InvalidConfigurationException(
 internal interface PipelineRegistration {
     val pipelineId: String
     fun asPipeline(): Pipeline<*>
+    suspend fun execute(context: PipelineExecutionContext): PipelineRunResult
 }
 
 /**
@@ -923,15 +1001,9 @@ internal class TypedPipelineRegistration<T : Any>(
     override val pipelineId: String = typedPipeline.id
 
     override fun asPipeline(): Pipeline<*> = typedPipeline
-}
 
-/** Safe star-projection wrapper used only by the direct immutable constructor. */
-private class ExistingStarPipelineRegistration(
-    private val pipeline: Pipeline<*>,
-) : PipelineRegistration {
-    override val pipelineId: String = pipeline.id
-
-    override fun asPipeline(): Pipeline<*> = pipeline
+    override suspend fun execute(context: PipelineExecutionContext): PipelineRunResult =
+        executeTypedPipeline(typedPipeline, context)
 }
 
 private interface PipelineRegistrationSpec {
@@ -967,18 +1039,19 @@ private class TypedPipelineBuilderRegistration<T : Any>(
 internal class HeterogeneousPipelineRegistry(
     registrations: List<PipelineRegistration>,
 ) {
-    private val registrations: List<PipelineRegistration> = immutableSnapshot(registrations)
+    internal val registrations: List<PipelineRegistration> = immutableSnapshot(registrations)
     val pipelines: List<Pipeline<*>> = immutableSnapshot(registrations.map { it.asPipeline() })
 
     companion object {
         fun from(pipelines: List<Pipeline<*>>): HeterogeneousPipelineRegistry =
-            HeterogeneousPipelineRegistry(pipelines.map(::ExistingStarPipelineRegistration))
+            HeterogeneousPipelineRegistry(pipelines.map { it.runtimeRegistration() })
     }
 }
 
 private data class PreparedConfiguration(
     val defaults: PipelineDefaults,
     val registry: HeterogeneousPipelineRegistry,
+    val stateStore: CrawlStateStore,
     val issues: List<ConfigurationIssue>,
 )
 
@@ -1035,6 +1108,7 @@ internal object ConfigurationValidator {
                         message = "State store '${it.id}' does not advertise required capability ${capability.name}",
                     )
                 }
+            validateRuntimeStateCapabilities(issues, it)
         }
         if (responseStore == null && requiredResponseCapabilities.isNotEmpty()) {
             requiredResponseCapabilities.forEach { capability ->
@@ -1074,6 +1148,51 @@ internal object ConfigurationValidator {
             }
         }
         return sortedIssues(issues)
+    }
+
+    private fun validateRuntimeStateCapabilities(
+        issues: MutableList<ConfigurationIssue>,
+        store: CrawlStateStore,
+    ) {
+        val requirements = listOf(
+            "WORK_QUEUE" to (
+                store is WorkQueueStore && store.capabilities.contains(CrawlStateCapability.WORK_QUEUE)
+                ),
+            "PIPELINE_SCOPED_WORK" to (
+                store is PipelineScopedWorkQueueStore &&
+                    store.capabilities.contains(CrawlStateCapability.PIPELINE_SCOPED_WORK)
+                ),
+            "LEASE_FENCING" to (
+                store is LeaseStore && store.capabilities.contains(CrawlStateCapability.LEASE_FENCING)
+                ),
+            "RESOURCE_HISTORY" to (
+                store is ResourceHistoryStore &&
+                    store.capabilities.contains(CrawlStateCapability.RESOURCE_HISTORY)
+                ),
+            "ATTEMPT_HISTORY" to (
+                store is AttemptStore &&
+                    store.capabilities.contains(CrawlStateCapability.ATTEMPT_HISTORY)
+                ),
+            "CANCELLATION" to (
+                store is WorkCancellationStore &&
+                    store.capabilities.contains(CrawlStateCapability.CANCELLATION)
+                ),
+            "WORK_ORDERING" to (
+                store is WorkOrderingStore &&
+                    store.capabilities.contains(CrawlStateCapability.WORK_ORDERING)
+                ),
+            "WORK_STATUS" to (
+                store is WorkQueueStatus &&
+                    store.capabilities.contains(CrawlStateCapability.WORK_STATUS)
+                ),
+        )
+        requirements.filterNot { it.second }.forEach { (capability, _) ->
+            issues += ConfigurationIssue(
+                path = "engine.stateStore.runtime.$capability",
+                code = ConfigurationIssueCode.MISSING_RUNTIME_CAPABILITY,
+                message = "State store '${store.id}' must implement and advertise runtime capability $capability",
+            )
+        }
     }
 }
 

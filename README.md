@@ -2,7 +2,7 @@
 
 Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-> **Project status: Phase 1 implemented.** `trawler-core` now contains the typed contracts, immutable composition configuration, deterministic validation, and heterogeneous pipeline registration boundary. The Phase 2 worker runtime and built-in state implementation have not started; the current artifact is unreleased.
+> **Project status: Phase 2 implemented.** `trawler-core` now provides the typed composition boundary and a database-free, bounded end-to-end engine with opt-in scheduling. The artifact is unreleased; HTTP, durable PostgreSQL, public-web, and specialized adapter phases remain planned.
 
 The governing product rule is:
 
@@ -114,7 +114,7 @@ Optional shared services—state store, response store, observers, clock, schedu
 
 ## Core versus adapters
 
-The initial core must be usable with:
+The current core is usable with:
 
 - Kotlin/JVM;
 - Kotlin coroutines;
@@ -124,18 +124,23 @@ The initial core must be usable with:
 - callback output or direct `Flow<Produced<T>>` collection;
 - no SQL database;
 - no response archive;
-- no scheduler;
+- no scheduler, by calling `runOnce` directly;
 - no JSON library;
 - no web-specific policy.
 
-Later core phases are planned to ship lightweight official implementations that require no additional technology dependency. They will be opt-in and replaceable when implemented:
+Implemented lightweight core built-ins are replaceable. The ordinary builder
+installs bounded in-memory state and generic policies; scheduler, response
+retention, and output choices remain explicit:
 
 - in-memory state;
 - seed and caller-provided `Flow` discovery;
 - callback/no-output collection;
-- no-response, in-memory, and bounded JDK file response/output implementations using caller codecs;
+- direct bounded `Flow<Produced<T>>` output collection;
+- no-response and bounded in-memory response stores;
 - common generic policies;
 - a coroutine scheduler with fixed-delay, fixed-rate, daily timezone-aware, immediate-first-run, and overlap behavior.
+
+Bounded JDK file response/output implementations using caller codecs remain planned.
 
 Optional adapters may later provide:
 
@@ -157,7 +162,7 @@ Trawler uses logical extension boundaries everywhere, but only a few cohesive ph
 
 ```text
 trawler-parent                 build/version management only
-└── trawler-core               engine + planned lightweight dependency-free built-ins
+└── trawler-core               engine + lightweight dependency-free built-ins
 
 planned when implemented:
 ├── trawler-web                Ktor + cohesive public-web behavior
@@ -165,7 +170,7 @@ planned when implemented:
 └── specialized artifacts      browser, FlareSolverr, OpenTelemetry, WARC
 ```
 
-A small extension does not receive its own Maven artifact merely because it is replaceable. When implemented, the built-in scheduler, in-memory state, seed discovery, callback output, and generic policies will be bundled in `trawler-core`.
+A small extension does not receive its own Maven artifact merely because it is replaceable. The built-in scheduler, in-memory state, seed discovery, callback output, response stores, and generic policies are bundled in `trawler-core`.
 
 A separate artifact is used when a capability introduces an external technology stack, heavy operational/security footprint, or meaningful independent compatibility boundary. See [docs/MODULES.md](docs/MODULES.md) for the complete decision matrix.
 
@@ -196,8 +201,9 @@ A separate artifact is used when a capability introduces an external technology 
 
 ## Current repository state
 
-The repository contains the Phase 1 core contracts and composition boundary;
-the later runtime and adapter phases remain unimplemented.
+The repository contains the Phase 2 core contracts, composition boundary, and
+database-free runtime. Durable and technology-specific adapter phases remain
+unimplemented.
 
 ```text
 Trawler/
@@ -207,7 +213,7 @@ Trawler/
 ├── pom.xml                    Maven parent and reactor
 ├── trawler-core/
 │   ├── pom.xml                core artifact
-│   ├── src/main/kotlin/       Phase 1 typed contracts and composition
+│   ├── src/main/kotlin/       typed contracts, runtime, and core built-ins
 │   └── README.md              core-specific scope and starting point
 ├── docs/
 │   ├── ARCHITECTURE.md        concise architecture contract
@@ -215,6 +221,7 @@ Trawler/
 │   ├── DEPENDENCIES.md        dependency inventory and admission policy
 │   ├── DEVELOPMENT.md         workflow and quality gates
 │   ├── DOCUMENTATION.md       documentation requirements
+│   ├── IN-MEMORY-ENGINE.md    Phase 2 runtime feature record
 │   └── decisions/             architecture decision records
 └── plans/
     └── FINAL-PLAN.md          authoritative implementation plan
@@ -242,12 +249,14 @@ Package and run all configured Maven lifecycle checks:
 mvn clean verify
 ```
 
-The Phase 1 core JAR contains real typed contracts and configuration code. Do
-not add placeholder classes or resources to represent later runtime phases.
+The Phase 2 core JAR contains the typed contracts, immutable configuration,
+bounded in-memory runtime, and opt-in scheduler. Do not add placeholder
+classes or resources to represent later adapter phases.
 
-There is currently no runnable main class and no worker runtime. Do not
-document a run command until one exists. See the [typed core contracts feature
-record](docs/TYPED-CORE-CONTRACTS.md) for the implemented Phase 1 boundary.
+There is currently no runnable main class; the engine is a library API. See the
+[typed core contracts feature record](docs/TYPED-CORE-CONTRACTS.md) and the
+[in-memory engine feature record](docs/IN-MEMORY-ENGINE.md) for the implemented
+Phase 1 and Phase 2 boundaries.
 
 ## Dependencies
 

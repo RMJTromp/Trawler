@@ -55,8 +55,9 @@ Core must not convert `T` to JSON, `Any`, maps, a universal entity envelope, or 
 
 - Phase 1 implemented the typed registration proof and extension cardinality in
   [`docs/TYPED-CORE-CONTRACTS.md`](../TYPED-CORE-CONTRACTS.md).
-- Preserve the no-erasure/no-cast boundary when a later runtime adds typed
-  execution operations.
+- Phase 2 executes through the captured typed registration owner; the
+  heterogeneous runtime registry still never stores or processes a produced
+  value through an unchecked cast.
 
 ## Validation
 

@@ -59,8 +59,10 @@ Active-job uniqueness may suppress concurrent duplicates. Completed resources re
 
 ### Follow-up work
 
-- Phase 1 specified adapter-neutral state, lease, and checkpoint contracts;
-  durable implementations remain later-phase work.
+- Phase 1 specified adapter-neutral state, lease, and checkpoint contracts.
+  Phase 2 demonstrates the separation in a bounded process-local
+  `InMemoryCrawlStateStore`; durable recovery and multi-process fencing remain
+  Phase 4 adapter work.
 - Implement the PostgreSQL model and fenced transitions in Phase 4.
 - Define retention independently for resources, jobs, attempts, and operational history.
 

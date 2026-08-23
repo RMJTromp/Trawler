@@ -40,11 +40,15 @@ Inspect dependency resolution when dependencies change:
 mvn dependency:tree
 ```
 
-The root POM is the reactor/build parent. Production implementation starts in `trawler-core`; future modules are added only with their real implementation according to `docs/MODULES.md`. There is currently no runnable main class and no authorized automated test suite.
+The root POM is the reactor/build parent. Production implementation is
+currently in `trawler-core`; future modules are added only with their real
+implementation according to `docs/MODULES.md`. There is no runnable main
+class and no authorized automated test suite, but the Phase 2 core library has
+a bounded `runOnce` runtime and opt-in scheduler.
 
-Phase 1 now provides real core sources. Later phases must not add placeholder
-content or suppress build warnings merely to make an unimplemented runtime
-appear available.
+Phase 1 contracts and the Phase 2 database-free runtime provide real core
+sources. Later phases must not add placeholder content or suppress build
+warnings merely to make an unimplemented adapter appear available.
 
 ## Change workflow
 

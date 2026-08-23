@@ -13,13 +13,15 @@ non-generic `TrawlerEngine` configuration register unrelated `Pipeline<A>` and
 `Pipeline<B>` definitions while preserving each value type from extraction
 through transformation, validation, provenance, and output.
 
-The implementation is a configuration and contract layer. It does not start a
-worker, execute a transport, persist state, archive responses, or deliver a
-produced value.
+This document records the Phase 1 public boundary. Phase 2 now consumes that
+boundary through the database-free runtime described in
+[`IN-MEMORY-ENGINE.md`](IN-MEMORY-ENGINE.md); the contracts still remain
+adapter-neutral and no Phase 1 type owns a transport, database, serializer, or
+domain model.
 
 ## Non-goals
 
-Phase 1 deliberately does not implement:
+The Phase 1 contract layer deliberately did not implement:
 
 - the worker loop, `runOnce`, daemon execution, or scheduling;
 - an in-memory or durable state-store implementation;
@@ -28,8 +30,10 @@ Phase 1 deliberately does not implement:
 - type-changing mappers, domain models, schemas, record keys, or entity tables;
 - automated tests or test dependencies.
 
-Those are later phases or adapter responsibilities. Their contracts may be
-selected in a Phase 1 configuration, but no runtime code invokes them yet.
+Durable persistence, technology-specific transports, web policy, parsers, and
+domain models remain later phases or adapter responsibilities. The Phase 2
+runtime invokes only the lightweight implementations listed in its feature
+record.
 
 ## Public contracts
 
@@ -50,8 +54,9 @@ The public types are grouped by ownership:
 `CrawlRequest.target` is an opaque string and is not required to be a URL.
 `CrawlResponse.statusCode` is optional, so custom, file, cached, API, browser,
 and non-HTTP transports remain possible. `ContextAttributes` is a
-caller-bounded string metadata facility, not `Map<String, Any?>`, JSON, or a user-data record
-envelope. Request and response bodies defensively copy byte arrays.
+caller-bounded string metadata facility, not `Map<String, Any?>`, JSON, or a
+user-data record envelope. Request and response bodies defensively copy byte
+arrays.
 
 The typed value path is:
 
@@ -74,13 +79,14 @@ state contract contains a produced value.
 `Pipeline<T>` and `EngineConfiguration` are immutable snapshots. The DSL
 builders are configuration-thread-confined and produce those snapshots before
 runtime work. `TrawlerEngine` is non-generic and exposes only its immutable
-configuration; it does not start a worker in this phase.
+configuration; runtime starts only through explicit `runOnce` or
+`startDaemon` calls.
 
-An engine configuration requires exactly one caller-selected
-`CrawlStateStore`. Phase 1 has no built-in state implementation, so requiring
-the contract makes the absence explicit rather than introducing a fake or
-placeholder store. `ResponseStore` is optional. `Clock` and `RandomSource`
-have replaceable JDK-backed defaults. Required state and response capabilities
+An engine configuration has exactly one effective `CrawlStateStore`; the
+builder supplies the bounded process-local `InMemoryCrawlStateStore` by
+default, and a caller can explicitly replace it with a capable adapter.
+`ResponseStore` is optional and defaults to no retention. `Clock` and
+`RandomSource` have replaceable JDK-backed defaults. Required state and response capabilities
 are declared with `requireStateCapability` and `requireResponseCapability` and
 are checked before configuration construction completes.
 
@@ -128,21 +134,20 @@ Each call builds a `Pipeline<T>` and captures it in an internal
 `TypedPipelineRegistration<T>`. The internal
 `HeterogeneousPipelineRegistry` stores registration owners, not produced
 values. Its inspection view is `List<Pipeline<*>>`; it has no operation that
-accepts, converts, or casts a value. The direct immutable constructor uses a
-star-projection wrapper only for already-built definitions. There are no
-unchecked casts in core source, and the normal pipeline path never erases `T`
-to `Any`, JSON, a map, or a library-owned record envelope.
+accepts, converts, or casts a value. The direct immutable constructor creates
+the same typed registration owner from each already-built definition. There
+are no unchecked casts in core source, and the normal pipeline path never
+erases `T` to `Any`, JSON, a map, or a library-owned record envelope.
 
 This is safe because type-sensitive composition finishes before registration:
 the extractor, same-type transforms, validators, and outputs are all held by
 one `Pipeline<T>`. The non-generic engine may enumerate definitions and
-validate metadata, but it cannot process a value without a future typed owner
-operation. That future runtime boundary must preserve this proof.
+validate metadata, while the Phase 2 runtime invokes the typed owner operation
+without erasing the value type. This preserves the proof during execution.
 
 ## Lifecycle and state
 
-Phase 1 has no runtime state transitions. It defines the contracts needed by
-later execution:
+Phase 1 defines the contracts that Phase 2 executes:
 
 - `WorkQueueStore` bounds claim batches and returns lease-owned work;
 - `LeaseStore` requires the current fencing token on renewal and transitions;
@@ -152,9 +157,11 @@ later execution:
 - output acknowledgement is independent of both.
 
 `ExtensionLifecycle.start` receives an engine-owned `CoroutineScope` and
-`stop` receives an explicit reason. Later runtime code must start in declared
-order, stop in reverse order, propagate cancellation, and close resources
-deterministically. Phase 1 itself performs neither call.
+`stop` receives an explicit reason. The Phase 2 runtime starts and stops
+extensions in those orders, transitions in-memory jobs through bounded
+lease-owned states, and closes selected output lifecycle resources. Durable
+checkpointing, response replay, and adapter recovery remain outside this
+phase.
 
 ## Capabilities and dependencies
 
@@ -178,8 +185,9 @@ reservations/permits. Discovery uses a `Flow` and engine-controlled executor;
 extensions must not create hidden clients or unbounded buffers. Batch and
 claim limits are explicit contract parameters; extraction lists, output
 batches, headers, attributes, and response/request bodies are intentionally
-caller/adapter-bounded inputs rather than unbounded core queues. Phase 1
-creates no coroutine, queue, worker, scheduler, or background scope.
+caller/adapter-bounded inputs. The Phase 2 runtime adds explicit bounds for
+queues, workers, follow-ups, values, output batches, retained state, and
+lifecycle waits; it creates no unstructured global scope.
 
 ## Failure and delivery semantics
 
@@ -191,9 +199,10 @@ stale lease mutations are expected to be rejected by capable stores.
 
 Outputs declare required versus best-effort delivery, but no output or engine
 configuration claims exactly-once delivery. Non-transactional output adapters
-must document their duplicate/loss window and idempotency requirements.
-Response replay, durable checkpointing, and worker completion are not
-implemented in this phase.
+must document their duplicate/loss window and idempotency requirements. The
+Phase 2 in-memory runtime reports worker completion and supports optional
+in-memory response replay; durable checkpointing and durable recovery remain
+unimplemented.
 
 ## Security, privacy, and retention
 
@@ -209,26 +218,30 @@ authorization, privacy, terms, and retention.
 
 The implementation was checked with:
 
-- `mvn clean compile`;
-- `mvn clean verify`;
-- `mvn -pl trawler-core -am clean verify`;
-- `mvn -pl trawler-core -am dependency:tree`, confirming only Kotlin stdlib,
+- `mvn -Dkotlin.compiler.daemon=false clean compile`;
+- `mvn -Dkotlin.compiler.daemon=false clean verify`;
+- `mvn -Dkotlin.compiler.daemon=false -pl trawler-core -am clean verify`;
+- `mvn -Dkotlin.compiler.daemon=false -pl trawler-core dependency:tree`, confirming only Kotlin stdlib,
   coroutines, and their expected transitives;
 - `javap` inspection of the compiled engine and typed-stage signatures;
 - source inspection for adapter/serializer imports, unchecked casts, `Any?`
   contract shortcuts, `GlobalScope`, `Thread.sleep`, and TODO/FIXME markers;
 - Markdown target checks for the changed documentation links.
 
-Automated tests were not authorized, added, or run. A later runtime phase must
+Automated tests were not authorized, added, or run. The plain `mvn clean
+compile` invocation was attempted, but the container denied the Kotlin daemon's
+user-level temporary directory; disabling that daemon allowed the same reactor
+build to complete successfully. A later runtime phase must
 add tests only after explicit authorization, with typed heterogeneity,
 configuration conflicts, cancellation, lease fencing, checkpoint ordering,
 replay isolation, and output duplicate windows as high-risk scenarios.
 
 ## Limitations
 
-- No worker runtime can execute these contracts yet.
-- Phase 1 requires a caller-supplied state-store contract; the in-memory store
-  is a later phase.
+- This Phase 1 contract record does not define durable recovery or a web
+  adapter; those are documented by later feature/module records.
+- The Phase 2 in-memory state and response implementations are process-local;
+  they do not provide restart recovery or multi-process guarantees.
 - The configuration DSL does not solve arbitrary type-changing composition;
   that requires a separately designed mapper boundary.
 - Capability declarations are validated, but adapter implementations and

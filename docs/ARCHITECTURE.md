@@ -65,10 +65,10 @@ Phase 1 names this boundary `Pipeline<T>`, `PipelineBuilder<T>`,
 `TrawlerEngine`. The builder resolves engine defaults and pipeline-local
 overrides into immutable pipelines before registration. Its internal
 heterogeneous registry stores typed registration owners and exposes only
-star-projected definitions for inspection; it has no value-processing cast.
-The current phase stops at configuration and contracts, so these types do not
-start a worker or imply that a state, transport, response, or output adapter is
-implemented.
+star-projected definitions for inspection; execution is dispatched through the
+captured typed owner and has no value-processing cast. Phase 2 adds the
+structured runtime behind this boundary without changing the type ownership
+model.
 
 ## Ownership matrix
 
@@ -79,8 +79,8 @@ implemented.
 | Request/response contracts | Core |
 | What requests mean and how identity is computed | Pipeline policy |
 | Network or other I/O execution | Transport adapter |
-| Crawl operational state | State-store adapter |
-| Raw response retention/cache | Response-store adapter |
+| Crawl operational state | State-store adapter; `trawler-core` supplies a bounded in-memory implementation |
+| Raw response retention/cache | Response-store adapter; `trawler-core` supplies no-response and bounded in-memory implementations |
 | Produced value `T` | Host application |
 | Encoding or persistence of `T` | Output adapter/host |
 | Scheduling triggers | Host or selected scheduling extension; a replaceable coroutine implementation ships in core |
@@ -145,6 +145,42 @@ Completion means all required outputs have acknowledged according to their decla
 
 For non-transactional outputs, a process may fail after external acceptance but before job completion. Such outputs need idempotency, value deduplication, or an optional durable output/outbox adapter. Each adapter documents its duplicate window.
 
+## Phase 2 database-free runtime
+
+The implemented core vertical slice uses one structured engine scope rooted in a
+`SupervisorJob`. `runOnce` starts the engine when needed, serializes finite
+engine runs, and executes selected pipeline runs under supervisor isolation.
+Engine extensions start in order and stop in reverse order; pipeline-owned
+extensions have the same ordering within each pipeline run. `awaitIdle` and
+shutdown waits are explicitly bounded. Caller cancellation propagates through
+discovery, transport, extraction, typed stages, outputs, scheduler children,
+permits, pacing reservations, and lease renewal.
+
+The in-memory state implementation keeps stable resource identity, visit jobs,
+lease ownership, and meaningful attempts as separate records. Active work is
+deduplicated atomically while completed resources remain eligible for a later
+recrawl policy decision. State capacity and retained history are finite. A
+stale or expired lease is reclaimed and cannot accept a late fenced mutation.
+
+Discovery is collected through an engine-controlled `RequestExecutor` with
+bounded `Flow` emissions. Workers use pipeline-scoped claims and bounded
+execution. Response retention is optional and independent from both state and
+typed output. Callback and bounded `Flow<Produced<T>>` outputs acknowledge
+typed values without introducing a core serialization or record model.
+
+Scheduling is an opt-in layer above `runOnce`. The bundled coroutine
+scheduler supports manual/finite triggers, fixed delay, fixed rate, daily local
+time with an explicit timezone, immediate first execution, selected pipeline
+sets, bounded skip/queue/reject overlap behavior, cancellation, and observable
+trigger/run failures. No scheduler is active by default. One active scheduler
+may own a given pipeline selection; replacement is explicit cancellation then
+registration.
+
+Generic live events are delivered to observers in registration order. Observer
+drops and failures do not become hidden retries, and event metadata is bounded
+and does not contain `T`, response bodies, or secrets. Live events are not
+durable audit history.
+
 ## Runtime profiles
 
 ### Minimal profile
@@ -152,11 +188,13 @@ For non-transactional outputs, a process may fail after external acceptance but 
 ```text
 in-memory state
   + caller discovery/transport/extractor
-  + callback output
+  + callback, no-output, or bounded Flow output
   + runOnce
 ```
 
-No database, serializer, response archive, scheduler, or web policy is required.
+No database, serializer, response archive, scheduler, or web policy is
+required. A scheduler and an in-memory response store can be selected when
+their process-local behavior is wanted.
 
 ### Durable web profile
 

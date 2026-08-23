@@ -8,12 +8,20 @@ public data class ExtensionStartContext(
     public val scope: CoroutineScope,
 )
 
-/** Reason supplied when an extension is asked to stop. */
+/**
+ * Reason supplied when an extension is asked to stop. Pipeline-run reasons
+ * apply to pipeline-owned extensions; engine shutdown applies to shared
+ * engine extensions. A stop call remains cancellation-aware and may report
+ * its own failure to the owning runtime.
+ */
 public enum class ExtensionStopReason {
     ENGINE_SHUTDOWN,
     STARTUP_FAILURE,
     CANCELLATION,
     CONFIGURATION_REJECTED,
+    PIPELINE_RUN_COMPLETED,
+    PIPELINE_RUN_FAILED,
+    PIPELINE_RUN_ABANDONED,
 }
 
 /** Context supplied during deterministic extension shutdown. */

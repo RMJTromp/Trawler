@@ -1,11 +1,12 @@
 # Trawler Core
 
-> **Status:** Phase 1 implemented; Phase 2 runtime not started.
+> **Status:** Phase 2 implemented; unreleased.
 
-`trawler-core` is the primary planned published artifact. It now contains the
-Phase 1 generic models, typed extension contracts, immutable composition
-configuration, deterministic validation, and non-generic engine registration
-boundary. It remains unreleased and does not execute crawl work.
+`trawler-core` is the primary planned published artifact. It contains the
+typed models and extension contracts, immutable composition configuration,
+deterministic validation, non-generic engine registration boundary, bounded
+in-memory execution, callback/flow outputs, optional response retention, and
+the opt-in coroutine scheduler. It remains unreleased.
 
 Read the root [`AGENTS.md`](../AGENTS.md), [`FINAL-PLAN.md`](../plans/FINAL-PLAN.md), and [`MODULES.md`](../docs/MODULES.md) before implementing here.
 
@@ -19,9 +20,9 @@ com.rmjtromp.trawler
 
 Create packages only when their first real type is implemented. Do not scaffold the complete planned tree with empty files or placeholders.
 
-## Implemented Phase 1 scope
+## Implemented scope
 
-The first implementation phase is limited to typed contracts and composition:
+The implemented scope includes typed contracts and composition:
 
 - generic request, response, and context models;
 - `Produced<T>`;
@@ -30,24 +31,31 @@ The first implementation phase is limited to typed contracts and composition:
 - isolated heterogeneous engine registration boundary;
 - focused transport, state, response-store, policy, observer, clock, and extension contracts;
 - immutable configuration and validation;
-- explicit extension cardinality, replacement, inheritance, and ordering.
+- explicit extension cardinality, replacement, inheritance, and ordering;
+- structured engine and pipeline lifecycle with `runOnce`, `awaitIdle`, and
+  cooperative shutdown;
+- bounded in-memory resource/job/lease/attempt state with active deduplication
+  and repeatable recrawl;
+- seed and caller-provided `Flow` discovery;
+- callback, no-output, and bounded `Flow<Produced<T>>` output;
+- no-response and bounded in-memory response stores;
+- generic lifecycle events and ordered observers;
+- opt-in manual, finite, fixed-delay, fixed-rate, and daily timezone-aware
+  coroutine scheduling with bounded overlap handling.
 
 See the focused [typed core contracts feature record](../docs/TYPED-CORE-CONTRACTS.md)
-for ownership, capability, lifecycle, and registration-safety details.
+and [in-memory engine feature record](../docs/IN-MEMORY-ENGINE.md) for
+ownership, capability, lifecycle, registration, bound, and delivery details.
 
-Phase 1 does not implement the runtime worker loop, database adapters, Ktor, web policies, persistence, response archives, site parsing, or domain models.
+Phase 2 does not implement database adapters, Ktor, web policies, durable
+persistence, site parsing, or domain models. A file response/output adapter is
+also not part of this phase.
 
 ## Later bundled implementations
 
-Subsequent core phases are planned to add:
-
-- structured engine lifecycle and `runOnce`;
-- in-memory state;
-- seed and caller-`Flow` discovery;
-- callback/no-output collection;
-- generic policy defaults;
-- the replaceable coroutine scheduler;
-- no-response, memory, and bounded JDK file response/output implementations using caller codecs.
+Subsequent core work may add the bounded JDK file response/output
+implementations using caller codecs. Technology-specific transport, web, and
+durable modules remain separate planned artifacts.
 
 Bundled does not mean automatically active. Every implementation remains explicitly selected and replaceable.
 

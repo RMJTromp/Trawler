@@ -3,6 +3,7 @@ package com.rmjtromp.trawler.state
 import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.model.CrawlerContext
 import com.rmjtromp.trawler.policy.RequestIdentity
+import com.rmjtromp.trawler.policy.WorkOrderingPolicy
 import java.time.Instant
 
 /**
@@ -36,6 +37,24 @@ public enum class CrawlStateCapability {
 
     /** Historical operational state can be queried by the selected adapter. */
     QUERYABLE_HISTORY,
+
+    /** Stable resource visit history is available to recrawl policies. */
+    RESOURCE_HISTORY,
+
+    /** Meaningful execution attempts are recorded separately from leases. */
+    ATTEMPT_HISTORY,
+
+    /** Work claims can be restricted to one pipeline without cross-pipeline leakage. */
+    PIPELINE_SCOPED_WORK,
+
+    /** Queued work can be transitioned during cooperative cancellation. */
+    CANCELLATION,
+
+    /** The state adapter accepts the effective per-pipeline work ordering policy. */
+    WORK_ORDERING,
+
+    /** The runtime can inspect bounded active-work counts for finalization. */
+    WORK_STATUS,
 }
 
 /**
@@ -95,6 +114,7 @@ public data class LeasedWork(
     public val leaseToken: LeaseToken,
     public val ownerId: String,
     public val expiresAt: Instant,
+    public val pipelineId: String = "",
 )
 
 /**
@@ -118,6 +138,39 @@ public interface WorkQueueStore {
         ownerId: String,
         now: Instant,
     ): List<LeasedWork>
+}
+
+/**
+ * Optional scoped work-queue capability used when one state store serves
+ * multiple pipelines. Claims must not return work belonging to another
+ * pipeline. The engine requires this capability for the built-in
+ * multi-pipeline runtime; an adapter without it may still implement the
+ * lower-level [WorkQueueStore] contract for its own caller-controlled use.
+ */
+public interface PipelineScopedWorkQueueStore : WorkQueueStore {
+    /** Claims at most [limit] queued items belonging to [pipelineId]. */
+    public suspend fun claim(
+        pipelineId: String,
+        limit: Int,
+        ownerId: String,
+        now: Instant,
+    ): List<LeasedWork>
+}
+
+/**
+ * Optional in-process ordering surface. The policy remains extension-owned;
+ * the adapter only applies it to its bounded operational queue and never
+ * inspects produced values.
+ */
+public interface WorkOrderingStore {
+    /** Installs the effective ordering for one pipeline before work is claimed. */
+    public suspend fun setOrdering(pipelineId: String, policy: WorkOrderingPolicy)
+}
+
+/** Bounded operational work status used to distinguish drained from resumable runs. */
+public interface WorkQueueStatus {
+    /** Returns active queued, leased, or retry-wait work for [pipelineId]. */
+    public suspend fun activeWorkCount(pipelineId: String): Int
 }
 
 /** Result of a lease-owned mutation. */
@@ -152,6 +205,98 @@ public interface LeaseStore {
     public suspend fun transition(work: LeasedWork, transition: WorkTransition): LeaseMutationResult
 }
 
+/**
+ * Records meaningful execution attempts independently of lease acquisition.
+ * Implementations must reject a stale lease when beginning or finishing an
+ * attempt. The engine calls [beginAttempt] immediately before substantive
+ * transport or response processing, so claiming a lease never consumes retry
+ * budget. Calls are suspending, cancellation-cooperative, and owned by the
+ * state adapter's transaction/commit boundary.
+ */
+public interface AttemptStore {
+    /** Starts one attempt for the current lease, or returns a stale result. */
+    public suspend fun beginAttempt(
+        work: LeasedWork,
+        startedAt: Instant,
+    ): AttemptStartResult
+
+    /** Records the outcome for an attempt owned by the current lease. */
+    public suspend fun finishAttempt(
+        work: LeasedWork,
+        attempt: ExecutionAttempt,
+        outcome: AttemptOutcome,
+    ): LeaseMutationResult
+}
+
+/** A meaningful attempt identity and number; lease acquisition is not an attempt. */
+public data class ExecutionAttempt(
+    public val id: AttemptId,
+    public val number: Int,
+    public val startedAt: Instant,
+) {
+    init {
+        require(number > 0) { "Attempt number must be positive" }
+    }
+}
+
+/** Stable identifier for one meaningful execution attempt. */
+@JvmInline
+public value class AttemptId(public val value: String) {
+    init {
+        require(value.isNotBlank()) { "Attempt ID must not be blank" }
+    }
+}
+
+/** Expected outcomes recorded for a meaningful execution attempt. */
+public enum class AttemptOutcome {
+    SUCCEEDED,
+    FAILED,
+    CANCELLED,
+    ABANDONED,
+}
+
+/** Results of starting an attempt under a fenced lease. */
+public sealed interface AttemptStartResult {
+    /** The attempt was created after substantive work was about to begin. */
+    public data class Started(public val attempt: ExecutionAttempt) : AttemptStartResult
+
+    /** The lease was stale or already reclaimed. */
+    public data object Stale : AttemptStartResult
+
+    /** The adapter rejected attempt creation for an operational reason. */
+    public data class Rejected(public val reason: String) : AttemptStartResult {
+        init {
+            require(reason.isNotBlank()) { "Attempt rejection reason must not be blank" }
+        }
+    }
+}
+
+/**
+ * Provides stable-resource history to recrawl policy evaluation. History is
+ * operational metadata only; it must not contain produced values, response
+ * bodies, schemas, or serialized records.
+ */
+public interface ResourceHistoryStore {
+    /** Returns bounded history for one pipeline/resource identity. */
+    public suspend fun history(
+        pipelineId: String,
+        identity: RequestIdentity,
+    ): com.rmjtromp.trawler.policy.ResourceHistory
+}
+
+/**
+ * Cancels queued work during cooperative shutdown or pipeline cancellation.
+ * Active lease owners still perform fenced transitions in their own
+ * cancellation handlers. The returned count is operational metadata only.
+ */
+public interface WorkCancellationStore {
+    /** Transitions all still-queued work for [pipelineId] and returns its count. */
+    public suspend fun cancelQueued(
+        pipelineId: String,
+        transition: WorkTransition,
+    ): Int
+}
+
 /** Operational transition requested by a lease owner. */
 public sealed interface WorkTransition {
     /** The work completed successfully. */
@@ -171,6 +316,20 @@ public sealed interface WorkTransition {
     public data class Skipped(public val reason: String) : WorkTransition {
         init {
             require(reason.isNotBlank()) { "Work skip reason must not be blank" }
+        }
+    }
+
+    /** The caller cooperatively cancelled this visit. */
+    public data class Cancelled(public val reason: String) : WorkTransition {
+        init {
+            require(reason.isNotBlank()) { "Work cancellation reason must not be blank" }
+        }
+    }
+
+    /** The visit stopped without being a terminal infrastructure failure. */
+    public data class Abandoned(public val reason: String) : WorkTransition {
+        init {
+            require(reason.isNotBlank()) { "Work abandonment reason must not be blank" }
         }
     }
 }

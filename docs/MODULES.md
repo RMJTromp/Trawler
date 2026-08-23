@@ -16,7 +16,7 @@ Three ideas must remain distinct:
 
 Physical modules exist to isolate dependencies, technology stacks, heavy operational footprints, or meaningful independent replacement—not to mirror every interface.
 
-> **Current repository status:** The reactor currently contains only the build-only `trawler-parent` and the Phase 1 `trawler-core` module. Core typed contracts, composition, and configuration validation are implemented; the bundled runtime implementations listed below remain planned and are not implied by this module map.
+> **Current repository status:** The reactor currently contains only the build-only `trawler-parent` and `trawler-core`. Core typed contracts, composition, configuration validation, the bounded database-free runtime, and the lightweight built-ins listed below are implemented. Durable and technology-specific modules remain planned and are not implied by this module map.
 
 ## Module admission test
 
@@ -67,15 +67,18 @@ Core contracts:
 
 Bundled official implementations:
 
-- in-memory crawl state;
-- no-response and in-memory response stores;
-- seed and caller-supplied `Flow` discovery;
-- callback/no-output collection;
-- generic retry, identity, active-deduplication, recrawl, ordering, concurrency, pacing, and budget policies;
-- coroutine scheduler supporting finite/manual triggers, fixed delay, fixed rate, daily local time with timezone, immediate-first-run option, and explicit overlap behavior;
-- bounded JDK file response/output implementations using caller-supplied codecs.
+- in-memory crawl state (implemented in Phase 2);
+- no-response and in-memory response stores (implemented in Phase 2);
+- seed and caller-supplied `Flow` discovery (implemented in Phase 2);
+- callback, no-output, and bounded `Flow<Produced<T>>` collection (implemented in Phase 2);
+- generic retry, identity, active-deduplication, recrawl, ordering, concurrency, pacing, and budget policies (implemented in Phase 2);
+- coroutine scheduler supporting finite/manual triggers, fixed delay, fixed rate, daily local time with timezone, immediate-first-run option, and explicit overlap behavior (implemented in Phase 2);
+- bounded JDK file response/output implementations using caller-supplied codecs (planned; not part of Phase 2).
 
-Bundling these does not activate them. A user still selects each implementation explicitly and may replace it.
+Bundling these does not add an external technology requirement. The ordinary
+builder selects the bounded in-memory state and generic policy preset; the
+scheduler, response retention, and output implementations remain explicit
+choices, and every built-in may be replaced.
 
 Forbidden in `trawler-core`:
 
@@ -156,12 +159,13 @@ Examples remain in the repository but are not published as production runtime de
 
 | Capability | Physical location | Reason |
 |---|---|---|
-| Coroutine scheduler | `trawler-core` | Small, uses the existing coroutine/clock lifecycle, and introduces no new dependency. |
-| In-memory state | `trawler-core` | Required default for database-free use; no external dependency. |
-| Seed/Flow discovery | `trawler-core` | Generic and dependency-free. |
-| Callback/no-output | `trawler-core` | Fundamental host handoff with no dependency. |
-| Generic policies | `trawler-core` | Reusable defaults with no technology coupling. |
-| Bounded file response/output | `trawler-core` | JDK-only, codec-driven standard capability; no separate tiny artifact. WARC/object storage remains separate. |
+| Coroutine scheduler | `trawler-core` | Implemented; small, uses the existing coroutine/clock lifecycle, and introduces no new dependency. |
+| In-memory state | `trawler-core` | Implemented bounded default for database-free use; no external dependency. |
+| Seed/Flow discovery | `trawler-core` | Implemented, generic, and dependency-free. |
+| Callback/no-output | `trawler-core` | Implemented fundamental host handoff with no dependency. |
+| In-memory response store | `trawler-core` | Implemented optional bounded retention/replay without a storage dependency. |
+| Generic policies | `trawler-core` | Implemented reusable defaults with no technology coupling. |
+| Bounded file response/output | `trawler-core` | Planned JDK-only, codec-driven standard capability; no separate tiny artifact. WARC/object storage remains separate. |
 | Ktor + web policies + RSS/sitemap | `trawler-web` | Cohesive HTTP semantics and shared external stack. |
 | PostgreSQL state/response/output/outbox | `trawler-postgres` | Cohesive database stack; behavior remains separately activated. |
 

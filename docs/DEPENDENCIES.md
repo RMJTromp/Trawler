@@ -14,9 +14,10 @@
 Future module ownership is defined in [`MODULES.md`](MODULES.md). Modules are not created before their implementation begins.
 
 The ownership and purpose descriptions below include approved future core
-capabilities. Phase 1 production contracts are implemented in `trawler-core`;
-the later runtime, persistence, transport, and adapter capabilities described
-below remain planned and do not justify additional dependencies.
+capabilities. Phase 1 contracts and the Phase 2 database-free runtime are
+implemented in `trawler-core`; durable persistence, technology-specific
+transport, and adapter capabilities described below remain planned and do not
+justify additional dependencies.
 
 All project modules use the group ID `com.rmjtromp.trawler` and inherit the coordinated version from `trawler-parent`.
 
@@ -25,9 +26,15 @@ All project modules use the group ID `com.rmjtromp.trawler` and inherit the coor
 | Coordinate | Version source | Scope | Owner | Purpose | Why retained |
 |---|---|---|---|---|---|
 | `org.jetbrains.kotlin:kotlin-stdlib` | `kotlin.version` in parent `pom.xml` | Compile | `trawler-core` | Kotlin runtime and standard APIs. | Required for all Kotlin production code. |
-| `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `coroutines.version` in parent `pom.xml` | Compile | `trawler-core` | Structured coroutine scopes, cancellation, suspending lifecycle, `Flow`, channels, synchronization primitives, and the bundled scheduler. | Structured concurrency is a fixed core invariant. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `coroutines.version` in parent `pom.xml` | Compile | `trawler-core` | Structured coroutine scopes, cancellation, suspending lifecycle, `Flow`, channels, synchronization primitives, bounded in-memory coordination, and the bundled scheduler. | Structured concurrency and the Phase 2 database-free runtime are current core needs. |
 
 No other runtime dependencies are approved at present.
+
+Phase 2 added no dependency or Maven-module change. The in-memory state and
+response stores, callback/flow outputs, generic policies, and coroutine
+scheduler use only the already-approved Kotlin standard library, coroutines,
+and JDK APIs. No serializer, database, HTTP, parser, logging, telemetry,
+browser, or anti-bot type enters core.
 
 ## Resolved transitive runtime dependencies
 

@@ -58,9 +58,11 @@ An in-memory state store is valid. No response store is valid. Output may be abs
 
 ### Follow-up work
 
-- Phase 1 defined focused state and response capability interfaces; their
-  implementations remain later-phase/adaptor work.
-- Validate feature requirements at engine startup.
+- Phase 1 defined focused state and response capability interfaces. Phase 2
+  implements the bounded `InMemoryCrawlStateStore`, `NoResponseStore`, and
+  `InMemoryResponseStore` in `trawler-core`; each remains independently
+  selected and replaceable.
+- Validate feature requirements before engine runtime work begins.
 - Introduce physical modules before adapter dependencies can leak into core.
 
 ## Validation
