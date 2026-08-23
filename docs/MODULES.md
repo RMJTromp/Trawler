@@ -16,7 +16,7 @@ Three ideas must remain distinct:
 
 Physical modules exist to isolate dependencies, technology stacks, heavy operational footprints, or meaningful independent replacement—not to mirror every interface.
 
-> **Current repository status:** The reactor currently contains only the build-only `trawler-parent` and `trawler-core`. Core typed contracts, composition, configuration validation, the bounded database-free runtime, and the lightweight built-ins listed below are implemented. Durable and technology-specific modules remain planned and are not implied by this module map.
+> **Current repository status:** The reactor contains the build-only `trawler-parent`, `trawler-core`, and the implemented optional `trawler-web` adapter. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, and the Ktor/web implementation are implemented. Durable PostgreSQL and specialized modules remain planned.
 
 ## Module admission test
 
@@ -92,7 +92,7 @@ Forbidden in `trawler-core`:
 
 ### `trawler-web`
 
-**Creation:** Phase 3, when the first web implementation is added.
+**Creation:** Phase 3; created with the first real web implementation.
 
 **Packaging:** Published optional JAR depending on `trawler-core`.
 
@@ -106,10 +106,10 @@ Bundles the common public-web technology surface:
 - public-network/SSRF safety preset;
 - HTTP failure classification and retry defaults;
 - origin concurrency, pacing, and `Retry-After` behavior;
-- RSS/Atom and sitemap discovery;
+- bounded transport/robots foundations for later RSS/Atom and sitemap discovery;
 - web cache/conditional-request policies that do not require persistence.
 
-These belong together because they share HTTP semantics and the Ktor/web dependency stack. They remain separate extension contracts internally. A user may use `trawler-core` with another transport and omit this artifact entirely.
+These belong together because they share HTTP semantics and the Ktor/web dependency stack. They remain separate extension contracts internally. RSS/Atom and sitemap parsers/discovery are still Phase 5 work. A user may use `trawler-core` with another transport and omit this artifact entirely.
 
 Do not add Jsoup, Jackson, or another parser/codec automatically. Add one only when implemented behavior proves it is needed and record it in `docs/DEPENDENCIES.md`.
 
@@ -166,7 +166,7 @@ Examples remain in the repository but are not published as production runtime de
 | In-memory response store | `trawler-core` | Implemented optional bounded retention/replay without a storage dependency. |
 | Generic policies | `trawler-core` | Implemented reusable defaults with no technology coupling. |
 | Bounded file response/output | `trawler-core` | Planned JDK-only, codec-driven standard capability; no separate tiny artifact. WARC/object storage remains separate. |
-| Ktor + web policies + RSS/sitemap | `trawler-web` | Cohesive HTTP semantics and shared external stack. |
+| Ktor + web policies and bounded discovery foundations | `trawler-web` | Cohesive HTTP semantics and shared external stack; RSS/sitemap implementations remain Phase 5. |
 | PostgreSQL state/response/output/outbox | `trawler-postgres` | Cohesive database stack; behavior remains separately activated. |
 
 ## What must not become a module
@@ -204,7 +204,7 @@ No sibling adapter may become a transitive requirement of another unless the rel
 
 ## Repository creation policy
 
-The repository currently contains only `trawler-parent` and `trawler-core`. Add a module in the same change that begins its real implementation. That change must include:
+Add a module in the same change that begins its real implementation. The Phase 3 change created `trawler-web` with:
 
 - the module POM;
 - dependency inventory update;

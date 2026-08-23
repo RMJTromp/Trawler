@@ -8,7 +8,9 @@
 
 - JDK 17 or newer, targeting JVM 17.
 - Maven 3.9 or newer.
-- Kotlin version and coroutines version defined once in `pom.xml`.
+- Kotlin/core dependency versions are defined once in `pom.xml`; the web
+  adapter's separately documented Ktor-compatible coroutines alignment is
+  also managed there.
 - UTF-8 source and reporting output.
 - Official Kotlin code style.
 
@@ -28,6 +30,12 @@ Compile only core and its required reactor dependencies:
 mvn -pl trawler-core -am clean compile
 ```
 
+Compile the implemented web adapter and its core dependency:
+
+```bash
+mvn -pl trawler-web -am clean compile
+```
+
 Run the configured verification lifecycle:
 
 ```bash
@@ -40,11 +48,12 @@ Inspect dependency resolution when dependencies change:
 mvn dependency:tree
 ```
 
-The root POM is the reactor/build parent. Production implementation is
-currently in `trawler-core`; future modules are added only with their real
-implementation according to `docs/MODULES.md`. There is no runnable main
-class and no authorized automated test suite, but the Phase 2 core library has
-a bounded `runOnce` runtime and opt-in scheduler.
+The root POM is the reactor/build parent. Production implementation is in
+`trawler-core` and the optional `trawler-web` adapter; future modules are
+added only with their real implementation according to `docs/MODULES.md`.
+There is no runnable main class and no authorized automated test suite, but
+the Phase 2 core library has a bounded `runOnce` runtime and opt-in scheduler,
+and Phase 3 has a bounded Ktor transport.
 
 Phase 1 contracts and the Phase 2 database-free runtime provide real core
 sources. Later phases must not add placeholder content or suppress build

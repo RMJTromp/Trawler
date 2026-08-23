@@ -69,7 +69,8 @@ Modules use one coordinated project version. A BOM is added when multiple runtim
 ### Follow-up work
 
 - Keep `docs/MODULES.md` authoritative for module ownership.
-- Add `trawler-web` and `trawler-postgres` only when implementation starts.
+- Phase 3 added `trawler-web` with its real Ktor implementation; add
+  `trawler-postgres` only when its durable implementation starts.
 - Add a BOM at the first multi-artifact publication.
 
 ## Validation

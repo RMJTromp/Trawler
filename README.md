@@ -2,7 +2,7 @@
 
 Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-> **Project status: Phase 2 implemented.** `trawler-core` now provides the typed composition boundary and a database-free, bounded end-to-end engine with opt-in scheduling. The artifact is unreleased; HTTP, durable PostgreSQL, public-web, and specialized adapter phases remain planned.
+> **Project status: Phase 3 implemented.** `trawler-core` provides the typed composition boundary and a database-free, bounded end-to-end engine with opt-in scheduling. The optional `trawler-web` artifact provides the Ktor/CIO transport and replaceable web policies. Artifacts are unreleased; durable PostgreSQL and specialized adapter phases remain planned.
 
 The governing product rule is:
 
@@ -142,10 +142,14 @@ retention, and output choices remain explicit:
 
 Bounded JDK file response/output implementations using caller codecs remain planned.
 
-Optional adapters may later provide:
+The implemented optional `trawler-web` adapter provides:
 
-- Ktor HTTP transport;
-- public-web safety and robots policies;
+- Ktor HTTP transport and response adaptation;
+- bounded redirects, public-web safety, robots, cookies, origin pacing, and HTTP classification;
+- the bounded HTTP/robots foundation that later discovery adapters may reuse.
+
+Future adapters may provide:
+
 - PostgreSQL durable state and fenced leases;
 - PostgreSQL, object-store, or WARC response storage;
 - PostgreSQL, queue, or outbox-backed outputs;
@@ -162,10 +166,10 @@ Trawler uses logical extension boundaries everywhere, but only a few cohesive ph
 
 ```text
 trawler-parent                 build/version management only
-└── trawler-core               engine + lightweight dependency-free built-ins
+├── trawler-core               engine + lightweight dependency-free built-ins
+└── trawler-web                Ktor + cohesive public-web behavior
 
 planned when implemented:
-├── trawler-web                Ktor + cohesive public-web behavior
 ├── trawler-postgres           PostgreSQL-backed state/response/output
 └── specialized artifacts      browser, FlareSolverr, OpenTelemetry, WARC
 ```
@@ -201,9 +205,9 @@ A separate artifact is used when a capability introduces an external technology 
 
 ## Current repository state
 
-The repository contains the Phase 2 core contracts, composition boundary, and
-database-free runtime. Durable and technology-specific adapter phases remain
-unimplemented.
+The repository contains the Phase 3 core contracts, composition boundary,
+database-free runtime, and optional Ktor web adapter. Durable PostgreSQL and
+specialized adapter phases remain unimplemented.
 
 ```text
 Trawler/
@@ -215,6 +219,10 @@ Trawler/
 │   ├── pom.xml                core artifact
 │   ├── src/main/kotlin/       typed contracts, runtime, and core built-ins
 │   └── README.md              core-specific scope and starting point
+├── trawler-web/
+│   ├── pom.xml                optional web adapter artifact
+│   ├── src/main/kotlin/       Ktor transport and replaceable web policies
+│   └── README.md              web-specific scope and build entry point
 ├── docs/
 │   ├── ARCHITECTURE.md        concise architecture contract
 │   ├── MODULES.md             Maven artifact ownership and split rules
@@ -222,6 +230,7 @@ Trawler/
 │   ├── DEVELOPMENT.md         workflow and quality gates
 │   ├── DOCUMENTATION.md       documentation requirements
 │   ├── IN-MEMORY-ENGINE.md    Phase 2 runtime feature record
+│   ├── WEB-ADAPTER.md         Phase 3 web adapter feature record
 │   └── decisions/             architecture decision records
 └── plans/
     └── FINAL-PLAN.md          authoritative implementation plan
@@ -249,14 +258,17 @@ Package and run all configured Maven lifecycle checks:
 mvn clean verify
 ```
 
-The Phase 2 core JAR contains the typed contracts, immutable configuration,
-bounded in-memory runtime, and opt-in scheduler. Do not add placeholder
+The Phase 3 reactor contains the Phase 2 core JAR and the optional
+`trawler-web` JAR. Core contains the typed contracts, immutable configuration,
+bounded in-memory runtime, and opt-in scheduler; the web artifact owns Ktor,
+HTTP, DNS, robots, and public-network behavior. Do not add placeholder
 classes or resources to represent later adapter phases.
 
-There is currently no runnable main class; the engine is a library API. See the
-[typed core contracts feature record](docs/TYPED-CORE-CONTRACTS.md) and the
-[in-memory engine feature record](docs/IN-MEMORY-ENGINE.md) for the implemented
-Phase 1 and Phase 2 boundaries.
+There is currently no runnable main class; the engine and web adapter are
+library APIs. See the [typed core contracts feature record](docs/TYPED-CORE-CONTRACTS.md),
+the [in-memory engine feature record](docs/IN-MEMORY-ENGINE.md), and the
+[web adapter feature record](docs/WEB-ADAPTER.md) for the implemented Phase 1,
+Phase 2, and Phase 3 boundaries.
 
 ## Dependencies
 
@@ -267,7 +279,12 @@ The `trawler-core` runtime dependency set is deliberately minimal:
 | Kotlin standard library | Compile/runtime | Kotlin language runtime. |
 | Kotlin coroutines core | Compile/runtime | Structured concurrency, suspending lifecycle, `Flow`, channels, and cancellation. |
 
-There are currently no logging, JSON, SQL, HTTP, HTML parsing, anti-bot, or test dependencies. They were removed because no implemented component justified them and several would violate core isolation if treated as universal.
+Core has no logging, JSON, SQL, HTTP, HTML parsing, anti-bot, or test
+dependencies. The optional `trawler-web` artifact adds only the Ktor CIO
+transport, its adapter-scoped transitive graph, and the Ktor-compatible
+coroutines 1.11.0 runtime; those dependencies do not enter core. See
+[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for the complete direct and
+resolved inventory.
 
 Every future dependency requires:
 

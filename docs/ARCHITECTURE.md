@@ -79,6 +79,7 @@ model.
 | Request/response contracts | Core |
 | What requests mean and how identity is computed | Pipeline policy |
 | Network or other I/O execution | Transport adapter |
+| HTTP execution, redirect policy, robots, and public-network safety | `trawler-web`; replaceable web policies |
 | Crawl operational state | State-store adapter; `trawler-core` supplies a bounded in-memory implementation |
 | Raw response retention/cache | Response-store adapter; `trawler-core` supplies no-response and bounded in-memory implementations |
 | Produced value `T` | Host application |
@@ -208,6 +209,39 @@ PostgreSQL state adapter
 ```
 
 Both profiles use the same core contracts.
+
+## Phase 3 web adapter
+
+The implemented `trawler-web` module is an optional adapter profile. It owns
+one Ktor CIO client per configured transport, adapts HTTP bodies and headers
+to the core models, and keeps redirect hops inside a bounded transport-owned
+loop. Ktor automatic redirects are disabled so every hop reruns destination
+scheme/scope checks, DNS/address safety, robots, origin concurrency, pacing,
+cookie selection, and credential-forwarding policy before the next request.
+Previous-hop permits are released before the next origin is acquired.
+
+The public-web preset is opt-in and fail-closed for loopback, private,
+link-local, multicast, metadata, carrier-grade NAT, and benchmark addresses.
+An internal-network or custom destination policy remains possible through the
+same replaceable `WebTransportPolicies` bundle. DNS is revalidated for every
+hop, but the adapter does not claim CIO socket-address pinning against a
+DNS-to-connect race.
+
+Response bodies, decoded bodies, headers, redirects, DNS answers, robots
+documents, cookie entries, origin maps, and pacing waits are bounded. Non-2xx
+responses remain inspectable `CrawlResponse` values. Web classification and
+the optional `DefaultHttpRetryPolicy` are separate from transport execution;
+no retry plugin or hidden client loop changes core attempt accounting. The
+web preset's diagnostic redaction policy creates safe header copies without
+mutating the headers used for HTTP execution.
+
+Core's ordered request/response middleware remains the only pipeline
+middleware composition path: inherited middleware precedes local additions,
+request middleware wraps the transport, and response middleware sees the
+final adapted response. The web module provides only opt-in helpers and does
+not add an unobservable Ktor retry/interceptor chain. See
+[`WEB-ADAPTER.md`](WEB-ADAPTER.md) for lifecycle, robots, security, and
+dependency details.
 
 ## Change test
 

@@ -45,5 +45,6 @@ Routine implementation details inside an already-approved boundary do not need a
 | [ADR-0002](0002-separate-state-response-and-output.md) | Accepted | Separate crawl state, response storage, and produced-data output. |
 | [ADR-0003](0003-separate-resource-job-lease-and-attempt.md) | Accepted | Separate durable resource, job, lease, and attempt identities. |
 | [ADR-0004](0004-cohesive-maven-module-strategy.md) | Accepted | Use a few cohesive artifacts and bundle lightweight official extensions in core. |
+| [ADR-0005](0005-web-coroutines-runtime-alignment.md) | Accepted | Keep Ktor's compatible coroutines runtime alignment owned by `trawler-web`. |
 
 `plans/FINAL-PLAN.md` remains the full architecture authority. These ADRs preserve its most consequential decisions in compact form.

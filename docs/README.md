@@ -14,6 +14,7 @@ This directory contains focused, normative project documentation.
 | [Decisions](decisions/README.md) | Architecture Decision Record index and process. | A cross-cutting or difficult-to-reverse decision is made. |
 | [Typed core contracts](TYPED-CORE-CONTRACTS.md) | Implemented Phase 1 public contracts, composition, validation, and registration safety. | Typed core contracts or their composition semantics change. |
 | [In-memory engine](IN-MEMORY-ENGINE.md) | Implemented Phase 2 database-free runtime, state, outputs, events, and scheduler. | Runtime lifecycle, bounds, in-memory guarantees, or scheduler behavior changes. |
+| [Ktor web adapter](WEB-ADAPTER.md) | Implemented Phase 3 HTTP transport, redirect, public-web, robots, session, and origin-policy behavior. | Web transport, safety, robots, session, or web dependency behavior changes. |
 
 The full architecture plan remains [FINAL-PLAN.md](../plans/FINAL-PLAN.md). Root repository rules remain [AGENTS.md](../AGENTS.md).
 

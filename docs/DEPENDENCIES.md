@@ -10,25 +10,46 @@
 |---|---|---|---|
 | `trawler-parent` | `pom` | No | Reactor, version, dependency, and plugin management. It has no runtime dependencies. |
 | `trawler-core` | `jar` | Yes, once releases begin | Generic contracts/engine and lightweight official implementations. |
+| `trawler-web` | `jar` | Yes, once releases begin | Optional Ktor/CIO HTTP transport and replaceable web policies. |
 
 Future module ownership is defined in [`MODULES.md`](MODULES.md). Modules are not created before their implementation begins.
 
 The ownership and purpose descriptions below include approved future core
 capabilities. Phase 1 contracts and the Phase 2 database-free runtime are
-implemented in `trawler-core`; durable persistence, technology-specific
-transport, and adapter capabilities described below remain planned and do not
-justify additional dependencies.
+implemented in `trawler-core`; Phase 3 adds the implemented optional
+`trawler-web` adapter. Durable persistence and later specialized adapters
+remain planned and do not justify additional dependencies.
 
 All project modules use the group ID `com.rmjtromp.trawler` and inherit the coordinated version from `trawler-parent`.
 
-## Current direct runtime dependencies
+## `trawler-core` direct runtime dependencies
 
 | Coordinate | Version source | Scope | Owner | Purpose | Why retained |
 |---|---|---|---|---|---|
 | `org.jetbrains.kotlin:kotlin-stdlib` | `kotlin.version` in parent `pom.xml` | Compile | `trawler-core` | Kotlin runtime and standard APIs. | Required for all Kotlin production code. |
 | `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `coroutines.version` in parent `pom.xml` | Compile | `trawler-core` | Structured coroutine scopes, cancellation, suspending lifecycle, `Flow`, channels, synchronization primitives, bounded in-memory coordination, and the bundled scheduler. | Structured concurrency and the Phase 2 database-free runtime are current core needs. |
 
-No other runtime dependencies are approved at present.
+`trawler-core` still has only Kotlin standard library and coroutines as direct
+runtime dependencies. The current adapter dependency inventory is separate so
+core consumers do not inherit Ktor.
+
+## `trawler-web` direct runtime dependencies
+
+| Coordinate | Version source | Scope | Owner | Purpose | Why retained |
+|---|---|---|---|---|---|
+| `com.rmjtromp.trawler:trawler-core` | `${project.version}` in parent `pom.xml` | Compile | `trawler-web` | Core transport, model, lifecycle, policy, and response contracts. | The adapter must implement the existing core boundary and cannot duplicate it. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `ktor.coroutines.version` in parent `pom.xml` (`1.11.0`) | Compile | `trawler-web` | Suspending bounded DNS dispatch, policy synchronization, pacing, and cancellation. | Ktor 3.5.1 is compiled against coroutines 1.11.0; the adapter keeps that binary-compatible runtime isolated from core's 1.10.2 dependency tree. |
+| `io.ktor:ktor-client-cio-jvm` | `ktor.version` in parent `pom.xml` (`3.5.1`) | Compile | `trawler-web` | One owned CIO HTTP client, request/response adaptation, timeout plugins, and byte-channel access. | A real HTTP transport is the current Phase 3 implementation need; JDK URL APIs do not provide the required replaceable Ktor client boundary and timeout/body behavior. |
+
+The only new direct external technology dependency is Ktor CIO. Ktor is Apache
+License 2.0, is pinned through one parent property, and is maintained in its
+upstream repository. The web adapter's direct coroutines version is an explicit
+compatibility alignment with Ktor; `trawler-core` continues to resolve its
+existing `coroutines.version` (`1.10.2`) independently. The resolved graphs are
+reviewed with the dependency-tree command below; no retry,
+content-negotiation, Jackson, parser, database, browser, telemetry, or test
+artifact is declared directly. Removing `trawler-web` removes the Ktor graph
+without changing the core dependency tree.
 
 Phase 2 added no dependency or Maven-module change. The in-memory state and
 response stores, callback/flow outputs, generic policies, and coroutine
@@ -44,6 +65,38 @@ The following are not declared directly. They are present because Maven resolves
 |---|---|---|---|
 | `org.jetbrains:annotations:13.0` | Kotlin standard library | JVM annotation metadata used by Kotlin/JVM interoperability. | Do not declare directly unless a future implementation uses its API explicitly and documents that need. |
 | `org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2` | Kotlin coroutines core | JVM implementation selected by the multiplatform coroutines artifact. | Version follows `coroutines.version`; do not declare a second independent version. |
+
+The implemented `trawler-web` graph additionally resolves these unique runtime
+coordinates from `ktor-client-cio-jvm:3.5.1`. Core resolves coroutines 1.10.2;
+the web module explicitly resolves coroutines 1.11.0 so Ktor's runtime API is
+not down-selected by the core dependency path:
+
+| Coordinate | Introduced by | Purpose | Policy |
+|---|---|---|---|
+| `org.slf4j:slf4j-api:2.0.18` | Ktor client | Logging API used by Ktor internals. | Adapter transitive only; Trawler does not add a logging backend or expose SLF4J from core. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.11.0` | Web module direct coroutines dependency and Ktor | JVM coroutines implementation aligned with Ktor's compiled API. | Web-only runtime; it does not change `trawler-core`'s 1.10.2 graph. |
+| `io.ktor:ktor-client-core-jvm:3.5.1` | Ktor CIO | Ktor client request/response abstractions used by the CIO engine. | Keep transitive; only the CIO artifact is declared directly. |
+| `io.ktor:ktor-http-jvm:3.5.1` | Ktor client core | Ktor HTTP method, header, and content primitives. | Keep transitive and adapt into core models at the web boundary. |
+| `io.ktor:ktor-utils-jvm:3.5.1` | Ktor client core | Ktor shared utilities. | Keep transitive; no public core leakage. |
+| `org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.11.0` | Ktor HTTP | Ktor's internal serialization plumbing. | Not used to encode `T`; do not add a serializer module. |
+| `io.ktor:ktor-http-cio-jvm:3.5.1` | Ktor CIO | CIO HTTP engine integration. | Keep transitive; owned by `trawler-web`. |
+| `io.ktor:ktor-events-jvm:3.5.1` | Ktor client core | Ktor internal event support. | Keep transitive; it is not Trawler's observer/event contract. |
+| `io.ktor:ktor-websocket-serialization-jvm:3.5.1` | Ktor client core | Ktor client distribution's websocket serialization support. | Not used by this phase; remains transitively supplied by Ktor and is not exposed. |
+| `io.ktor:ktor-serialization-jvm:3.5.1` | Ktor websocket serialization | Ktor serialization integration plumbing. | Not used to serialize produced values; do not promote to a direct dependency. |
+| `io.ktor:ktor-sse-jvm:3.5.1` | Ktor client core | Ktor client SSE support transitively included by the selected client artifact. | Not used in Phase 3; keep transitive until a later implementation needs it. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-slf4j:1.11.0` | Ktor client core | Ktor coroutine/SLF4J context integration. | Adapter transitive only; it follows the web module's explicitly selected 1.11.0 runtime. |
+| `io.ktor:ktor-network-jvm:3.5.1` | Ktor HTTP CIO | Ktor socket/network primitives. | Keep transitive; the web adapter owns network execution. |
+| `io.ktor:ktor-io-jvm:3.5.1` | Ktor HTTP CIO | Ktor byte-channel I/O. | Keep transitive; response bytes are bounded before conversion to core `ResponseBody`. |
+| `org.jetbrains.kotlinx:kotlinx-io-core-jvm:0.9.0` | Ktor I/O | Kotlinx I/O implementation used by Ktor channels. | Keep transitive; no public core API leakage. |
+| `org.jetbrains.kotlinx:kotlinx-io-bytestring-jvm:0.9.0` | Kotlinx I/O core | Kotlinx I/O byte-string support. | Keep transitive; no direct use in core. |
+| `io.ktor:ktor-websockets-jvm:3.5.1` | Ktor websocket serialization | Ktor websocket primitives. | Not used by Phase 3; do not add a websocket feature or direct dependency. |
+| `io.ktor:ktor-network-tls-jvm:3.5.1` | Ktor network | Ktor TLS support for HTTPS. | Keep transitive; no TLS type leaks into core. |
+
+The exact resolved versions and mediation are checked with:
+
+```bash
+mvn -pl trawler-web -am dependency:tree -Dscope=runtime -Dverbose
+```
 
 The resolved tree was verified with `mvn dependency:tree`. Maven plugin implementation dependencies are build-tool internals and are not placed on Trawler's application runtime classpath; they are reviewed when an explicitly configured plugin is added or upgraded.
 
@@ -119,13 +172,13 @@ A missing answer blocks addition.
 
 ## Expected future dependency ownership
 
-These are architectural placements, not approval to add dependencies now:
+These are architectural placements for capabilities that are not implemented
+in the current delivery. They are not approval to add dependencies now:
 
 | Capability | Expected owner |
 |---|---|
 | Built-in coroutine scheduling | `trawler-core`; no additional dependency |
-| Ktor client/CIO | `trawler-web` |
-| Robots, public-web safety, RSS/Atom, sitemap | `trawler-web`; dependencies added only if implementation requires them |
+| RSS/Atom and sitemap parsing/discovery | `trawler-web`; dependencies added only if the Phase 5 implementation requires them |
 | PostgreSQL JDBC, HikariCP, Flyway | `trawler-postgres` |
 | Jackson or another codec | Only the adapter selecting that codec |
 | Jsoup | `trawler-web` or an example only if its actual parser requires it |
