@@ -11,14 +11,14 @@
 | `trawler-parent` | `pom` | No | Reactor, version, dependency, and plugin management. It has no runtime dependencies. |
 | `trawler-core` | `jar` | Yes, once releases begin | Generic contracts/engine and lightweight official implementations. |
 | `trawler-web` | `jar` | Yes, once releases begin | Optional Ktor/CIO HTTP transport, replaceable web policies, and bounded XML discovery. |
-| `trawler-postgres` | `jar` | Yes, once releases begin | Optional PostgreSQL operational state, leases, attempts, run history, request codecs, checkpoints, and recurring state. |
+| `trawler-postgres` | `jar` | Yes, once releases begin | Optional PostgreSQL operational state, response history, typed output, fenced outbox, leases, attempts, run history, request codecs, checkpoints, and recurring state. |
 
 Future module ownership is defined in [`MODULES.md`](MODULES.md). Modules are not created before their implementation begins.
 
 The ownership and purpose descriptions below include approved future core
-capabilities. Phases 1 through 5 are implemented in the current core/web/
-PostgreSQL sources. Response archival, produced-data output, and later
-specialized adapters remain planned and do not justify additional dependencies.
+capabilities. Phases 1 through 6 are implemented in the current core/web/
+PostgreSQL sources. Later specialized adapters remain planned and do not
+justify additional dependencies.
 
 All project modules use the group ID `com.rmjtromp.trawler` and inherit the coordinated version from `trawler-parent`.
 
@@ -79,13 +79,15 @@ requests, `T`, responses, or state payloads by Trawler. Replacing Flyway would
 remove that transitive graph only if another migration implementation supplied
 the same validated lifecycle.
 
-Phases 2 and 5 added no dependency or Maven-module change. The in-memory state
+Phases 2, 5, and 6 added no dependency or Maven-module change. The in-memory state
 and response stores, callback/flow outputs, generic policies, coroutine
 scheduler, checkpoint/harvest codecs, and pipeline health/admission policies
 use only the already-approved Kotlin standard library, coroutines, and JDK
 APIs. Phase 5 XML discovery likewise uses JDK StAX and gzip inside
-`trawler-web`; no parser or compression dependency was added. No serializer,
-database, HTTP, logging, telemetry, browser, or anti-bot type enters core.
+`trawler-web`; Phase 6 file response/output uses JDK NIO and caller codecs; no
+parser, compression, serializer, or output dependency was added. No
+serializer, database, HTTP, logging, telemetry, browser, or anti-bot type
+enters core.
 
 ## Resolved transitive runtime dependencies
 

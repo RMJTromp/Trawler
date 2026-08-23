@@ -15,7 +15,7 @@
     <packaging>jar</packaging>
 
     <name>Trawler PostgreSQL</name>
-    <description>Durable PostgreSQL crawl-state adapter for Trawler.</description>
+    <description>Durable PostgreSQL state, response, and output adapters for Trawler.</description>
 
     <dependencies>
         <dependency>

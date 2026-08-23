@@ -43,10 +43,10 @@ Trawler uses:
 
 The built-in coroutine scheduler, in-memory state, seed/Flow discovery,
 callback/no-output/flow output, in-memory response store, and generic policies
-ship in `trawler-core`. Phase 2 implements these selected built-ins; bounded
-JDK file response/output remains planned. They remain explicitly selected and
-replaceable and introduce no technology dependency beyond Kotlin, coroutines,
-and the JDK.
+ship in `trawler-core`. Phase 2 implemented the initial selected built-ins and
+Phase 6 added the bounded JDK file response/output implementations. They
+remain explicitly selected and replaceable and introduce no technology
+dependency beyond Kotlin, coroutines, and the JDK.
 
 Modules use one coordinated project version. A BOM is added when multiple runtime artifacts are published. Placeholder modules are forbidden.
 

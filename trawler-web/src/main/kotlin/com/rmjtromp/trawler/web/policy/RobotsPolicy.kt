@@ -176,7 +176,7 @@ public class CachingRobotsPolicy(
             fetcher.fetch(origin, configuration.userAgent)
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             RobotsFetchResult.Unavailable("robots-fetch-failed:${error::class.simpleName ?: "failure"}")
         }
         val entry = when (result) {

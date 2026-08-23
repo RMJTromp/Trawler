@@ -1,6 +1,6 @@
 # Trawler Web
 
-> **Status:** Phase 5 implemented; unreleased.
+> **Status:** Phase 3 and Phase 5 implemented; unreleased.
 
 `trawler-web` is the optional Ktor/CIO adapter for Trawler. It depends on
 `trawler-core` and owns HTTP execution, redirect processing, bounded response

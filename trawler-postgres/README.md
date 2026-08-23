@@ -1,18 +1,22 @@
 # Trawler PostgreSQL
 
-> **Status:** Phase 5 implemented; unreleased.
+> **Status:** Phase 6 implemented; unreleased.
 
-`trawler-postgres` is the optional durable operational-state adapter for
-Trawler. It depends on `trawler-core` and owns PostgreSQL connections, a
-bounded database dispatcher, Flyway migrations, request-state codecs, durable
-run summaries, resources, visit jobs, attempts, leases, retry eligibility,
+`trawler-postgres` is the optional durable state/response/output adapter for
+Trawler. It depends on `trawler-core` and owns PostgreSQL connections, bounded
+database dispatchers, Flyway migrations, request-state codecs, durable run
+summaries, resources, visit jobs, attempts, leases, retry eligibility,
 stale-run recovery, discovery checkpoints, harvest state, pipeline health,
-and eligibility overrides.
+eligibility overrides, append-only response history, caller-typed output
+history, fenced outbox delivery, and independent retention capabilities.
 
-It does not store produced values, extracted records, response bodies, or
-outbox data. Checkpoints and recurring state are operational coordination
-data, not user-data storage. The same pipeline can select
-`InMemoryCrawlStateStore` and omit this artifact.
+Response and output data are separate from crawl state. State, response,
+output, and outbox adapters each own a separate Flyway location and migration
+history table; selecting one does not require the tables or privileges of the
+others. There is no extracted-record table or
+universal JSON representation of `T`. The same pipeline can select
+`InMemoryCrawlStateStore`, omit response storage/output persistence, and omit
+this artifact entirely.
 
 The adapter owns its Hikari pool and must be registered both as the configured
 state store and as an engine lifecycle extension:
@@ -42,6 +46,16 @@ try {
 The database must be authorized by the host. Startup applies only the
 adapter-owned migrations. No automated tests or test dependencies are
 included; tests require explicit project-owner authorization.
+
+See [`docs/RESPONSE-OUTPUT.md`](../docs/RESPONSE-OUTPUT.md) for response
+codec ownership, replay isolation, PostgreSQL response/output/outbox schemas, typed output
+acknowledgement, outbox fencing, duplicate windows, lineage, and retention.
+
+`PostgresResponseStore`, `PostgresOutput<T>`, and
+`PostgresOutboxOutput<T>` each use caller-supplied versioned codecs and must
+also be registered as lifecycle extensions when selected. Outbox delivery is
+explicitly invoked with `deliverPending`; the adapter does not start a hidden
+delivery coroutine or create a network client.
 
 ## Build
 

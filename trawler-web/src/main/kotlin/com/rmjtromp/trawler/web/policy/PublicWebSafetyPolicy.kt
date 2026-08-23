@@ -73,7 +73,7 @@ public class PublicWebSafetyPolicy(
         }
         val addresses = try {
             resolver.resolve(host)
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             if (error is kotlinx.coroutines.CancellationException) throw error
             throw WebAddressResolutionException(host, error)
         }

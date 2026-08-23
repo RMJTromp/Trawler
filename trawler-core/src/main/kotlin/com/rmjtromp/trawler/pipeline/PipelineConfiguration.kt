@@ -32,6 +32,13 @@ import com.rmjtromp.trawler.discovery.ResumableDiscovery
 import com.rmjtromp.trawler.discovery.StatelessHarvestStrategy
 import com.rmjtromp.trawler.response.ResponseStore
 import com.rmjtromp.trawler.response.ResponseStoreCapability
+import com.rmjtromp.trawler.response.ResponseHistoryStore
+import com.rmjtromp.trawler.response.ResponseReplayStore
+import com.rmjtromp.trawler.response.ResponseRetentionStore
+import com.rmjtromp.trawler.response.ResponseCapturePolicy
+import com.rmjtromp.trawler.response.CaptureResponsesWhenConfigured
+import com.rmjtromp.trawler.response.ResponseCachePolicy
+import com.rmjtromp.trawler.response.NoResponseCachePolicy
 import com.rmjtromp.trawler.state.CrawlStateCapability
 import com.rmjtromp.trawler.state.CrawlStateStore
 import com.rmjtromp.trawler.state.AttemptStore
@@ -666,6 +673,8 @@ public class EngineConfiguration(
     pipelines: List<Pipeline<*>>,
     stateStore: CrawlStateStore? = null,
     responseStore: ResponseStore? = null,
+    responseCapturePolicy: ResponseCapturePolicy = CaptureResponsesWhenConfigured,
+    responseCachePolicy: ResponseCachePolicy = NoResponseCachePolicy,
     observers: List<Observer> = emptyList(),
     extensions: List<ExtensionLifecycle> = emptyList(),
     clock: Clock = SystemClock,
@@ -690,6 +699,8 @@ public class EngineConfiguration(
         clock = clock,
     )
     public val responseStore: ResponseStore? = responseStore
+    public val responseCapturePolicy: ResponseCapturePolicy = responseCapturePolicy
+    public val responseCachePolicy: ResponseCachePolicy = responseCachePolicy
     public val observers: List<Observer> = immutableSnapshot(observers)
     public val extensions: List<ExtensionLifecycle> = immutableSnapshot(extensions)
     public val clock: Clock = clock
@@ -744,6 +755,10 @@ public class EngineConfigurationBuilder public constructor() {
     private var stateStoreConfigured = false
     private var responseStore: ResponseStore? = null
     private var responseStoreConfigured = false
+    private var responseCapturePolicy: ResponseCapturePolicy = CaptureResponsesWhenConfigured
+    private var responseCaptureConfigured = false
+    private var responseCachePolicy: ResponseCachePolicy = NoResponseCachePolicy
+    private var responseCacheConfigured = false
     private var defaultTransportRouter: TransportRouter? = null
     private var defaultTransportConfigured = false
     private var defaultPolicies: PipelinePolicies? = null
@@ -784,6 +799,36 @@ public class EngineConfigurationBuilder public constructor() {
     public fun replaceResponseStore(store: ResponseStore): EngineConfigurationBuilder {
         responseStore = store
         responseStoreConfigured = true
+        return this
+    }
+
+    /** Sets the response-capture policy once; use [replaceResponsePolicy] to replace it. */
+    public fun responsePolicy(policy: ResponseCapturePolicy): EngineConfigurationBuilder {
+        recordEngineSingle("responsePolicy", responseCaptureConfigured)
+        responseCapturePolicy = policy
+        responseCaptureConfigured = true
+        return this
+    }
+
+    /** Explicitly replaces the response-capture policy. */
+    public fun replaceResponsePolicy(policy: ResponseCapturePolicy): EngineConfigurationBuilder {
+        responseCapturePolicy = policy
+        responseCaptureConfigured = true
+        return this
+    }
+
+    /** Sets the response-cache policy once; use [replaceResponseCache] to replace it. */
+    public fun responseCache(policy: ResponseCachePolicy): EngineConfigurationBuilder {
+        recordEngineSingle("responseCache", responseCacheConfigured)
+        responseCachePolicy = policy
+        responseCacheConfigured = true
+        return this
+    }
+
+    /** Explicitly replaces the response-cache policy. */
+    public fun replaceResponseCache(policy: ResponseCachePolicy): EngineConfigurationBuilder {
+        responseCachePolicy = policy
+        responseCacheConfigured = true
         return this
     }
 
@@ -939,6 +984,8 @@ public class EngineConfigurationBuilder public constructor() {
             pipelines = prepared.registry.pipelines,
             stateStore = prepared.stateStore,
             responseStore = responseStore,
+            responseCapturePolicy = responseCapturePolicy,
+            responseCachePolicy = responseCachePolicy,
             observers = immutableSnapshot(observers),
             extensions = immutableSnapshot(extensions),
             clock = clock,
@@ -983,6 +1030,8 @@ public class EngineConfigurationBuilder public constructor() {
         issues += ConfigurationValidator.validateEngineSelections(
             stateStore = effectiveStateStore,
             responseStore = responseStore,
+            responseCapturePolicy = responseCapturePolicy,
+            responseCachePolicy = responseCachePolicy,
             observers = observers,
             extensions = extensions,
             requiredStateCapabilities = requiredStateCapabilities,
@@ -1019,6 +1068,10 @@ public class TrawlerEngine public constructor(
 
     /** Runs selected pipelines once and returns an aggregate lifecycle result. */
     public suspend fun runOnce(request: RunRequest = RunRequest()): RunResult = runtime.runOnce(request)
+
+    /** Replays stored responses through a registered typed pipeline without network or crawl jobs. */
+    public suspend fun <T : Any> replay(selection: ReplaySelection<T>): ReplayResult =
+        runtime.replay(selection)
 
     /**
      * Waits for all finite engine runs currently owned by this engine to
@@ -1081,6 +1134,10 @@ internal interface PipelineRegistration {
     val pipelineId: String
     fun asPipeline(): Pipeline<*>
     suspend fun execute(context: PipelineExecutionContext): PipelineRunResult
+    suspend fun executeReplay(
+        context: ReplayExecutionContext,
+        responses: List<com.rmjtromp.trawler.response.StoredResponse>,
+    ): ReplayResult
 }
 
 /**
@@ -1097,6 +1154,11 @@ internal class TypedPipelineRegistration<T : Any>(
 
     override suspend fun execute(context: PipelineExecutionContext): PipelineRunResult =
         executeTypedPipeline(typedPipeline, context)
+
+    override suspend fun executeReplay(
+        context: ReplayExecutionContext,
+        responses: List<com.rmjtromp.trawler.response.StoredResponse>,
+    ): ReplayResult = executeTypedReplay(typedPipeline, context, responses)
 }
 
 private interface PipelineRegistrationSpec {
@@ -1153,6 +1215,8 @@ internal object ConfigurationValidator {
         validateEngineSelections(
             stateStore = configuration.stateStore,
             responseStore = configuration.responseStore,
+            responseCapturePolicy = configuration.responseCapturePolicy,
+            responseCachePolicy = configuration.responseCachePolicy,
             observers = configuration.observers,
             extensions = configuration.extensions,
             requiredStateCapabilities = configuration.requiredStateCapabilities,
@@ -1182,6 +1246,8 @@ internal object ConfigurationValidator {
     fun validateEngineSelections(
         stateStore: CrawlStateStore?,
         responseStore: ResponseStore?,
+        responseCapturePolicy: ResponseCapturePolicy,
+        responseCachePolicy: ResponseCachePolicy,
         observers: List<Observer>,
         extensions: List<ExtensionLifecycle>,
         requiredStateCapabilities: Set<CrawlStateCapability>,
@@ -1224,11 +1290,70 @@ internal object ConfigurationValidator {
                         message = "Response store '${it.id}' does not advertise required capability ${capability.name}",
                     )
                 }
+            validateResponseCapabilities(issues, it)
+        }
+        addIdentifierIssues(issues, "engine.responsePolicy", listOf(responseCapturePolicy.id))
+        if (responseCapturePolicy.requiresStore && responseStore == null) {
+            issues += ConfigurationIssue(
+                path = "engine.responsePolicy",
+                code = ConfigurationIssueCode.MISSING_RUNTIME_CAPABILITY,
+                message = "Response policy '${responseCapturePolicy.id}' requires an installed response store",
+            )
+        }
+        addIdentifierIssues(issues, "engine.responseCache", listOf(responseCachePolicy.id))
+        if (responseCachePolicy !== NoResponseCachePolicy && responseStore == null) {
+            issues += ConfigurationIssue(
+                path = "engine.responseCache",
+                code = ConfigurationIssueCode.MISSING_RUNTIME_CAPABILITY,
+                message = "Response cache policy '${responseCachePolicy.id}' requires an installed response store",
+            )
+        }
+        responseStore?.let { store ->
+            responseCachePolicy.requiredCapabilities
+                .filterNot(store.capabilities::contains)
+                .forEach { capability ->
+                    issues += ConfigurationIssue(
+                        path = "engine.responseCache.capabilities.${capability.name}",
+                        code = ConfigurationIssueCode.UNSUPPORTED_CAPABILITY,
+                        message = "Response cache policy '${responseCachePolicy.id}' requires capability ${capability.name}",
+                    )
+                }
         }
         addIdentifierIssues(issues, "engine.observers", observers.map { it.id })
         addIdentifierIssues(issues, "engine.extensions", extensions.map { it.id })
         addIdentifierIssues(issues, "engine.requestMiddleware", requestMiddlewares.map { it.id })
         addIdentifierIssues(issues, "engine.responseMiddleware", responseMiddlewares.map { it.id })
+        fun requireRegisteredLifecycle(path: String, extension: ExtensionLifecycle) {
+            if (extensions.none { it === extension }) {
+                issues += ConfigurationIssue(
+                    path = "$path.registration",
+                    code = ConfigurationIssueCode.MISSING_REQUIRED_EXTENSION,
+                    message = "Lifecycle '${extension.id}' must be registered as an engine extension",
+                )
+            }
+        }
+        if (stateStore is ExtensionLifecycle) {
+            requireRegisteredLifecycle("engine.stateStore", stateStore)
+        }
+        if (responseStore is ExtensionLifecycle) {
+            requireRegisteredLifecycle("engine.responseStore", responseStore)
+        }
+        pipelines.forEach { pipeline ->
+            pipeline.extensions
+                .filter { pipelineExtension -> extensions.any { engineExtension -> engineExtension === pipelineExtension } }
+                .forEach { extension ->
+                    issues += ConfigurationIssue(
+                        path = "pipeline[${pipeline.id}].extensions[${extension.id}]",
+                        code = ConfigurationIssueCode.DUPLICATE_ORDERED_EXTENSION,
+                        message = "Pipeline lifecycle '${extension.id}' cannot also be registered as an engine extension",
+                    )
+                }
+            pipeline.outputs.forEach { binding ->
+                if (binding.output is ExtensionLifecycle) {
+                    requireRegisteredLifecycle("pipeline[${pipeline.id}].output[${binding.output.id}]", binding.output)
+                }
+            }
+        }
 
         val pipelineIds = pipelines.map { it.id }
         val seenPipelineIds = mutableSetOf<String>()
@@ -1284,6 +1409,26 @@ internal object ConfigurationValidator {
             }
         }
         return sortedIssues(issues)
+    }
+
+    private fun validateResponseCapabilities(
+        issues: MutableList<ConfigurationIssue>,
+        store: ResponseStore,
+    ) {
+        val requirements = listOf(
+            ResponseStoreCapability.HISTORY to (store is ResponseHistoryStore),
+            ResponseStoreCapability.REPLAY to (store is ResponseReplayStore),
+            ResponseStoreCapability.TTL_EVICTION to (store is ResponseRetentionStore),
+        )
+        requirements
+            .filter { (capability, implemented) -> capability in store.capabilities && !implemented }
+            .forEach { (capability, _) ->
+                issues += ConfigurationIssue(
+                    path = "engine.responseStore.capabilities.${capability.name}",
+                    code = ConfigurationIssueCode.MISSING_RUNTIME_CAPABILITY,
+                    message = "Response store '${store.id}' advertises ${capability.name} but does not implement its focused capability",
+                )
+            }
     }
 
     private fun validateRuntimeStateCapabilities(
@@ -1360,6 +1505,10 @@ internal object ConfigurationValidator {
             "PIPELINE_ELIGIBILITY_OVERRIDES" to (
                 !store.capabilities.contains(CrawlStateCapability.PIPELINE_ELIGIBILITY_OVERRIDES) ||
                     store is com.rmjtromp.trawler.state.PipelineEligibilityOverrideStore
+                ),
+            "STATE_RETENTION" to (
+                !store.capabilities.contains(CrawlStateCapability.STATE_RETENTION) ||
+                    store is com.rmjtromp.trawler.state.CrawlStateRetentionStore
                 ),
         )
         requirements.filterNot { it.second }.forEach { (capability, _) ->

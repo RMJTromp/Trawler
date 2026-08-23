@@ -21,6 +21,7 @@ import com.rmjtromp.trawler.web.policy.RobotsUnavailableException
 import com.rmjtromp.trawler.web.policy.UnsupportedWebContentEncodingException
 import com.rmjtromp.trawler.web.policy.WebPolicyRejectedException
 import com.rmjtromp.trawler.web.policy.WebResponseHeaderValueTooLargeException
+import com.rmjtromp.trawler.web.policy.WebResponseHeaderNameTooLargeException
 import com.rmjtromp.trawler.web.policy.WebResponseHeadersTooLargeException
 import com.rmjtromp.trawler.web.policy.WebResponseTooLargeException
 import io.ktor.client.HttpClient
@@ -53,7 +54,8 @@ import java.util.zip.InflaterInputStream
 /**
  * Ktor-backed HTTP transport that adapts all responses into core models.
  *
- * The transport owns exactly the client supplied to it. Discovery, middleware,
+ * The transport owns the controlled client derived from the supplied client.
+ * Discovery, middleware,
  * and policies receive no client handle and therefore cannot create a hidden
  * network path. Retry is deliberately absent: non-2xx responses are returned
  * for classification and the core retry policy remains engine-visible.
@@ -218,6 +220,7 @@ public class KtorTransport private constructor(
 
     private suspend fun executeSingleHop(request: CrawlRequest): CrawlResponse {
         val requestBody = request.body
+        validateRequestTarget(request)
         validateRequestHeaders(request.headers)
         return client.prepareRequest {
             url(request.target)
@@ -309,6 +312,7 @@ public class KtorTransport private constructor(
     }
 
     private suspend fun executeSingleHop(request: CrawlRequest, maxBodyBytes: Int): CrawlResponse {
+        validateRequestTarget(request)
         validateRequestHeaders(request.headers)
         return client.prepareRequest {
             url(request.target)
@@ -341,8 +345,20 @@ public class KtorTransport private constructor(
         require(headers.entries.size <= configuration.maxRequestHeaders) {
             "HTTP request headers exceed configured limit of ${configuration.maxRequestHeaders} entries"
         }
+        require(headers.entries.all { it.name.length <= configuration.maxHeaderNameLength }) {
+            "HTTP request header name exceeds configured limit of ${configuration.maxHeaderNameLength} characters"
+        }
         require(headers.entries.all { it.value.length <= configuration.maxHeaderValueLength }) {
             "HTTP request header value exceeds configured limit of ${configuration.maxHeaderValueLength} characters"
+        }
+    }
+
+    private fun validateRequestTarget(request: CrawlRequest) {
+        require(request.target.length <= configuration.maxTargetLength) {
+            "HTTP request target exceeds configured limit of ${configuration.maxTargetLength} characters"
+        }
+        require(request.method.value.length <= configuration.maxMethodLength) {
+            "HTTP request method exceeds configured limit of ${configuration.maxMethodLength} characters"
         }
     }
 
@@ -352,6 +368,9 @@ public class KtorTransport private constructor(
     private fun copyHeaders(headers: io.ktor.http.Headers): CoreHeaders {
         val entries = ArrayList<Header>()
         headers.forEach { name, values ->
+            if (name.length > configuration.maxHeaderNameLength) {
+                throw WebResponseHeaderNameTooLargeException(configuration.maxHeaderNameLength)
+            }
             values.forEach { value ->
                 if (entries.size >= configuration.maxResponseHeaders) {
                     throw WebResponseHeadersTooLargeException(configuration.maxResponseHeaders)
@@ -502,9 +521,11 @@ public class KtorTransport private constructor(
         }
 
         /**
-         * Wraps a caller-owned Ktor client. The caller must configure
-         * `expectSuccess = false`, `followRedirects = false`, and the
-         * `HttpTimeout` plugin; [closeClient] controls ownership on shutdown.
+         * Wraps a caller-owned Ktor client by deriving a transport-owned client
+         * with redirects disabled, non-2xx responses inspectable, and the
+         * configured timeout plugin installed or replaced. The caller's client
+         * is closed only when [closeClient] is true; the derived client is
+         * always closed by this transport.
          */
         public fun fromClient(
             client: HttpClient,
@@ -513,13 +534,25 @@ public class KtorTransport private constructor(
             clock: Clock = SystemClock,
             closeClient: Boolean = false,
             ownedResources: List<AutoCloseable> = emptyList(),
-        ): KtorTransport = KtorTransport(
-            client = client,
+        ): KtorTransport {
+            val controlledClient = client.config {
+                expectSuccess = false
+                followRedirects = false
+                installOrReplace(HttpTimeout) {
+                    requestTimeoutMillis = configuration.requestTimeout.toMillis()
+                    connectTimeoutMillis = configuration.connectTimeout.toMillis()
+                    socketTimeoutMillis = configuration.socketTimeout.toMillis()
+                }
+            }
+            return KtorTransport(
+            client = controlledClient,
             configuration = configuration,
             policies = policies,
             clock = clock,
-            ownedResources = ownedResources + if (closeClient) listOf(client) else emptyList(),
-        )
+            ownedResources = ownedResources + listOf(controlledClient) +
+                if (closeClient) listOf(client) else emptyList(),
+            )
+        }
 
         private fun newClient(configuration: KtorTransportConfig): HttpClient = HttpClient(CIO) {
             expectSuccess = false

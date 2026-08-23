@@ -108,6 +108,11 @@ public class WebResponseHeaderValueTooLargeException(
     public val limit: Int,
 ) : IllegalStateException("HTTP response header value exceeds configured limit of $limit characters")
 
+/** Raised when one response header name exceeds the configured bound. */
+public class WebResponseHeaderNameTooLargeException(
+    public val limit: Int,
+) : IllegalStateException("HTTP response header name exceeds configured limit of $limit characters")
+
 /** Raised when a response uses an encoding this adapter deliberately rejects. */
 public class UnsupportedWebContentEncodingException(
     public val encoding: String,

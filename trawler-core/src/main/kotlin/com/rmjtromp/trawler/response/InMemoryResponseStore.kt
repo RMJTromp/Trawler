@@ -44,6 +44,7 @@ public class InMemoryResponseStore(
 
     override val capabilities: Set<ResponseStoreCapability> = setOf(
         ResponseStoreCapability.LOOKUP,
+        ResponseStoreCapability.CACHE,
         ResponseStoreCapability.HISTORY,
         ResponseStoreCapability.REPLAY,
         ResponseStoreCapability.TTL_EVICTION,
@@ -79,10 +80,11 @@ public class InMemoryResponseStore(
         }
     }
 
-    override suspend fun replay(query: ResponseReplayQuery, limit: Int): List<StoredResponse> = mutex.withLock {
+    override suspend fun replay(query: ResponseReplayQuery, limit: Int, pipelineId: String?): List<StoredResponse> = mutex.withLock {
         require(limit > 0) { "Replay limit must be positive" }
+        require(pipelineId == null || pipelineId.isNotBlank()) { "Replay pipeline ID must not be blank" }
         entries.values.asSequence()
-            .filter { stored -> matches(stored.response, query) }
+            .filter { stored -> (pipelineId == null || stored.pipelineId == pipelineId) && matches(stored, query) }
             .take(limit)
             .toList()
     }
@@ -102,12 +104,30 @@ public class InMemoryResponseStore(
         old.size.toLong()
     }
 
-    private fun matches(response: CrawlResponse, query: ResponseReplayQuery): Boolean = when (query) {
+    override suspend fun prune(request: ResponseRetentionRequest): ResponseRetentionResult = mutex.withLock {
+        val candidates = entries.values
+            .filter { it.response.receivedAt.isBefore(request.cutoff) }
+        val protected = candidates.count { it.reference in request.protectedReferences }
+        val removable = candidates
+            .asSequence()
+            .filterNot { it.reference in request.protectedReferences }
+            .take(request.maxEntries)
+            .map { it.reference }
+            .toList()
+        removable.forEach(entries::remove)
+        ResponseRetentionResult(
+            deleted = removable.size.toLong(),
+            protectedEntries = protected.toLong(),
+        )
+    }
+
+    private fun matches(stored: StoredResponse, query: ResponseReplayQuery): Boolean = when (query) {
+        is ResponseReplayQuery.ByReference -> stored.reference == query.reference
         is ResponseReplayQuery.ByRequestId ->
-            response.request.attributes[REQUEST_ID_ATTRIBUTE] == query.requestId
+            stored.response.request.attributes[REQUEST_ID_ATTRIBUTE] == query.requestId
 
         is ResponseReplayQuery.ByPipelineId ->
-            response.request.attributes[PIPELINE_ID_ATTRIBUTE] == query.pipelineId
+            stored.response.request.attributes[PIPELINE_ID_ATTRIBUTE] == query.pipelineId
     }
 
     public companion object {

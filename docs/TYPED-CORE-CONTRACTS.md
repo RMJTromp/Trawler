@@ -117,7 +117,7 @@ The effective cardinality is:
 | Output | Zero or more ordered `OutputBinding<T>` values. Each declares `REQUIRED` or `BEST_EFFORT`; no exactly-once claim is implied. |
 | Request/response middleware | Ordered chains. Engine defaults precede pipeline additions. `replaceRequestMiddleware`/`replaceResponseMiddleware` discard inherited chains before local additions. |
 | Observer | Zero or more, invoked in registration order. Live observation is not durable audit history. |
-| Lifecycle extension | Engine extensions precede pipeline extensions at startup; shutdown is reverse order. |
+| Lifecycle extension | Engine extensions precede pipeline extensions at startup; shutdown is reverse order. An object cannot be registered in both ownership lists because that would make start/stop cardinality ambiguous. |
 | Identity, deduplication, recrawl, failure classification, retry, pacing, concurrency, scope, authorization, ordering, and budget | Exactly one effective policy each. A pipeline-local policy method overrides the inherited bundle once; repeated local registration is invalid unless its `replace...` method is used. |
 
 Calling an `add...`, `discover`, `transform`, `validator`, `output`,

@@ -45,15 +45,10 @@ import com.rmjtromp.trawler.state.WorkQueueStatus
 import com.rmjtromp.trawler.state.WorkTransition
 import com.rmjtromp.trawler.state.WorkQueueMetrics
 import com.rmjtromp.trawler.state.WorkQueueMetricsStore
-import com.zaxxer.hikari.HikariConfig
-import com.zaxxer.hikari.HikariDataSource
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import org.flywaydb.core.Flyway
+import com.rmjtromp.trawler.state.CrawlStateRetentionRequest
+import com.rmjtromp.trawler.state.CrawlStateRetentionStore
+import com.rmjtromp.trawler.retention.RetentionCategory
+import com.rmjtromp.trawler.retention.RetentionSummary
 import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.ResultSet
@@ -61,10 +56,6 @@ import java.sql.Timestamp
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
-import java.util.concurrent.Executors
-import java.util.concurrent.ThreadFactory
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Durable PostgreSQL operational state for Trawler.
@@ -72,13 +63,16 @@ import java.util.concurrent.atomic.AtomicLong
  * The adapter owns one Hikari pool, one fixed dispatcher, and its Flyway
  * migration lifecycle. It implements only crawl state and durable run
  * summaries: request bytes are stored through [PostgresRequestCodecRegistry],
- * while produced values, response bodies, checkpoints, and output payloads
- * remain outside this module. All JDBC work runs on the adapter-owned bounded
+ * while produced values, response bodies, and output payloads remain outside
+ * this module. Discovery checkpoints and harvest state are opaque operational
+ * state owned by this adapter; they never represent produced user records.
+ * All JDBC work runs on the adapter-owned bounded
  * dispatcher and every statement receives a database timeout.
  *
  * Configure the store as both the engine's `stateStore` and an
- * `ExtensionLifecycle`. Startup migrates the configured schema and recovers
- * stale run summaries; shutdown closes the pool and dispatcher. Calls made
+ * `ExtensionLifecycle`. Startup migrates the configured schema; stale run
+ * recovery is an explicit engine-run operation that preserves normal lease
+ * rules. Shutdown closes the pool and dispatcher. Calls made
  * after shutdown fail, and cancellation stops awaiting the bounded adapter
  * operation while the JDBC statement timeout bounds the underlying call.
  */
@@ -106,35 +100,16 @@ public class PostgresCrawlStateStore(
     PipelineEligibilityOverrideStore,
     PipelineHealthStore,
     WorkQueueMetricsStore,
+    CrawlStateRetentionStore,
     ExtensionLifecycle {
 
     private val requestCodecs: PostgresRequestCodecRegistry = requestCodecs
     private val schemaSql: String = quoteIdentifier(configuration.schema)
-    private val lifecycleMutex = Mutex()
-    private val started = java.util.concurrent.atomic.AtomicBoolean(false)
-    private val threadSequence = AtomicLong(0)
-    private val executor = Executors.newFixedThreadPool(
-        configuration.databaseDispatcherParallelism,
-        PostgresThreadFactory(id, threadSequence),
-    )
-    private val databaseDispatcher: CoroutineDispatcher = executor.asCoroutineDispatcher()
-    private val dataSource: HikariDataSource = HikariDataSource(
-        HikariConfig().apply {
-            jdbcUrl = configuration.jdbcUrl
-            configuration.username?.let { username = it }
-            configuration.passwordCopy()?.let { passwordChars ->
-                try {
-                    password = passwordChars.concatToString()
-                } finally {
-                    passwordChars.fill('\u0000')
-                }
-            }
-            maximumPoolSize = configuration.maximumPoolSize
-            minimumIdle = configuration.minimumIdle
-            connectionTimeout = configuration.connectionTimeout.toMillis()
-            validationTimeout = configuration.connectionTimeout.toMillis().coerceAtMost(5_000)
-            poolName = configuration.poolName
-        },
+    private val resources = PostgresAdapterResources(
+        id,
+        configuration,
+        "classpath:db/migration/state",
+        "flyway_schema_history",
     )
 
     override val capabilities: Set<CrawlStateCapability> = setOf(
@@ -160,6 +135,13 @@ public class PostgresCrawlStateStore(
         CrawlStateCapability.QUEUE_WATERMARKS,
         CrawlStateCapability.PIPELINE_HEALTH,
         CrawlStateCapability.PIPELINE_ELIGIBILITY_OVERRIDES,
+        CrawlStateCapability.STATE_RETENTION,
+    )
+
+    override val retentionCategories: Set<RetentionCategory> = setOf(
+        RetentionCategory.COMPLETED_JOBS,
+        RetentionCategory.ATTEMPTS,
+        RetentionCategory.RUN_HISTORY,
     )
 
     init {
@@ -173,32 +155,14 @@ public class PostgresCrawlStateStore(
         }
     }
 
-    /** Applies adapter-owned migrations and recovers stale run summaries. */
+    /** Applies adapter-owned migrations; run-start recovery remains explicit. */
     override suspend fun start(context: ExtensionStartContext) {
-        lifecycleMutex.withLock {
-            if (started.get()) return
-            try {
-                withContext(NonCancellable) {
-                    migrateInternal()
-                    recoverStaleRunsInternal(clock.now(), configuration.staleRunAfter)
-                    started.set(true)
-                }
-            } catch (error: Throwable) {
-                closeResources()
-                throw error
-            }
-        }
+        resources.start()
     }
 
     /** Stops new operations and closes the adapter-owned pool and dispatcher. */
     override suspend fun stop(context: ExtensionStopContext) {
-        lifecycleMutex.withLock {
-            if (!started.compareAndSet(true, false)) {
-                closeResources()
-                return
-            }
-            withContext(NonCancellable) { closeResources() }
-        }
+        resources.stop()
     }
 
     /** Returns whether the adapter can apply the selected ordering exactly. */
@@ -241,24 +205,16 @@ public class PostgresCrawlStateStore(
         now: Instant,
         checkCapacity: Boolean,
     ): EnqueueResult {
+        val existingByIdentity = findActiveJobByIdentity(connection, context.pipelineId, identity.value)
+        if (existingByIdentity != null) return EnqueueResult.AlreadyActive(existingByIdentity)
+        if (checkCapacity && activeJobCount(connection) >= configuration.maxActiveJobs) {
+            return EnqueueResult.Rejected(
+                "PostgreSQL active work capacity ${configuration.maxActiveJobs} is full",
+            )
+        }
         val resourceId = upsertResource(connection, context.pipelineId, identity.value, now)
         val existing = findActiveJob(connection, resourceId)
         if (existing != null) return EnqueueResult.AlreadyActive(existing)
-        if (checkCapacity) {
-            val activeCount = connection.prepare(
-                "SELECT COUNT(*) FROM ${table("jobs")} WHERE status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')",
-            ).use { statement ->
-                statement.executeQuery().use { result ->
-                    require(result.next()) { "PostgreSQL active-job count returned no row" }
-                    result.getLong(1)
-                }
-            }
-            if (activeCount >= configuration.maxActiveJobs) {
-                return EnqueueResult.Rejected(
-                    "PostgreSQL active work capacity ${configuration.maxActiveJobs} is full",
-                )
-            }
-        }
         val workItemId = WorkItemId("postgres-work-${UUID.randomUUID()}")
         val inserted = connection.prepare(
             """
@@ -283,6 +239,27 @@ public class PostgresCrawlStateStore(
         }
         return if (inserted) EnqueueResult.Accepted(workItemId)
         else EnqueueResult.AlreadyActive(findActiveJob(connection, resourceId))
+    }
+
+    private fun findActiveJobByIdentity(
+        connection: Connection,
+        pipelineId: String,
+        identity: String,
+    ): WorkItemId? = connection.prepare(
+        """
+        SELECT j.job_id
+        FROM ${table("resources")} r
+        JOIN ${table("jobs")} j ON j.resource_id = r.resource_id
+        WHERE r.pipeline_id = ? AND r.identity_value = ?
+          AND j.status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')
+        LIMIT 1
+        """.trimIndent(),
+    ).use { statement ->
+        statement.setString(1, pipelineId)
+        statement.setString(2, identity)
+        statement.executeQuery().use { result ->
+            if (result.next()) WorkItemId(result.getString("job_id")) else null
+        }
     }
 
     override suspend fun enqueueAndCheckpoint(
@@ -403,7 +380,8 @@ public class PostgresCrawlStateStore(
         discoveryId: String,
     ): DiscoveryCheckpoint? = connection.prepare(
         """
-        SELECT revision, codec_id, codec_version, payload, generation_id,
+        SELECT revision, codec_id, codec_version, octet_length(payload) AS payload_size,
+               payload, generation_id,
                strategy_id, completed
         FROM ${table("discovery_checkpoints")}
         WHERE pipeline_id = ? AND discovery_id = ?
@@ -416,7 +394,9 @@ public class PostgresCrawlStateStore(
                 revision = result.getLong("revision"),
                 codecId = result.getString("codec_id"),
                 codecVersion = result.getInt("codec_version"),
-                payload = CheckpointPayload.from(result.getBytes("payload")),
+                payload = CheckpointPayload.from(
+                    result.getBoundedBytes("payload", result.getInt("payload_size"), configuration.maxCheckpointPayloadBytes, "checkpoint"),
+                ),
                 generationId = result.getString("generation_id"),
                 strategyId = result.getString("strategy_id"),
                 completed = result.getBoolean("completed"),
@@ -558,7 +538,8 @@ public class PostgresCrawlStateStore(
             requireIdentifier(strategyId, "harvest strategy ID")
             connection.prepare(
                 """
-                SELECT revision, codec_id, codec_version, payload, historical_complete
+                SELECT revision, codec_id, codec_version,
+                       octet_length(payload) AS payload_size, payload, historical_complete
                 FROM ${table("harvest_state")}
                 WHERE pipeline_id = ? AND strategy_id = ?
                 """.trimIndent(),
@@ -571,7 +552,9 @@ public class PostgresCrawlStateStore(
                         strategyId = strategyId,
                         codecId = result.getString("codec_id"),
                         codecVersion = result.getInt("codec_version"),
-                        payload = CheckpointPayload.from(result.getBytes("payload")),
+                        payload = CheckpointPayload.from(
+                            result.getBoundedBytes("payload", result.getInt("payload_size"), configuration.maxCheckpointPayloadBytes, "harvest state"),
+                        ),
                         historicalComplete = result.getBoolean("historical_complete"),
                     )
                 }
@@ -857,6 +840,7 @@ public class PostgresCrawlStateStore(
                     """
                     SELECT j.job_id, j.pipeline_id, r.identity_value,
                            j.request_codec_id, j.request_codec_version,
+                           octet_length(j.request_payload) AS request_payload_size,
                            j.request_payload, j.enqueued_at, j.sequence
                     FROM ${table("jobs")} j
                     JOIN ${table("resources")} r ON r.resource_id = j.resource_id
@@ -876,15 +860,21 @@ public class PostgresCrawlStateStore(
                     val claimed = mutableListOf<LeasedWork>()
                     while (result.next()) {
                         val jobId = WorkItemId(result.getString("job_id"))
-                        val token = nextLeaseToken(connection)
-                        val expiresAt = now.plus(configuration.leaseDuration)
-                        updateLease(connection, jobId, token, ownerId, expiresAt, now)
                         val descriptor = PostgresCodecDescriptor(
                             result.getString("request_codec_id"),
                             result.getInt("request_codec_version"),
                         )
-                        val request = requestCodecs.decode(descriptor, result.getBytes("request_payload"))
+                        val requestPayload = result.getBoundedBytes(
+                            "request_payload",
+                            result.getInt("request_payload_size"),
+                            configuration.maxEncodedRequestBytes,
+                            "request",
+                        )
+                        val request = requestCodecs.decode(descriptor, requestPayload)
                         validateRequest(request)
+                        val token = nextLeaseToken(connection)
+                        val expiresAt = now.plus(configuration.leaseDuration)
+                        updateLease(connection, jobId, token, ownerId, expiresAt, now)
                         claimed += LeasedWork(
                             workItemId = jobId,
                             request = request,
@@ -1282,6 +1272,112 @@ public class PostgresCrawlStateStore(
         }
     }
 
+    /**
+     * Prunes one terminal operational category in a bounded transaction.
+     * Active jobs, open attempts, and RUNNING summaries are never eligible.
+     * Attempts are removed before jobs, and child pipeline summaries before
+     * their engine summary, preserving the state adapter's foreign keys.
+     */
+    override suspend fun prune(request: CrawlStateRetentionRequest): RetentionSummary {
+        val limit = minOf(request.maxEntries, configuration.maxRetentionRows)
+        return transaction { connection ->
+            val deleted = when (request.category) {
+                RetentionCategory.ATTEMPTS -> pruneAttempts(connection, request.cutoff, limit)
+                RetentionCategory.COMPLETED_JOBS -> pruneCompletedJobs(connection, request.cutoff, limit)
+                RetentionCategory.RUN_HISTORY -> pruneRunHistory(connection, request.cutoff, limit)
+                else -> error("Unsupported PostgreSQL state retention category ${request.category}")
+            }
+            RetentionSummary(request.category, deleted.toLong())
+        }
+    }
+
+    private fun pruneAttempts(connection: Connection, cutoff: Instant, limit: Int): Int =
+        connection.prepare(
+            """
+            WITH candidates AS (
+                SELECT attempt_id
+                FROM ${table("attempts")}
+                WHERE finished_at IS NOT NULL AND finished_at < ?
+                ORDER BY finished_at, attempt_id
+                LIMIT ?
+            )
+            DELETE FROM ${table("attempts")} a
+            USING candidates
+            WHERE a.attempt_id = candidates.attempt_id
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setTimestamp(1, timestamp(cutoff))
+            statement.setInt(2, limit)
+            statement.executeUpdate()
+        }
+
+    private fun pruneCompletedJobs(connection: Connection, cutoff: Instant, limit: Int): Int =
+        connection.prepare(
+            """
+            WITH candidates AS (
+                SELECT j.job_id
+                FROM ${table("jobs")} j
+                WHERE j.status IN ('SUCCEEDED', 'FAILED', 'SKIPPED', 'CANCELLED', 'ABANDONED')
+                  AND j.finished_at IS NOT NULL AND j.finished_at < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ${table("attempts")} a WHERE a.job_id = j.job_id
+                  )
+                ORDER BY j.finished_at, j.sequence
+                LIMIT ?
+            )
+            DELETE FROM ${table("jobs")} j
+            USING candidates
+            WHERE j.job_id = candidates.job_id
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setTimestamp(1, timestamp(cutoff))
+            statement.setInt(2, limit)
+            statement.executeUpdate()
+        }
+
+    private fun pruneRunHistory(connection: Connection, cutoff: Instant, limit: Int): Int {
+        val pipelineRows = connection.prepare(
+            """
+            WITH candidates AS (
+                SELECT pipeline_run_id
+                FROM ${table("pipeline_runs")}
+                WHERE status <> 'RUNNING' AND completed_at IS NOT NULL AND completed_at < ?
+                ORDER BY completed_at, pipeline_run_id
+                LIMIT ?
+            )
+            DELETE FROM ${table("pipeline_runs")} p
+            USING candidates
+            WHERE p.pipeline_run_id = candidates.pipeline_run_id
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setTimestamp(1, timestamp(cutoff))
+            statement.setInt(2, limit)
+            statement.executeUpdate()
+        }
+        val engineRows = connection.prepare(
+            """
+            WITH candidates AS (
+                SELECT e.engine_run_id
+                FROM ${table("engine_runs")} e
+                WHERE e.status <> 'RUNNING' AND e.completed_at IS NOT NULL AND e.completed_at < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ${table("pipeline_runs")} p WHERE p.engine_run_id = e.engine_run_id
+                  )
+                ORDER BY e.completed_at, e.engine_run_id
+                LIMIT ?
+            )
+            DELETE FROM ${table("engine_runs")} e
+            USING candidates
+            WHERE e.engine_run_id = candidates.engine_run_id
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setTimestamp(1, timestamp(cutoff))
+            statement.setInt(2, limit)
+            statement.executeUpdate()
+        }
+        return pipelineRows + engineRows
+    }
+
     override suspend fun cancelQueued(
         pipelineId: String,
         transition: WorkTransition,
@@ -1341,7 +1437,12 @@ public class PostgresCrawlStateStore(
             "Stale-run threshold must be positive"
         }
         ensureStarted()
-        return recoverStaleRunsInternal(now, staleAfter)
+        val effectiveStaleAfter = if (staleAfter < configuration.staleRunAfter) {
+            configuration.staleRunAfter
+        } else {
+            staleAfter
+        }
+        return recoverStaleRunsInternal(now, effectiveStaleAfter)
     }
 
     override suspend fun startEngineRun(
@@ -1447,7 +1548,7 @@ public class PostgresCrawlStateStore(
     }
 
     private suspend fun recoverStaleRunsInternal(now: Instant, staleAfter: Duration): Int =
-        transactionInternal { connection ->
+        transaction { connection ->
             val cutoff = now.minus(staleAfter)
             recoverStalePipelineRuns(connection, cutoff, now) +
                 recoverStaleEngineRuns(connection, cutoff, now)
@@ -1664,70 +1765,16 @@ public class PostgresCrawlStateStore(
             }
         }
 
-    private suspend fun migrateInternal() {
-        withContext(databaseDispatcher) {
-            Flyway.configure()
-                .dataSource(dataSource)
-                .locations("classpath:db/migration")
-                .schemas(configuration.schema)
-                .defaultSchema(configuration.schema)
-                .table("flyway_schema_history")
-                .createSchemas(true)
-                .load()
-                .migrate()
-        }
-    }
-
     private suspend fun <T> database(block: (Connection) -> T): T {
-        ensureStarted()
-        return databaseInternal(block)
+        return resources.database(block)
     }
-
-    private suspend fun <T> databaseInternal(block: (Connection) -> T): T =
-        withContext(databaseDispatcher) {
-            dataSource.connection.use { connection ->
-                block(connection)
-            }
-        }
 
     private suspend fun <T> transaction(block: (Connection) -> T): T {
-        ensureStarted()
-        return transactionInternal(block)
+        return resources.transaction(block)
     }
-
-    private suspend fun <T> transactionInternal(block: (Connection) -> T): T =
-        withContext(databaseDispatcher) {
-            dataSource.connection.use { connection ->
-                connection.autoCommit = false
-                try {
-                    val result = block(connection)
-                    connection.commit()
-                    result
-                } catch (error: Throwable) {
-                    try {
-                        connection.rollback()
-                    } catch (rollbackFailure: Throwable) {
-                        error.addSuppressed(rollbackFailure)
-                    }
-                    throw error
-                }
-            }
-        }
 
     private fun ensureStarted() {
-        check(started.get()) {
-            "PostgreSQL state store '$id' is not started"
-        }
-    }
-
-    private fun closeResources() {
-        dataSource.close()
-        executor.shutdownNow()
-        try {
-            executor.awaitTermination(5, TimeUnit.SECONDS)
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
+        resources.requireStarted()
     }
 
     private fun requireIdentifier(value: String, label: String) {
@@ -1795,17 +1842,6 @@ public class PostgresCrawlStateStore(
             .coerceIn(1L, Int.MAX_VALUE.toLong())
             .toInt()
 
-    private class PostgresThreadFactory(
-        private val storeId: String,
-        private val sequence: AtomicLong,
-    ) : ThreadFactory {
-        override fun newThread(runnable: Runnable): Thread = Thread(
-            runnable,
-            "$storeId-db-${sequence.incrementAndGet()}",
-        ).apply {
-            isDaemon = true
-        }
-    }
 }
 
 private fun requireUtf8Bound(value: String, maximumBytes: Int, label: String) {

@@ -11,6 +11,8 @@ import java.util.Collections
  *
  * These values bound admission, pending direct runs, discovery, worker
  * batches, output batches, lifecycle waits, and the default run duration.
+ * Request/response metadata limits also bound the in-memory object graph;
+ * bodies are bounded separately by the byte limits below.
  * Adapter implementations may
  * impose tighter limits, but the engine never silently grows these queues or
  * batches. Durations are used for runtime lifecycle decisions; scheduler
@@ -28,12 +30,21 @@ public data class EngineRuntimeOptions(
     public val maxValuesPerResponse: Int = 1_024,
     public val maxRequestBodyBytes: Int = 8_388_608,
     public val maxResponseBodyBytes: Int = 8_388_608,
+    public val maxTargetBytes: Int = 16 * 1_024,
+    public val maxMethodBytes: Int = 256,
+    public val maxHeaderCount: Int = 256,
+    public val maxHeaderNameBytes: Int = 1_024,
+    public val maxHeaderValueBytes: Int = 16 * 1_024,
+    public val maxAttributeCount: Int = 256,
+    public val maxAttributeNameBytes: Int = 1_024,
+    public val maxAttributeValueBytes: Int = 16 * 1_024,
     public val maxProducedValuesPerRun: Int = 100_000,
     public val maxAttemptsPerWorkItem: Int = 3,
     public val maxPendingRuns: Int = 64,
     public val workerCount: Int = 4,
     public val claimBatchSize: Int = 1,
     public val maxOutputBatchSize: Int = 128,
+    public val maxReplayResponsesPerRun: Int = 1_024,
     public val leaseDuration: Duration = Duration.ofMinutes(5),
     public val runTimeout: Duration = Duration.ofMinutes(15),
     public val awaitIdleTimeout: Duration = Duration.ofSeconds(30),
@@ -59,11 +70,22 @@ public data class EngineRuntimeOptions(
         require(maxValuesPerResponse > 0) { "Runtime response value bound must be positive" }
         require(maxRequestBodyBytes > 0) { "Runtime request body bound must be positive" }
         require(maxResponseBodyBytes > 0) { "Runtime response body bound must be positive" }
+        require(maxTargetBytes > 0) { "Runtime target bound must be positive" }
+        require(maxMethodBytes > 0) { "Runtime method bound must be positive" }
+        require(maxHeaderCount >= 0) { "Runtime header count bound must not be negative" }
+        require(maxHeaderNameBytes > 0) { "Runtime header-name bound must be positive" }
+        require(maxHeaderValueBytes >= 0) { "Runtime header-value bound must not be negative" }
+        require(maxAttributeCount >= 0) { "Runtime attribute count bound must not be negative" }
+        require(maxAttributeNameBytes > 0) { "Runtime attribute-name bound must be positive" }
+        require(maxAttributeValueBytes >= 0) { "Runtime attribute-value bound must not be negative" }
         require(maxProducedValuesPerRun > 0) { "Runtime produced-value bound must be positive" }
         require(workerCount > 0) { "Runtime worker count must be positive" }
         require(maxPendingRuns > 0) { "Runtime pending-run bound must be positive" }
         require(claimBatchSize > 0) { "Runtime claim batch size must be positive" }
         require(maxOutputBatchSize > 0) { "Runtime output batch size must be positive" }
+        require(maxReplayResponsesPerRun > 0) {
+            "Runtime replay response bound must be positive"
+        }
         require(!leaseDuration.isNegative && !leaseDuration.isZero) {
             "Runtime lease duration must be positive"
         }

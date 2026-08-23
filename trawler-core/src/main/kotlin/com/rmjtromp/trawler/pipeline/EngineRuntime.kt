@@ -15,7 +15,10 @@ import com.rmjtromp.trawler.event.ObserverResult
 import com.rmjtromp.trawler.extension.ExtensionStartContext
 import com.rmjtromp.trawler.extension.ExtensionStopContext
 import com.rmjtromp.trawler.extension.ExtensionStopReason
+import com.rmjtromp.trawler.extension.ExtensionLifecycle
+import com.rmjtromp.trawler.extension.ReplayLifecycle
 import com.rmjtromp.trawler.model.ContextAttribute
+import com.rmjtromp.trawler.model.ContextAttributes
 import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.model.CrawlResponse
 import com.rmjtromp.trawler.model.CrawlerContext
@@ -45,6 +48,13 @@ import com.rmjtromp.trawler.policy.PipelineEligibilityDecision
 import com.rmjtromp.trawler.policy.PipelineHealthObservation
 import com.rmjtromp.trawler.policy.PipelineHealthOutcome
 import com.rmjtromp.trawler.response.ResponseStore
+import com.rmjtromp.trawler.response.ResponseReplayStore
+import com.rmjtromp.trawler.response.ResponseStoreCapability
+import com.rmjtromp.trawler.response.ResponseCacheDecision
+import com.rmjtromp.trawler.response.ResponseCacheContext
+import com.rmjtromp.trawler.response.ResponseCaptureContext
+import com.rmjtromp.trawler.response.ResponseCaptureDecision
+import com.rmjtromp.trawler.response.ResponseStoreLifecycle
 import com.rmjtromp.trawler.schedule.ScheduleSubmission
 import com.rmjtromp.trawler.schedule.Scheduler
 import com.rmjtromp.trawler.schedule.SchedulerEvent
@@ -170,12 +180,261 @@ internal class EngineRuntime(
         }
     }
 
+    /**
+     * Reprocesses bounded stored responses through one registered typed
+     * pipeline. Replay is serialized with ordinary runs, performs no network
+     * call, and never enqueues or transitions crawl work.
+     */
+    suspend fun <T : Any> replay(selection: ReplaySelection<T>): ReplayResult = coroutineScope {
+        val replay = async(start = CoroutineStart.LAZY) {
+            replaySerialized(selection)
+        }
+        lifecycleMutex.withLock {
+            ensureAcceptingRuns()
+            if (activeRuns.size >= configuration.runtimeOptions.maxPendingRuns) {
+                throw IllegalStateException("Engine pending-run capacity is full")
+            }
+            activeRuns += replay
+        }
+        replay.start()
+        try {
+            replay.await()
+        } finally {
+            lifecycleMutex.withLock { activeRuns.remove(replay) }
+        }
+    }
+
+    private suspend fun <T : Any> replaySerialized(selection: ReplaySelection<T>): ReplayResult = runMutex.withLock {
+        if (selection.query is com.rmjtromp.trawler.response.ResponseReplayQuery.ByPipelineId &&
+            selection.query.pipelineId != selection.pipeline.id
+        ) {
+            throw InvalidConfigurationException(
+                listOf(
+                    ConfigurationIssue(
+                        path = "replay.query.pipelineId",
+                        code = ConfigurationIssueCode.MISSING_REQUIRED_EXTENSION,
+                        message = "Replay query pipeline ID must match the selected pipeline",
+                    ),
+                ),
+            )
+        }
+        val store = configuration.responseStore
+        val replayStore = store as? ResponseReplayStore
+            ?: throw InvalidConfigurationException(
+                listOf(
+                    ConfigurationIssue(
+                        path = "engine.responseStore.replay",
+                        code = ConfigurationIssueCode.UNSUPPORTED_CAPABILITY,
+                        message = "Replay requires a selected response store implementing ResponseReplayStore",
+                    ),
+                ),
+            )
+        if (store.capabilities.contains(ResponseStoreCapability.REPLAY).not()) {
+            throw InvalidConfigurationException(
+                listOf(
+                    ConfigurationIssue(
+                        path = "engine.responseStore.capabilities.REPLAY",
+                        code = ConfigurationIssueCode.UNSUPPORTED_CAPABILITY,
+                        message = "Response store '${store.id}' does not advertise REPLAY",
+                    ),
+                ),
+            )
+        }
+        require(selection.limit <= configuration.runtimeOptions.maxReplayResponsesPerRun) {
+            "Replay limit exceeds the configured runtime bound"
+        }
+        val registration = configuration.pipelineRegistrations.firstOrNull {
+            it.asPipeline() === selection.pipeline
+        } ?: throw IllegalArgumentException(
+            "Replay selection pipeline '${selection.pipeline.id}' is not registered in this engine",
+        )
+        validateReplayLifecycle(selection.pipeline, store)
+        val replayLifecycle = beginReplayLifecycle()
+        var replayFailure: Throwable? = null
+        var stopReason = ExtensionStopReason.PIPELINE_RUN_COMPLETED
+        try {
+            val responses = replayStore.replay(
+                query = selection.query,
+                limit = selection.limit,
+                pipelineId = selection.pipeline.id,
+            )
+            require(responses.size <= selection.limit) {
+                "Response replay store returned more responses than requested"
+            }
+            val foreignResponse = responses.firstOrNull { it.pipelineId != selection.pipeline.id }
+            if (foreignResponse != null) {
+                throw InvalidConfigurationException(
+                    listOf(
+                        ConfigurationIssue(
+                            path = "replay.responseStore.pipelineOwnership",
+                            code = ConfigurationIssueCode.UNSUPPORTED_CAPABILITY,
+                            message = "Response replay returned a response not owned by pipeline '${selection.pipeline.id}'",
+                        ),
+                    ),
+                )
+            }
+            val startedAt = configuration.clock.now()
+            val executionContext = ReplayExecutionContext(
+                configuration = configuration,
+                pipelineId = selection.pipeline.id,
+                engineRunId = "replay-engine-${UUID.randomUUID()}",
+                pipelineRunId = "replay-pipeline-${UUID.randomUUID()}",
+                startedAt = startedAt,
+                responseStore = store,
+                emit = ::emit,
+            )
+            val result = registration.executeReplay(executionContext, responses)
+            stopReason = when (result.status) {
+                RunStatus.CANCELLED -> ExtensionStopReason.CANCELLATION
+                RunStatus.FAILED -> ExtensionStopReason.PIPELINE_RUN_FAILED
+                RunStatus.ABANDONED -> ExtensionStopReason.PIPELINE_RUN_ABANDONED
+                RunStatus.COMPLETED -> ExtensionStopReason.PIPELINE_RUN_COMPLETED
+                RunStatus.RUNNING -> ExtensionStopReason.PIPELINE_RUN_FAILED
+            }
+            result
+        } catch (cancellation: CancellationException) {
+            replayFailure = cancellation
+            stopReason = ExtensionStopReason.CANCELLATION
+            throw cancellation
+        } catch (error: Throwable) {
+            replayFailure = error
+            stopReason = ExtensionStopReason.PIPELINE_RUN_FAILED
+            throw error
+        } finally {
+            try {
+                endReplayLifecycle(replayLifecycle, stopReason)
+            } catch (cleanupFailure: Throwable) {
+                replayFailure?.addSuppressed(cleanupFailure) ?: throw cleanupFailure
+            }
+        }
+    }
+
+    private suspend fun beginReplayLifecycle(): ReplayLifecycleSession = lifecycleMutex.withLock {
+        val candidates = configuration.extensions.filterIsInstance<ReplayLifecycle>()
+        when (lifecycleState) {
+            LifecycleState.RUNNING -> {
+                require(candidates.all { candidate -> startedExtensions.any { it === candidate } }) {
+                    "Replay lifecycle extensions are not all started"
+                }
+                ReplayLifecycleSession(temporary = false, started = emptyList())
+            }
+
+            LifecycleState.NEW -> {
+                lifecycleState = LifecycleState.REPLAYING
+                val started = mutableListOf<ReplayLifecycle>()
+                try {
+                    candidates.forEach { extension ->
+                        extension.startForReplay(ExtensionStartContext(lifecycleScope))
+                        started += extension
+                    }
+                    startedExtensions = started.toList()
+                    ReplayLifecycleSession(temporary = true, started = started.toList())
+                } catch (error: Throwable) {
+                    withContext(NonCancellable) {
+                        started.asReversed().forEach { extension ->
+                            boundedCleanup("replay extension ${extension.id} startup rollback", configuration.runtimeOptions.shutdownTimeout.toMillis().coerceAtLeast(1)) {
+                                extension.stopForReplay(ExtensionStopContext(ExtensionStopReason.STARTUP_FAILURE))
+                            }?.let(error::addSuppressed)
+                        }
+                    }
+                    startedExtensions = emptyList()
+                    lifecycleState = LifecycleState.NEW
+                    throw error
+                }
+            }
+
+            LifecycleState.STARTING,
+            LifecycleState.REPLAYING,
+            -> throw IllegalStateException("Trawler engine is already starting or replaying")
+
+            LifecycleState.FAILED -> throw IllegalStateException("Trawler engine startup previously failed")
+            LifecycleState.SHUTTING_DOWN,
+            LifecycleState.STOPPED,
+            -> throw IllegalStateException("Trawler engine is shutting down or stopped")
+        }
+    }
+
+    private suspend fun endReplayLifecycle(
+        session: ReplayLifecycleSession,
+        reason: ExtensionStopReason,
+    ) {
+        if (!session.temporary) return
+        withContext(NonCancellable) {
+            lifecycleMutex.withLock {
+                if (lifecycleState != LifecycleState.REPLAYING) return@withLock
+                var firstFailure: Throwable? = null
+                session.started.asReversed().forEach { extension ->
+                    boundedCleanup(
+                        "replay extension ${extension.id} shutdown",
+                        configuration.runtimeOptions.shutdownTimeout.toMillis().coerceAtLeast(1),
+                    ) {
+                        extension.stopForReplay(ExtensionStopContext(reason))
+                    }?.let { failure -> if (firstFailure == null) firstFailure = failure }
+                }
+                startedExtensions = emptyList()
+                lifecycleState = LifecycleState.NEW
+                firstFailure?.let { throw it }
+            }
+        }
+    }
+
+    private fun validateReplayLifecycle(pipeline: Pipeline<*>, store: ResponseStore) {
+        val selected = buildList {
+            if (store is ExtensionLifecycle) add("engine.responseStore" to store)
+            pipeline.outputs.forEach { binding ->
+                if (binding.output is ExtensionLifecycle) add("pipeline[${pipeline.id}].output[${binding.output.id}]" to binding.output)
+            }
+        }
+        val issues = selected.flatMap { (path, extension) ->
+            buildList {
+                if (extension !is ReplayLifecycle) {
+                    add(
+                        ConfigurationIssue(
+                            path = "$path.replayLifecycle",
+                            code = ConfigurationIssueCode.MISSING_REQUIRED_EXTENSION,
+                            message = "Replay-selected lifecycle '${extension.id}' must implement ReplayLifecycle",
+                        ),
+                    )
+                }
+                if (configuration.extensions.none { it === extension }) {
+                    add(
+                        ConfigurationIssue(
+                            path = "$path.registration",
+                            code = ConfigurationIssueCode.MISSING_REQUIRED_EXTENSION,
+                            message = "Replay-selected lifecycle '${extension.id}' must be registered as an engine extension",
+                        ),
+                    )
+                }
+            }
+        }
+        val pipelineExtensionIssues = pipeline.extensions.flatMap { extension ->
+            if (extension is ReplayLifecycle) {
+                emptyList()
+            } else {
+                listOf(
+                    ConfigurationIssue(
+                        path = "pipeline[${pipeline.id}].extension[${extension.id}].replayLifecycle",
+                        code = ConfigurationIssueCode.MISSING_REQUIRED_EXTENSION,
+                        message = "Replay-selected lifecycle '${extension.id}' must implement ReplayLifecycle",
+                    ),
+                )
+            }
+        }
+        val allIssues = issues + pipelineExtensionIssues
+        if (allIssues.isNotEmpty()) throw InvalidConfigurationException(allIssues)
+    }
+
+    private data class ReplayLifecycleSession(
+        val temporary: Boolean,
+        val started: List<ReplayLifecycle>,
+    )
+
     suspend fun awaitIdle(timeout: Duration): Boolean {
         require(!timeout.isNegative && !timeout.isZero) { "Idle timeout must be positive" }
         val timeoutMillis = timeout.toMillis().coerceAtLeast(1)
         val idle = withTimeoutOrNull<Boolean>(timeoutMillis) {
             while (true) {
-                val runs = lifecycleMutex.withLock { activeRuns.filter(Job::isActive) }
+                val runs = lifecycleMutex.withLock { activeRuns.filterNot(Job::isCompleted) }
                 if (runs.isEmpty()) break
                 runs.joinAll()
             }
@@ -232,26 +491,29 @@ internal class EngineRuntime(
     }
 
     suspend fun shutdown() {
-        val ownsShutdown = lifecycleMutex.withLock {
+        val shutdownState = lifecycleMutex.withLock {
             when (lifecycleState) {
                 LifecycleState.STOPPED,
                 LifecycleState.SHUTTING_DOWN,
-                -> false
+                -> null
 
                 LifecycleState.NEW,
                 LifecycleState.RUNNING,
                 LifecycleState.STARTING,
+                LifecycleState.REPLAYING,
                 LifecycleState.FAILED,
                 -> {
+                    val wasReplaying = lifecycleState == LifecycleState.REPLAYING
                     lifecycleState = LifecycleState.SHUTTING_DOWN
-                    true
+                    wasReplaying
                 }
             }
         }
-        if (!ownsShutdown) {
+        if (shutdownState == null) {
             shutdownCompletion.await()
             return
         }
+        val replaying = shutdownState
 
         val daemons: List<EngineDaemonHandle>
         val runs: List<Job>
@@ -279,7 +541,21 @@ internal class EngineRuntime(
 
                 extensions.asReversed().forEach { extension ->
                     val failure = boundedCleanup("extension ${extension.id} shutdown", shutdownMillis) {
-                        extension.stop(ExtensionStopContext(ExtensionStopReason.ENGINE_SHUTDOWN))
+                        if (replaying && extension is ReplayLifecycle) {
+                            extension.stopForReplay(ExtensionStopContext(ExtensionStopReason.ENGINE_SHUTDOWN))
+                        } else {
+                            extension.stop(ExtensionStopContext(ExtensionStopReason.ENGINE_SHUTDOWN))
+                        }
+                    }
+                    if (firstFailure == null) firstFailure = failure
+                }
+                val stateLifecycle = configuration.stateStore as? ExtensionLifecycle
+                if (stateLifecycle != null && extensions.none { it === stateLifecycle }) {
+                    val failure = boundedCleanup(
+                        "state store ${stateLifecycle.id} shutdown",
+                        shutdownMillis,
+                    ) {
+                        stateLifecycle.stop(ExtensionStopContext(ExtensionStopReason.ENGINE_SHUTDOWN))
                     }
                     if (firstFailure == null) firstFailure = failure
                 }
@@ -297,6 +573,12 @@ internal class EngineRuntime(
                         }
                         if (firstFailure == null) firstFailure = failure
                     }
+                (configuration.responseStore as? ResponseStoreLifecycle)?.let { responseStore ->
+                    val failure = boundedCleanup("response store ${responseStore::class.simpleName ?: "store"} shutdown", shutdownMillis) {
+                        responseStore.close()
+                    }
+                    if (firstFailure == null) firstFailure = failure
+                }
                 lifecycleMutex.withLock { lifecycleState = LifecycleState.STOPPED }
                 firstFailure?.let { throw it }
             }
@@ -585,6 +867,7 @@ internal class EngineRuntime(
                 LifecycleState.FAILED -> throw IllegalStateException("Trawler engine startup previously failed")
                 LifecycleState.NEW -> Unit
                 LifecycleState.STARTING -> Unit
+                LifecycleState.REPLAYING -> throw IllegalStateException("Trawler engine is replaying stored responses")
             }
             lifecycleState = LifecycleState.STARTING
             val started = mutableListOf<com.rmjtromp.trawler.extension.ExtensionLifecycle>()
@@ -614,6 +897,7 @@ internal class EngineRuntime(
         when (lifecycleState) {
             LifecycleState.NEW,
             LifecycleState.RUNNING,
+            LifecycleState.REPLAYING,
             -> Unit
 
             LifecycleState.STARTING -> Unit
@@ -678,6 +962,7 @@ internal class EngineRuntime(
         NEW,
         STARTING,
         RUNNING,
+        REPLAYING,
         FAILED,
         SHUTTING_DOWN,
         STOPPED,
@@ -743,23 +1028,16 @@ private suspend fun boundedCleanup(
     error
 }
 
-/** Typed runtime context captured by one internal registration owner. */
-internal class PipelineExecutionContext(
-    val configuration: EngineConfiguration,
-    val pipelineId: String,
-    val engineRunId: String,
-    val pipelineRunId: String,
-    val startedAt: Instant,
-    val workQueue: PipelineScopedWorkQueueStore,
-    val leaseStore: LeaseStore,
-    val attemptStore: AttemptStore,
-    val historyStore: ResourceHistoryStore,
-    val cancellationStore: WorkCancellationStore,
-    val orderingStore: WorkOrderingStore,
-    val workStatus: WorkQueueStatus,
-    val responseStore: ResponseStore?,
-    val emit: suspend (CrawlerEventType, EventContext, String?) -> Unit,
-) {
+/** Shared typed context for ordinary execution and network-free replay. */
+internal interface TypedPipelineExecutionContext {
+    val configuration: EngineConfiguration
+    val pipelineId: String
+    val engineRunId: String
+    val pipelineRunId: String
+    val startedAt: Instant
+    val responseStore: ResponseStore?
+    val emit: suspend (CrawlerEventType, EventContext, String?) -> Unit
+
     suspend fun event(
         type: CrawlerEventType,
         crawler: CrawlerContext? = null,
@@ -780,6 +1058,35 @@ internal class PipelineExecutionContext(
         )
     }
 }
+
+/** Typed runtime context captured by one internal registration owner. */
+internal class PipelineExecutionContext(
+    override val configuration: EngineConfiguration,
+    override val pipelineId: String,
+    override val engineRunId: String,
+    override val pipelineRunId: String,
+    override val startedAt: Instant,
+    val workQueue: PipelineScopedWorkQueueStore,
+    val leaseStore: LeaseStore,
+    val attemptStore: AttemptStore,
+    val historyStore: ResourceHistoryStore,
+    val cancellationStore: WorkCancellationStore,
+    val orderingStore: WorkOrderingStore,
+    val workStatus: WorkQueueStatus,
+    override val responseStore: ResponseStore?,
+    override val emit: suspend (CrawlerEventType, EventContext, String?) -> Unit,
+) : TypedPipelineExecutionContext
+
+/** Replay context intentionally exposes no crawl-state capability. */
+internal class ReplayExecutionContext(
+    override val configuration: EngineConfiguration,
+    override val pipelineId: String,
+    override val engineRunId: String,
+    override val pipelineRunId: String,
+    override val startedAt: Instant,
+    override val responseStore: ResponseStore?,
+    override val emit: suspend (CrawlerEventType, EventContext, String?) -> Unit,
+) : TypedPipelineExecutionContext
 
 private class PipelineCounters(
     private val maxFailureRecords: Int,
@@ -843,7 +1150,7 @@ private class PipelineCounters(
 
 private suspend fun <T : Any> observeBudget(
     pipeline: Pipeline<T>,
-    context: PipelineExecutionContext,
+    context: TypedPipelineExecutionContext,
     counters: PipelineCounters,
     observation: BudgetObservation,
 ) {
@@ -905,6 +1212,105 @@ private class DiscoveryProgress(
     var reachedNaturalEnd: Boolean = false
     var deferred: Boolean = false
     var failed: Boolean = false
+}
+
+internal suspend fun <T : Any> executeTypedReplay(
+    pipeline: Pipeline<T>,
+    context: ReplayExecutionContext,
+    responses: List<com.rmjtromp.trawler.response.StoredResponse>,
+): ReplayResult {
+    val startedAt = context.configuration.clock.now()
+    val counters = PipelineCounters(context.configuration.runtimeOptions.maxQueueSize)
+    val pipelineExtensions = mutableListOf<ReplayLifecycle>()
+    var cancelled = false
+    context.event(CrawlerEventType.PIPELINE_RUN_STARTED, detail = "replay")
+    try {
+        pipeline.extensions.filterIsInstance<ReplayLifecycle>()
+            .filterNot { extension -> context.configuration.extensions.any { it === extension } }
+            .forEach { extension ->
+            extension.startForReplay(ExtensionStartContext(CoroutineScope(currentCoroutineContext())))
+            pipelineExtensions += extension
+        }
+        for (stored in responses) {
+            val requestId = stored.response.request.attributes["trawler.request-id"]
+            val replayResponse = stored.response.withRuntimeAttributes(context, requestId)
+            val crawler = CrawlerContext(
+                engineRunId = context.engineRunId,
+                pipelineRunId = context.pipelineRunId,
+                pipelineId = context.pipelineId,
+                requestId = requestId,
+            )
+            try {
+                processTypedResponse(
+                    pipeline = pipeline,
+                    context = context,
+                    counters = counters,
+                    currentResponse = replayResponse,
+                    crawler = crawler,
+                    work = null,
+                    storedReference = stored.reference,
+                )
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (budget: BudgetReached) {
+                counters.abandoned.set(true)
+                counters.failure("replay-budget", budget, terminal = false)
+                break
+            } catch (failure: StageFailure) {
+                counters.failure("replay:${failure.stage}", failure.original, terminal = true)
+            } catch (error: Throwable) {
+                counters.failure("replay", error, terminal = true)
+            }
+        }
+    } catch (cancellation: CancellationException) {
+        cancelled = true
+        throw cancellation
+    } finally {
+        withContext(NonCancellable) {
+            val cleanupTimeout = context.configuration.runtimeOptions.shutdownTimeout.toMillis().coerceAtLeast(1)
+            pipelineExtensions.asReversed().forEach { extension ->
+                boundedCleanup("replay extension ${extension.id} shutdown", cleanupTimeout) {
+                    extension.stopForReplay(
+                        ExtensionStopContext(
+                            when {
+                                cancelled -> ExtensionStopReason.CANCELLATION
+                                counters.terminalFailure.get() -> ExtensionStopReason.PIPELINE_RUN_FAILED
+                                counters.abandoned.get() -> ExtensionStopReason.PIPELINE_RUN_ABANDONED
+                                else -> ExtensionStopReason.PIPELINE_RUN_COMPLETED
+                            },
+                        ),
+                    )
+                }?.let { error -> counters.failure("replay-extension-stop:${extension.id}", error, true) }
+            }
+        }
+    }
+    val status = when {
+        counters.terminalFailure.get() -> RunStatus.FAILED
+        counters.abandoned.get() -> RunStatus.ABANDONED
+        else -> RunStatus.COMPLETED
+    }
+    val completedAt = context.configuration.clock.now()
+    val result = ReplayResult(
+        pipelineId = context.pipelineId,
+        responsesRead = responses.size.toLong(),
+        producedValues = counters.producedValues.get(),
+        deliveredValues = counters.deliveredValues.get(),
+        status = status,
+        failures = counters.failureSnapshot(),
+        startedAt = startedAt,
+        completedAt = completedAt,
+    )
+    context.event(
+        when (status) {
+            RunStatus.COMPLETED -> CrawlerEventType.PIPELINE_RUN_COMPLETED
+            RunStatus.ABANDONED -> CrawlerEventType.PIPELINE_RUN_ABANDONED
+            RunStatus.FAILED -> CrawlerEventType.PIPELINE_RUN_FAILED
+            RunStatus.CANCELLED -> CrawlerEventType.PIPELINE_RUN_CANCELLED
+            RunStatus.RUNNING -> CrawlerEventType.PIPELINE_RUN_FAILED
+        },
+        detail = "replay:${status.name}",
+    )
+    return result
 }
 
 internal suspend fun <T : Any> executeTypedPipeline(
@@ -1578,6 +1984,15 @@ private suspend fun <T : Any> acceptWork(
     progress: DiscoveryProgress? = null,
 ): WorkAcceptance {
     val options = context.configuration.runtimeOptions
+    val admissionBoundsFailure = runCatching {
+        validateRequestBounds(request, options)
+        existingResponse?.let { validateResponseBounds(it, options) }
+    }.exceptionOrNull()
+    if (admissionBoundsFailure != null) {
+        counters.abandoned.set(true)
+        context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "request-metadata-bound")
+        return WorkAcceptance.Rejected
+    }
     if (!counters.reserveWork(options.maxWorkItemsPerRun)) {
         counters.abandoned.set(true)
         context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "work-per-run-bound")
@@ -1585,19 +2000,14 @@ private suspend fun <T : Any> acceptWork(
     }
     var accepted = false
     try {
-        if ((request.body?.size ?: 0) > options.maxRequestBodyBytes) {
-            counters.abandoned.set(true)
-            context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "request-body-bound")
-            return WorkAcceptance.Rejected
-        }
-        if (existingResponse != null && existingResponse.body.size > options.maxResponseBodyBytes) {
-            counters.abandoned.set(true)
-            context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "response-body-bound")
-            return WorkAcceptance.Rejected
-        }
         val crawler = CrawlerContext(context.engineRunId, context.pipelineRunId, context.pipelineId)
         val requestContext = RequestContext(crawler, request)
         val canonical = pipeline.policies.requestCanonicalizer.canonicalize(request, requestContext)
+        if (runCatching { validateRequestBounds(canonical, options) }.isFailure) {
+            counters.abandoned.set(true)
+            context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "canonical-request-metadata-bound")
+            return WorkAcceptance.Rejected
+        }
         val canonicalContext = requestContext.copy(request = canonical)
         val identity = pipeline.policies.requestIdentity.identify(canonical, canonicalContext)
         val history = context.historyStore.history(context.pipelineId, identity)
@@ -1892,7 +2302,17 @@ private suspend fun <T : Any> processLeasedWork(
     when (val scope = pipeline.policies.scope.evaluate(work.request, RequestContext(baseCrawler, work.request))) {
         ScopeDecision.Allowed -> Unit
         is ScopeDecision.Rejected -> {
-            context.leaseStore.transition(work, WorkTransition.Skipped(scope.reason))
+            if (recordLeaseMutationFailure(
+                    context = context,
+                    counters = counters,
+                    work = work,
+                    crawler = baseCrawler,
+                    operation = "scope-rejection",
+                    result = context.leaseStore.transition(work, WorkTransition.Skipped(scope.reason)),
+                )
+            ) {
+                return
+            }
             context.event(CrawlerEventType.REQUEST_FAILED, baseCrawler, work, "scope-rejected:${scope.reason}")
             return
         }
@@ -1903,7 +2323,17 @@ private suspend fun <T : Any> processLeasedWork(
     )) {
         AuthorizationDecision.Authorized -> Unit
         is AuthorizationDecision.Denied -> {
-            context.leaseStore.transition(work, WorkTransition.Skipped(authorization.reason))
+            if (recordLeaseMutationFailure(
+                    context = context,
+                    counters = counters,
+                    work = work,
+                    crawler = baseCrawler,
+                    operation = "authorization-denial",
+                    result = context.leaseStore.transition(work, WorkTransition.Skipped(authorization.reason)),
+                )
+            ) {
+                return
+            }
             context.event(CrawlerEventType.REQUEST_FAILED, baseCrawler, work, "authorization-denied")
             return
         }
@@ -1928,132 +2358,43 @@ private suspend fun <T : Any> processLeasedWork(
         val crawler = baseCrawler.copy(attemptId = requireNotNull(attempt).id.value)
         context.event(CrawlerEventType.REQUEST_STARTED, crawler, work)
         val existing = responseMutex.withLock { responses.remove(work.workItemId) }
-        val currentResponse = existing ?: executeWorkRequest(pipeline, context, work.request, crawler)
-        if (currentResponse.body.size > context.configuration.runtimeOptions.maxResponseBodyBytes) {
-            throw StageFailure(
-                "response-body-bound",
-                IllegalStateException("Transport response body exceeds the configured bound"),
-            )
-        }
-        counters.bytesRead.addAndGet(currentResponse.body.size.toLong())
-        observeBudget(
-            pipeline,
-            context,
-            counters,
-            BudgetObservation.BytesRead(currentResponse.body.size.toLong()),
-        )
+        val executed = existing?.let { ExecutedResponse(it, null) }
+            ?: executeWorkRequest(pipeline, context, work.request, crawler)
+        val currentResponse = executed.response
         pipeline.policies.pacing.observe(currentResponse, RequestContext(crawler, work.request))
-        val storedReference = storeResponse(context, currentResponse, crawler, work)
-        context.event(CrawlerEventType.EXTRACTION_STARTED, crawler, work)
-        val extraction = try {
-            pipeline.extractor.extract(
-                currentResponse,
-                ExtractionContext(crawler, work.request, currentResponse),
+        val storedReference = executed.storedReference ?: storeResponse(context, currentResponse, crawler, work)
+        processTypedResponse(
+            pipeline = pipeline,
+            context = context,
+            counters = counters,
+            currentResponse = currentResponse,
+            crawler = crawler,
+            work = work,
+            storedReference = storedReference,
+            accept = accept,
+        )
+        if (recordLeaseMutationFailure(
+                context = context,
+                counters = counters,
+                work = work,
+                crawler = crawler,
+                operation = "attempt-finish",
+                result = context.attemptStore.finishAttempt(work, requireNotNull(attempt), AttemptOutcome.SUCCEEDED),
             )
-        } catch (error: Throwable) {
-            context.event(CrawlerEventType.EXTRACTION_FAILED, crawler, work)
-            throw StageFailure("extraction", error)
+        ) {
+            return
         }
-        when (extraction) {
-            is ExtractionResult.Ignore -> {
-                context.event(CrawlerEventType.EXTRACTION_IGNORED, crawler, work, extraction.reason)
-            }
-
-            is ExtractionResult.Failure -> {
-                context.event(CrawlerEventType.EXTRACTION_FAILED, crawler, work)
-                throw StageFailure("extraction", extraction.error)
-            }
-
-            is ExtractionResult.Success -> {
-                if (extraction.values.size > context.configuration.runtimeOptions.maxValuesPerResponse) {
-                    throw StageFailure(
-                        "extraction-bound",
-                        IllegalStateException("Extractor returned more values than the configured bounded runtime can process"),
-                    )
-                }
-                if (extraction.followUps.size > context.configuration.runtimeOptions.maxFollowUpRequestsPerWorkItem) {
-                    throw StageFailure(
-                        "follow-up-bound",
-                        IllegalStateException("Extractor returned more follow-up requests than the configured bound"),
-                    )
-                }
-                extraction.followUps.forEach { followUp -> accept(followUp, null) }
-                context.event(CrawlerEventType.EXTRACTION_COMPLETED, crawler, work)
-                val produced = mutableListOf<Produced<T>>()
-                extraction.values.forEach { value ->
-                    var current: T? = value
-                    for (transform in pipeline.transforms) {
-                        val decision = transform.apply(
-                            requireNotNull(current),
-                            TransformContext(crawler, work.request),
-                        )
-                        current = when (decision) {
-                            is TransformDecision.Accept -> decision.value
-                            is TransformDecision.Mutate -> {
-                                context.event(CrawlerEventType.VALUE_TRANSFORMED, crawler, work, transform.id)
-                                decision.value
-                            }
-
-                            is TransformDecision.Drop -> {
-                                context.event(CrawlerEventType.VALUE_DROPPED, crawler, work, decision.reason)
-                                null
-                            }
-                        }
-                        if (current == null) break
-                    }
-                    if (current == null) return@forEach
-                    for (validator in pipeline.validators) {
-                        when (val validation = validator.validate(
-                            requireNotNull(current),
-                            ValidationContext(crawler, work.request),
-                        )) {
-                            com.rmjtromp.trawler.pipeline.ValidationResult.Accepted -> Unit
-                            is com.rmjtromp.trawler.pipeline.ValidationResult.Rejected -> {
-                                context.event(CrawlerEventType.VALUE_DROPPED, crawler, work, validation.reason)
-                                current = null
-                            }
-
-                            is com.rmjtromp.trawler.pipeline.ValidationResult.Failed ->
-                                throw StageFailure("validation:${validator.id}", validation.error)
-                        }
-                        if (current == null) break
-                    }
-                    if (current != null) {
-                        if (!counters.reserveProducedValue(
-                                context.configuration.runtimeOptions.maxProducedValuesPerRun,
-                            )
-                        ) {
-                            throw BudgetReached("produced-value-per-run-bound")
-                        }
-                        val producedValue = Produced(
-                            value = requireNotNull(current),
-                            context = ProductionContext(
-                                pipelineId = context.pipelineId,
-                                engineRunId = context.engineRunId,
-                                pipelineRunId = context.pipelineRunId,
-                                requestId = work.workItemId.value,
-                                responseReference = storedReference,
-                                originalTarget = work.request.target,
-                                finalTarget = currentResponse.finalTarget,
-                                producedAt = context.configuration.clock.now(),
-                                attributes = currentResponse.attributes,
-                            ),
-                        )
-                        produced += producedValue
-                        observeBudget(
-                            pipeline,
-                            context,
-                            counters,
-                            BudgetObservation.ValuesProduced(1),
-                        )
-                        context.event(CrawlerEventType.VALUE_PRODUCED, crawler, work)
-                    }
-                }
-                deliverOutputs(pipeline, context, counters, produced, crawler)
-            }
+        if (recordLeaseMutationFailure(
+                context = context,
+                counters = counters,
+                work = work,
+                crawler = crawler,
+                operation = "completion",
+                result = context.leaseStore.transition(work, WorkTransition.Succeeded),
+            )
+        ) {
+            return
         }
-        context.attemptStore.finishAttempt(work, requireNotNull(attempt), AttemptOutcome.SUCCEEDED)
-        context.leaseStore.transition(work, WorkTransition.Succeeded)
         context.event(CrawlerEventType.REQUEST_COMPLETED, crawler, work)
     } catch (cancellation: CancellationException) {
         if (leaseLost.get()) {
@@ -2083,19 +2424,221 @@ private suspend fun <T : Any> processLeasedWork(
         }
         throw cancellation
     } catch (budget: BudgetReached) {
-        attempt?.let { context.attemptStore.finishAttempt(work, it, AttemptOutcome.ABANDONED) }
-        context.leaseStore.transition(work, WorkTransition.Abandoned(budget.reason))
+        val attemptFinished = attempt?.let {
+            context.attemptStore.finishAttempt(work, it, AttemptOutcome.ABANDONED)
+        }
+        if (attemptFinished != null && recordLeaseMutationFailure(
+                context = context,
+                counters = counters,
+                work = work,
+                crawler = baseCrawler,
+                operation = "budget-attempt-finish",
+                result = attemptFinished,
+            )
+        ) {
+            return
+        }
+        if (recordLeaseMutationFailure(
+                context = context,
+                counters = counters,
+                work = work,
+                crawler = baseCrawler,
+                operation = "budget-abandonment",
+                result = context.leaseStore.transition(work, WorkTransition.Abandoned(budget.reason)),
+            )
+        ) {
+            return
+        }
         counters.abandoned.set(true)
         context.event(CrawlerEventType.CAPABILITY_WARNING, baseCrawler, work, "budget:${budget.reason}")
     } catch (failure: StageFailure) {
-        attempt?.let { context.attemptStore.finishAttempt(work, it, AttemptOutcome.FAILED) }
+        val attemptFinished = attempt?.let {
+            context.attemptStore.finishAttempt(work, it, AttemptOutcome.FAILED)
+        }
+        if (attemptFinished != null && recordLeaseMutationFailure(
+                context = context,
+                counters = counters,
+                work = work,
+                crawler = baseCrawler,
+                operation = "failure-attempt-finish",
+                result = attemptFinished,
+            )
+        ) {
+            return
+        }
         handleWorkFailure(pipeline, context, counters, work, attempt, failure.stage, failure.original, baseCrawler)
     } catch (error: Throwable) {
-        attempt?.let { context.attemptStore.finishAttempt(work, it, AttemptOutcome.FAILED) }
+        val attemptFinished = attempt?.let {
+            context.attemptStore.finishAttempt(work, it, AttemptOutcome.FAILED)
+        }
+        if (attemptFinished != null && recordLeaseMutationFailure(
+                context = context,
+                counters = counters,
+                work = work,
+                crawler = baseCrawler,
+                operation = "failure-attempt-finish",
+                result = attemptFinished,
+            )
+        ) {
+            return
+        }
         handleWorkFailure(pipeline, context, counters, work, attempt, "work", error, baseCrawler)
     } finally {
         pacing?.release()
         permit?.release()
+    }
+}
+
+/**
+ * Shared typed response path for ordinary work and replay. The optional
+ * [work] is deliberately absent during replay, so follow-up requests are
+ * bounded and ignored rather than becoming ordinary crawl jobs.
+ */
+private suspend fun <T : Any> processTypedResponse(
+    pipeline: Pipeline<T>,
+    context: TypedPipelineExecutionContext,
+    counters: PipelineCounters,
+    currentResponse: CrawlResponse,
+    crawler: CrawlerContext,
+    work: LeasedWork?,
+    storedReference: com.rmjtromp.trawler.model.ResponseReference?,
+    accept: suspend (CrawlRequest, CrawlResponse?) -> Unit = { _, _ -> },
+) {
+    try {
+        validateResponseBounds(currentResponse, context.configuration.runtimeOptions)
+    } catch (error: IllegalArgumentException) {
+        throw StageFailure(
+            "response-metadata-bound",
+            error,
+        )
+    }
+    counters.bytesRead.addAndGet(currentResponse.body.size.toLong())
+    observeBudget(
+        pipeline,
+        context,
+        counters,
+        BudgetObservation.BytesRead(currentResponse.body.size.toLong()),
+    )
+    val request = work?.request ?: currentResponse.request
+    context.event(CrawlerEventType.EXTRACTION_STARTED, crawler, work)
+    val extraction = try {
+        pipeline.extractor.extract(
+            currentResponse,
+            ExtractionContext(crawler, request, currentResponse),
+        )
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (error: Throwable) {
+        context.event(CrawlerEventType.EXTRACTION_FAILED, crawler, work)
+        throw StageFailure("extraction", error)
+    }
+    when (extraction) {
+        is ExtractionResult.Ignore -> {
+            context.event(CrawlerEventType.EXTRACTION_IGNORED, crawler, work, extraction.reason)
+        }
+
+        is ExtractionResult.Failure -> {
+            context.event(CrawlerEventType.EXTRACTION_FAILED, crawler, work)
+            throw StageFailure("extraction", extraction.error)
+        }
+
+        is ExtractionResult.Success -> {
+            if (extraction.values.size > context.configuration.runtimeOptions.maxValuesPerResponse) {
+                throw StageFailure(
+                    "extraction-bound",
+                    IllegalStateException("Extractor returned more values than the configured bounded runtime can process"),
+                )
+            }
+            if (extraction.followUps.size > context.configuration.runtimeOptions.maxFollowUpRequestsPerWorkItem) {
+                throw StageFailure(
+                    "follow-up-bound",
+                    IllegalStateException("Extractor returned more follow-up requests than the configured bound"),
+                )
+            }
+            if (work == null) {
+                if (extraction.followUps.isNotEmpty()) {
+                    context.event(
+                        CrawlerEventType.CAPABILITY_WARNING,
+                        crawler,
+                        detail = "replay-follow-ups-suppressed:${extraction.followUps.size}",
+                    )
+                }
+            } else {
+                extraction.followUps.forEach { followUp -> accept(followUp, null) }
+            }
+            context.event(CrawlerEventType.EXTRACTION_COMPLETED, crawler, work)
+            val produced = mutableListOf<Produced<T>>()
+            extraction.values.forEach { value ->
+                var current: T? = value
+                for (transform in pipeline.transforms) {
+                    val decision = transform.apply(
+                        requireNotNull(current),
+                        TransformContext(crawler, request),
+                    )
+                    current = when (decision) {
+                        is TransformDecision.Accept -> decision.value
+                        is TransformDecision.Mutate -> {
+                            context.event(CrawlerEventType.VALUE_TRANSFORMED, crawler, work, transform.id)
+                            decision.value
+                        }
+
+                        is TransformDecision.Drop -> {
+                            context.event(CrawlerEventType.VALUE_DROPPED, crawler, work, decision.reason)
+                            null
+                        }
+                    }
+                    if (current == null) break
+                }
+                if (current == null) return@forEach
+                for (validator in pipeline.validators) {
+                    when (val validation = validator.validate(
+                        requireNotNull(current),
+                        ValidationContext(crawler, request),
+                    )) {
+                        ValidationResult.Accepted -> Unit
+                        is ValidationResult.Rejected -> {
+                            context.event(CrawlerEventType.VALUE_DROPPED, crawler, work, validation.reason)
+                            current = null
+                        }
+
+                        is ValidationResult.Failed ->
+                            throw StageFailure("validation:${validator.id}", validation.error)
+                    }
+                    if (current == null) break
+                }
+                if (current != null) {
+                    if (!counters.reserveProducedValue(
+                            context.configuration.runtimeOptions.maxProducedValuesPerRun,
+                        )
+                    ) {
+                        throw BudgetReached("produced-value-per-run-bound")
+                    }
+                    val producedValue = Produced(
+                        value = requireNotNull(current),
+                        context = ProductionContext(
+                            pipelineId = context.pipelineId,
+                            engineRunId = context.engineRunId,
+                            pipelineRunId = context.pipelineRunId,
+                            requestId = work?.workItemId?.value ?: crawler.requestId,
+                            responseReference = storedReference,
+                            originalTarget = request.target,
+                            finalTarget = currentResponse.finalTarget,
+                            producedAt = context.configuration.clock.now(),
+                            attributes = currentResponse.attributes,
+                        ),
+                    )
+                    produced += producedValue
+                    observeBudget(
+                        pipeline,
+                        context,
+                        counters,
+                        BudgetObservation.ValuesProduced(1),
+                    )
+                    context.event(CrawlerEventType.VALUE_PRODUCED, crawler, work)
+                }
+            }
+            deliverOutputs(pipeline, context, counters, produced, crawler)
+        }
     }
 }
 
@@ -2110,7 +2653,7 @@ private class LeaseLostCancellationException(
 
 private suspend fun <T : Any> deliverOutputs(
     pipeline: Pipeline<T>,
-    context: PipelineExecutionContext,
+    context: TypedPipelineExecutionContext,
     counters: PipelineCounters,
     produced: List<Produced<T>>,
     crawler: CrawlerContext,
@@ -2192,27 +2735,96 @@ private suspend fun <T : Any> handleWorkFailure(
     }
     when (retryDecision) {
         RetryDecision.RetryNow -> {
-            context.leaseStore.transition(work, WorkTransition.Retry(context.configuration.clock.now()))
+            if (recordLeaseMutationFailure(
+                    context = context,
+                    counters = counters,
+                    work = work,
+                    crawler = crawler,
+                    operation = "retry-now",
+                    result = context.leaseStore.transition(work, WorkTransition.Retry(context.configuration.clock.now())),
+                )
+            ) {
+                return
+            }
             context.event(CrawlerEventType.RETRY_SCHEDULED, crawler, work, "now")
         }
 
         is RetryDecision.RetryAt -> {
-            context.leaseStore.transition(work, WorkTransition.Retry(retryDecision.at))
+            if (recordLeaseMutationFailure(
+                    context = context,
+                    counters = counters,
+                    work = work,
+                    crawler = crawler,
+                    operation = "retry-at",
+                    result = context.leaseStore.transition(work, WorkTransition.Retry(retryDecision.at)),
+                )
+            ) {
+                return
+            }
             counters.abandoned.set(true)
             context.event(CrawlerEventType.RETRY_SCHEDULED, crawler, work, retryDecision.at.toString())
         }
 
         RetryDecision.DoNotRetry -> {
             counters.terminalFailure.set(true)
-            context.leaseStore.transition(work, WorkTransition.Failed(stage))
+            if (recordLeaseMutationFailure(
+                    context = context,
+                    counters = counters,
+                    work = work,
+                    crawler = crawler,
+                    operation = "terminal-failure",
+                    result = context.leaseStore.transition(work, WorkTransition.Failed(stage)),
+                )
+            ) {
+                return
+            }
             context.event(CrawlerEventType.REQUEST_FAILED, crawler, work, stage)
         }
 
         is RetryDecision.Abandon -> {
+            if (recordLeaseMutationFailure(
+                    context = context,
+                    counters = counters,
+                    work = work,
+                    crawler = crawler,
+                    operation = "retry-abandonment",
+                    result = context.leaseStore.transition(work, WorkTransition.Abandoned(retryDecision.reason)),
+                )
+            ) {
+                return
+            }
             counters.abandoned.set(true)
-            context.leaseStore.transition(work, WorkTransition.Abandoned(retryDecision.reason))
             context.event(CrawlerEventType.REQUEST_FAILED, crawler, work, "abandoned")
         }
+    }
+}
+
+/**
+ * Prevents a stale or rejected lease mutation from being reported as a
+ * successful state transition. A stale worker is abandoned and stops
+ * producing transition-specific events; an operational rejection is a
+ * terminal run failure while the adapter retains ownership of recovery.
+ */
+private suspend fun recordLeaseMutationFailure(
+    context: PipelineExecutionContext,
+    counters: PipelineCounters,
+    work: LeasedWork,
+    crawler: CrawlerContext,
+    operation: String,
+    result: LeaseMutationResult,
+): Boolean = when (result) {
+    LeaseMutationResult.Accepted -> false
+    LeaseMutationResult.Stale -> {
+        counters.abandoned.set(true)
+        context.event(CrawlerEventType.REQUEST_FAILED, crawler, work, "$operation:lease-lost")
+        true
+    }
+
+    is LeaseMutationResult.Rejected -> {
+        val error = IllegalStateException("Lease mutation '$operation' was rejected: ${result.reason}")
+        counters.failure("lease:$operation", error, terminal = true)
+        context.event(CrawlerEventType.REQUEST_FAILED, crawler, work, "$operation:rejected")
+        true
     }
 }
 
@@ -2222,8 +2834,10 @@ private suspend fun <T : Any> executeDiscoveryRequest(
     request: CrawlRequest,
     suppliedContext: RequestContext,
 ): CrawlResponse {
-    if ((request.body?.size ?: 0) > context.configuration.runtimeOptions.maxRequestBodyBytes) {
-        throw PolicyRejection("request body exceeds the configured bound")
+    try {
+        validateRequestBounds(request, context.configuration.runtimeOptions)
+    } catch (error: IllegalArgumentException) {
+        throw PolicyRejection("request exceeds the configured runtime bounds")
     }
     when (val scope = pipeline.policies.scope.evaluate(request, suppliedContext)) {
         ScopeDecision.Allowed -> Unit
@@ -2236,10 +2850,7 @@ private suspend fun <T : Any> executeDiscoveryRequest(
     val permit = pipeline.policies.concurrency.acquire(request, suppliedContext)
     val pacing = pipeline.policies.pacing.acquire(request, suppliedContext)
     return try {
-        val response = executeThroughMiddleware(pipeline, context, request, suppliedContext)
-        if (response.body.size > context.configuration.runtimeOptions.maxResponseBodyBytes) {
-            throw IllegalStateException("Discovery response exceeds the configured body bound")
-        }
+        val response = executeThroughMiddleware(pipeline, context, request, suppliedContext).response
         pipeline.policies.pacing.observe(response, suppliedContext)
         response
     } finally {
@@ -2253,7 +2864,7 @@ private suspend fun <T : Any> executeWorkRequest(
     context: PipelineExecutionContext,
     request: CrawlRequest,
     crawler: CrawlerContext,
-): CrawlResponse = executeThroughMiddleware(
+): ExecutedResponse = executeThroughMiddleware(
     pipeline,
     context,
     request,
@@ -2265,9 +2876,32 @@ private suspend fun <T : Any> executeThroughMiddleware(
     context: PipelineExecutionContext,
     request: CrawlRequest,
     suppliedContext: RequestContext,
-): CrawlResponse {
+): ExecutedResponse {
     val requestWithMetadata = request.withRuntimeAttributes(context, suppliedContext.crawler.requestId)
+    validateRequestBounds(requestWithMetadata, context.configuration.runtimeOptions)
     val requestContext = suppliedContext.copy(request = requestWithMetadata)
+    context.responseStore?.let { store ->
+        when (val cache = context.configuration.responseCachePolicy.lookup(
+            ResponseCacheContext(
+                crawler = requestContext.crawler,
+                request = requestWithMetadata,
+                now = context.configuration.clock.now(),
+            ),
+            store,
+        )) {
+            ResponseCacheDecision.Miss -> Unit
+            is ResponseCacheDecision.Hit -> {
+                require(cache.stored.pipelineId == requestContext.crawler.pipelineId) {
+                    "Response cache returned a response not owned by the selected pipeline"
+                }
+                validateResponseBounds(cache.stored.response, context.configuration.runtimeOptions)
+                return ExecutedResponse(
+                    response = cache.stored.response.copy(request = requestWithMetadata),
+                    storedReference = cache.stored.reference,
+                )
+            }
+        }
+    }
     val responseHandler = object : ResponseHandler {
         override suspend fun handle(response: CrawlResponse, context: ResponseContext): CrawlResponse =
             executeResponseMiddleware(pipeline, response, context, 0)
@@ -2275,10 +2909,12 @@ private suspend fun <T : Any> executeThroughMiddleware(
     val terminal = RequestExecutor { nextRequest, nextRequestContext ->
         val transport: Transport = pipeline.transportRouter.select(nextRequest, nextRequestContext)
         val raw = transport.execute(nextRequest)
-        responseHandler.handle(
+        val processed = responseHandler.handle(
             raw.withRuntimeAttributes(context, nextRequestContext.crawler.requestId),
             ResponseContext(nextRequestContext.crawler, nextRequest, raw),
         )
+        validateResponseBounds(processed, context.configuration.runtimeOptions)
+        processed
     }
     var next = terminal
     pipeline.requestMiddlewares.asReversed().forEach { middleware ->
@@ -2287,8 +2923,13 @@ private suspend fun <T : Any> executeThroughMiddleware(
             middleware.intercept(nextRequest, nextContext, downstream)
         }
     }
-    return next.execute(requestWithMetadata, requestContext)
+    return ExecutedResponse(next.execute(requestWithMetadata, requestContext), null)
 }
+
+private data class ExecutedResponse(
+    val response: CrawlResponse,
+    val storedReference: com.rmjtromp.trawler.model.ResponseReference?,
+)
 
 private suspend fun <T : Any> executeResponseMiddleware(
     pipeline: Pipeline<T>,
@@ -2314,14 +2955,29 @@ private suspend fun storeResponse(
     work: LeasedWork,
 ): com.rmjtromp.trawler.model.ResponseReference? {
     val store = context.responseStore ?: return null
+    when (val decision = context.configuration.responseCapturePolicy.decide(
+        ResponseCaptureContext(crawler, response.request, response),
+    )) {
+        is ResponseCaptureDecision.Skip -> return null
+        is ResponseCaptureDecision.Fail -> throw StageFailure("response-policy", decision.error)
+        ResponseCaptureDecision.Store -> Unit
+    }
     return try {
         val reference = store.put(response)
         if (reference == null) {
             context.event(CrawlerEventType.RESPONSE_STORE_FAILED, crawler, work, "store-declined")
+            if (context.configuration.responseCapturePolicy.requiresStore) {
+                throw StageFailure(
+                    "response-store",
+                    IllegalStateException("Required response store declined the response"),
+                )
+            }
         } else {
             context.event(CrawlerEventType.RESPONSE_STORED, crawler, work)
         }
         reference
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (error: Throwable) {
         context.event(CrawlerEventType.RESPONSE_STORE_FAILED, crawler, work, safeFailureName(error))
         throw StageFailure("response-store", error)
@@ -2329,22 +2985,90 @@ private suspend fun storeResponse(
 }
 
 private fun CrawlRequest.withRuntimeAttributes(
-    context: PipelineExecutionContext,
+    context: TypedPipelineExecutionContext,
     requestId: String? = null,
 ): CrawlRequest = copy(
-    attributes = attributes
-        .plus(ContextAttribute("trawler.pipeline-id", context.pipelineId))
-        .let { current ->
-            if (requestId == null) current else current.plus(ContextAttribute("trawler.request-id", requestId))
-        },
+    attributes = ContextAttributes.from(
+        attributes.entries
+            .filterNot { it.name == PIPELINE_ID_ATTRIBUTE || it.name == REQUEST_ID_ATTRIBUTE }
+            .plus(ContextAttribute(PIPELINE_ID_ATTRIBUTE, context.pipelineId))
+            .let { current ->
+                if (requestId == null) current else current + ContextAttribute(REQUEST_ID_ATTRIBUTE, requestId)
+            },
+    ),
 )
 
 private fun CrawlResponse.withRuntimeAttributes(
-    context: PipelineExecutionContext,
+    context: TypedPipelineExecutionContext,
     requestId: String? = null,
 ): CrawlResponse = copy(
     request = request.withRuntimeAttributes(context, requestId),
 )
+
+private fun validateRequestBounds(
+    request: CrawlRequest,
+    options: EngineRuntimeOptions,
+) {
+    requireUtf8Bound(request.target, options.maxTargetBytes, "request target")
+    requireUtf8Bound(request.method.value, options.maxMethodBytes, "request method")
+    validateHeaders(request.headers, options)
+    validateAttributes(request.attributes, options)
+    request.body?.let { body ->
+        require(body.size <= options.maxRequestBodyBytes) {
+            "request body exceeds the configured bound"
+        }
+    }
+}
+
+private fun validateResponseBounds(
+    response: CrawlResponse,
+    options: EngineRuntimeOptions,
+) {
+    validateRequestBounds(response.request, options)
+    validateHeaders(response.headers, options)
+    validateAttributes(response.attributes, options)
+    require(response.body.size <= options.maxResponseBodyBytes) {
+        "response body exceeds the configured bound"
+    }
+    response.finalTarget?.let { finalTarget ->
+        requireUtf8Bound(finalTarget, options.maxTargetBytes, "response final target")
+    }
+}
+
+private fun validateHeaders(
+    headers: com.rmjtromp.trawler.model.Headers,
+    options: EngineRuntimeOptions,
+) {
+    require(headers.entries.size <= options.maxHeaderCount) {
+        "header count exceeds the configured bound"
+    }
+    headers.entries.forEach { header ->
+        requireUtf8Bound(header.name, options.maxHeaderNameBytes, "header name")
+        requireUtf8Bound(header.value, options.maxHeaderValueBytes, "header value")
+    }
+}
+
+private fun validateAttributes(
+    attributes: com.rmjtromp.trawler.model.ContextAttributes,
+    options: EngineRuntimeOptions,
+) {
+    require(attributes.entries.size <= options.maxAttributeCount) {
+        "attribute count exceeds the configured bound"
+    }
+    attributes.entries.forEach { attribute ->
+        requireUtf8Bound(attribute.name, options.maxAttributeNameBytes, "attribute name")
+        requireUtf8Bound(attribute.value, options.maxAttributeValueBytes, "attribute value")
+    }
+}
+
+private fun requireUtf8Bound(value: String, maxBytes: Int, label: String) {
+    require(value.toByteArray(Charsets.UTF_8).size <= maxBytes) {
+        "$label exceeds the configured bound"
+    }
+}
+
+private const val PIPELINE_ID_ATTRIBUTE: String = "trawler.pipeline-id"
+private const val REQUEST_ID_ATTRIBUTE: String = "trawler.request-id"
 
 private fun safeFailureName(error: Throwable): String = error::class.simpleName ?: "failure"
 

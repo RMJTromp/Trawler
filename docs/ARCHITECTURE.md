@@ -81,9 +81,9 @@ model.
 | Network or other I/O execution | Transport adapter |
 | HTTP execution, redirect policy, robots, and public-network safety | `trawler-web`; replaceable web policies |
 | Crawl operational state | State-store adapter; `trawler-core` supplies a bounded in-memory implementation and `trawler-postgres` supplies durable state |
-| Raw response retention/cache | Response-store adapter; `trawler-core` supplies no-response and bounded in-memory implementations |
+| Raw response retention/cache/replay | Response-store adapter; `trawler-core` supplies no-response, in-memory, and bounded JDK file implementations |
 | Produced value `T` | Host application |
-| Encoding or persistence of `T` | Output adapter/host |
+| Encoding or persistence of `T` | Output adapter/host; caller-owned codecs remain outside core's data model |
 | Scheduling triggers | Host or selected scheduling extension; a replaceable coroutine implementation ships in core |
 | Robots/public-network safety | Optional web policy adapter |
 | Anti-bot/browser behavior | Optional adapter |
@@ -111,17 +111,29 @@ cooldown/next-eligibility state, engine/pipeline run summaries, resumable
 checkpoints, harvest state, pipeline health, and eligibility overrides. Its
 `RunHistoryStore` hook remains lifecycle metadata only; stale summary recovery
 does not release job leases or bypass the lease predicates. The adapter does
-not add response, output, or user-data tables. See
+not merge response, output, or user-data concerns into operational state. See
 [`POSTGRES-STATE.md`](POSTGRES-STATE.md) and
 [`RECURRING-DISCOVERY.md`](RECURRING-DISCOVERY.md).
 
 ### Response store
 
-Owns optional response lookup, caching, history, and replay. No-store is valid. Enabling replay requires a replay-capable implementation.
+Owns optional response lookup, caching, history, replay, and retention.
+No-store is valid. Enabling replay requires a replay-capable implementation;
+the engine then uses the normal typed extraction/output path without jobs or
+network calls. Response codecs and output codecs are caller-owned and exact
+ID/version selection prevents silent historical reinterpretation.
 
 ### Output
 
-Consumes `Produced<T>`. It may call back into the host, write files, map values to JDBC, publish messages, or use a durable outbox decorator. Output-specific serialization and tables do not belong to state storage.
+Consumes `Produced<T>`. It may call back into the host, write files, map
+values to an adapter-owned representation, publish messages, or use a durable
+outbox decorator. Output-specific codecs and tables do not belong to state
+storage.
+
+Retention is independently scoped to operational state, responses, output
+history, and outbox history. PostgreSQL output/outbox lineages protect local
+response rows until the owning history is pruned. No retention operation
+claims exactly-once delivery or durable live-event history.
 
 ## Required durable model
 
@@ -175,6 +187,11 @@ bounded and does not introduce a core parser dependency. See
 Completion means all required outputs have acknowledged according to their declared contract. Generic exactly-once delivery is not promised.
 
 For non-transactional outputs, a process may fail after external acceptance but before job completion. Such outputs need idempotency, value deduplication, or an optional durable output/outbox adapter. Each adapter documents its duplicate window.
+
+The implemented file output forces accepted frames to its configured file
+channel. PostgreSQL typed output acknowledges after commit. PostgreSQL outbox
+delivery is explicit and fenced; a crash after delegate acceptance but before
+the fenced acknowledgement can produce a duplicate.
 
 ## Phase 2 database-free runtime
 
@@ -240,27 +257,30 @@ PostgreSQL state adapter
 
 Both profiles use the same core contracts.
 
-## Phase 4/5 PostgreSQL state adapter
+## Phase 4/5/6 PostgreSQL state, response, and output adapters
 
 `trawler-postgres` is an optional adapter profile that can replace the
-in-memory state store without changing a typed pipeline. Startup runs the
-adapter-owned Flyway migrations and bounded stale run-summary recovery; runtime
+in-memory state store without changing a typed pipeline. State-adapter startup
+runs only its state-owned Flyway migrations; an ordinary engine run explicitly
+performs bounded stale run-summary recovery, while replay does neither. Runtime
 claims use PostgreSQL `FOR UPDATE SKIP LOCKED`, active work uses a partial
 unique index, and every lease-owned mutation checks the current owner and
 fencing token. Lease expiry is reclaimed at the beginning of a bounded claim
 transaction. A lease is not an attempt: `attempt_count` changes only when a
 worker successfully begins meaningful execution. V2 adds revisioned
-checkpoints, harvest state, quarantine records, health, and eligibility state;
-it still has no response or produced-data table.
+checkpoints, harvest state, quarantine records, health, and eligibility state.
+Phase 6 adds independently migrated response history, typed output history,
+lineage, and optional outbox tables; none is a universal extracted-record
+table or a replacement for operational state.
 
 The adapter owns a Hikari pool and a fixed dispatcher whose parallelism cannot
 exceed the pool size. Its queue, claim/cancellation/recovery batches, request
 payloads, identifiers, and JDBC waits are bounded. Terminal jobs do not block
 later jobs for the same stable resource, and resource cooldown is separate
 from active deduplication. Request payloads carry explicit codec IDs and
-versions; no produced `T`, universal JSON record, response archive, or output
-payload enters the state schema. PostgreSQL is optional, and the core
-dependency tree remains Kotlin stdlib plus coroutines.
+versions. Produced `T` and response/output payloads enter only the separately
+owned adapter tables when those capabilities are selected. PostgreSQL is
+optional, and the core dependency tree remains Kotlin stdlib plus coroutines.
 
 ## Phase 3 web adapter
 

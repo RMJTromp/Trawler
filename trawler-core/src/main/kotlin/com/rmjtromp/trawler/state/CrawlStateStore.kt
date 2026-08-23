@@ -4,6 +4,8 @@ import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.model.CrawlerContext
 import com.rmjtromp.trawler.policy.RequestIdentity
 import com.rmjtromp.trawler.policy.WorkOrderingPolicy
+import com.rmjtromp.trawler.retention.RetentionCategory
+import com.rmjtromp.trawler.retention.RetentionSummary
 import java.time.Duration
 import java.time.Instant
 
@@ -80,6 +82,9 @@ public enum class CrawlStateCapability {
 
     /** The runtime can inspect bounded active-work counts for finalization. */
     WORK_STATUS,
+
+    /** Selected terminal state categories can be pruned explicitly. */
+    STATE_RETENTION,
 }
 
 /**
@@ -597,4 +602,28 @@ public data class WorkQueueMetrics(
 public interface WorkQueueMetricsStore {
     /** Returns scalar metrics without loading work rows into memory. */
     public suspend fun metrics(pipelineId: String): WorkQueueMetrics
+}
+
+/** Bounded request for pruning one operational state category. */
+public class CrawlStateRetentionRequest(
+    public val category: RetentionCategory,
+    public val cutoff: Instant,
+    public val maxEntries: Int,
+) {
+    init {
+        require(category == RetentionCategory.COMPLETED_JOBS ||
+            category == RetentionCategory.ATTEMPTS ||
+            category == RetentionCategory.RUN_HISTORY
+        ) { "Crawl-state retention supports only operational state categories" }
+        require(maxEntries > 0) { "Crawl-state retention batch must be positive" }
+    }
+}
+
+/** Focused retention capability for operational state; it owns no response or output rows. */
+public interface CrawlStateRetentionStore {
+    /** Categories this state adapter can prune without changing active work. */
+    public val retentionCategories: Set<RetentionCategory>
+
+    /** Prunes at most [request.maxEntries] eligible terminal state rows. */
+    public suspend fun prune(request: CrawlStateRetentionRequest): RetentionSummary
 }

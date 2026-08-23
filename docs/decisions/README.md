@@ -48,5 +48,6 @@ Routine implementation details inside an already-approved boundary do not need a
 | [ADR-0005](0005-web-coroutines-runtime-alignment.md) | Accepted | Keep Ktor's compatible coroutines runtime alignment owned by `trawler-web`. |
 | [ADR-0006](0006-postgres-operational-state-boundary.md) | Accepted | Keep durable PostgreSQL operational state behind focused core capabilities. |
 | [ADR-0007](0007-resumable-discovery-state-boundary.md) | Accepted | Keep resumable checkpoints and recurring state opaque, revisioned, and capability-scoped. |
+| [ADR-0008](0008-response-replay-output-lineage.md) | Accepted | Keep response replay, typed output, outbox delivery, and retention independent with caller-owned codecs and lineage protection. |
 
 `plans/FINAL-PLAN.md` remains the full architecture authority. These ADRs preserve its most consequential decisions in compact form.

@@ -88,9 +88,9 @@ The public-web preset defaults are immutable and validated at construction:
 `KtorTransport.create(configuration, policies)` accepts a complete
 `WebTransportPolicies` value. Replacing one policy is therefore explicit and
 does not require accepting all preset decisions. `fromClient` can wrap a
-caller-owned Ktor client, but the caller must configure
-`expectSuccess = false`, `followRedirects = false`, and `HttpTimeout`; client
-ownership is controlled by `closeClient`.
+caller-owned Ktor client by deriving a transport-owned client with
+`expectSuccess = false`, `followRedirects = false`, and the configured
+`HttpTimeout`; client ownership is controlled by `closeClient`.
 
 `DefaultHeaderRedactionPolicy` is selected by the public-web preset. Hosts and
 observer adapters can call `redactHeadersForDiagnostics` before emitting
@@ -175,9 +175,10 @@ responsible for page bounds, checkpoint candidates, and cancellation.
 ## Bodies, headers, and response adaptation
 
 The transport disables Ktor `expectSuccess`, so non-2xx responses remain
-ordinary inspectable `CrawlResponse` values. Response headers and request
-headers have explicit entry/value bounds. The response channel is drained
-inside Ktor's statement scope and then closed by Ktor.
+ordinary inspectable `CrawlResponse` values. Request targets and methods,
+header counts, header names, and header values have explicit bounds.
+The response channel is drained inside Ktor's statement scope and then closed
+by Ktor.
 
 The adapter accepts identity, gzip, and deflate content encodings. It reads no
 more than the compressed limit and streams decompression into the independent

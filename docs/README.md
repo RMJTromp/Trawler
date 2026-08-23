@@ -17,6 +17,7 @@ This directory contains focused, normative project documentation.
 | [Ktor web adapter](WEB-ADAPTER.md) | Implemented Phase 3/5 HTTP transport, redirect, public-web, robots, session, origin-policy, and bounded XML discovery behavior. | Web transport, safety, robots, session, discovery, or web dependency behavior changes. |
 | [Durable PostgreSQL state](POSTGRES-STATE.md) | Implemented Phase 4/5 PostgreSQL operational state, leases, attempts, run history, request codecs, checkpoints, and recurring state. | PostgreSQL state schema, fencing, recovery, codec, pool, recurring state, or retention behavior changes. |
 | [Resumable and recurring discovery](RECURRING-DISCOVERY.md) | Implemented Phase 5 checkpoints, harvest strategies, admission, XML discovery, and recurring state. | Discovery checkpoints, harvest completion, backlog admission, XML bounds, or recurring state changes. |
+| [Response storage, replay, outputs, and retention](RESPONSE-OUTPUT.md) | Implemented Phase 6 optional response stores, typed outputs, replay, PostgreSQL outbox, and independent retention. | Response storage, replay, output acknowledgement, outbox, lineage, or retention behavior changes. |
 
 The full architecture plan remains [FINAL-PLAN.md](../plans/FINAL-PLAN.md). Root repository rules remain [AGENTS.md](../AGENTS.md).
 

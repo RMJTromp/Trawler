@@ -31,6 +31,9 @@ public data class KtorTransportConfig(
     public val maxRobotsBodyBytes: Int = 128 * 1024,
     public val maxResponseHeaders: Int = 256,
     public val maxRequestHeaders: Int = 256,
+    public val maxTargetLength: Int = 16 * 1024,
+    public val maxMethodLength: Int = 256,
+    public val maxHeaderNameLength: Int = 1_024,
     public val maxHeaderValueLength: Int = 16 * 1024,
     public val maxRedirects: Int = 8,
     public val maxLocationLength: Int = 16 * 1024,
@@ -44,12 +47,19 @@ public data class KtorTransportConfig(
         require(requestTimeout.isPositive()) { "Request timeout must be positive" }
         require(socketTimeout.isPositive()) { "Socket timeout must be positive" }
         require(totalRequestTimeout.isPositive()) { "Total request timeout must be positive" }
+        require(connectTimeout.toMillis() > 0) { "Connect timeout must be at least one millisecond" }
+        require(requestTimeout.toMillis() > 0) { "Request timeout must be at least one millisecond" }
+        require(socketTimeout.toMillis() > 0) { "Socket timeout must be at least one millisecond" }
+        require(totalRequestTimeout.toMillis() > 0) { "Total request timeout must be at least one millisecond" }
         require(maxRequestBodyBytes > 0) { "Request body bound must be positive" }
         require(maxCompressedBodyBytes > 0) { "Compressed body bound must be positive" }
         require(maxDecompressedBodyBytes > 0) { "Decompressed body bound must be positive" }
         require(maxRobotsBodyBytes > 0) { "Robots body bound must be positive" }
         require(maxResponseHeaders > 0) { "Response header bound must be positive" }
         require(maxRequestHeaders > 0) { "Request header bound must be positive" }
+        require(maxTargetLength > 0) { "Target length bound must be positive" }
+        require(maxMethodLength > 0) { "Method length bound must be positive" }
+        require(maxHeaderNameLength > 0) { "Header-name length bound must be positive" }
         require(maxHeaderValueLength > 0) { "Header value bound must be positive" }
         require(maxRedirects >= 0) { "Redirect limit must not be negative" }
         require(maxLocationLength > 0) { "Location header bound must be positive" }

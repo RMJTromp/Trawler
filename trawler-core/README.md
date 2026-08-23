@@ -1,12 +1,13 @@
 # Trawler Core
 
-> **Status:** Phase 5 core support surface implemented; unreleased.
+> **Status:** Phase 6 core support surface implemented; unreleased.
 
 `trawler-core` is the primary planned published artifact. It contains the
 typed models and extension contracts, immutable composition configuration,
 deterministic validation, non-generic engine registration boundary, bounded
-in-memory execution, callback/flow outputs, optional response retention, and
-the opt-in coroutine scheduler. It remains unreleased.
+in-memory execution, callback/flow outputs, optional response retention and
+replay, bounded JDK file response/output stores using caller codecs, and the
+opt-in coroutine scheduler. It remains unreleased.
 
 Read the root [`AGENTS.md`](../AGENTS.md), [`FINAL-PLAN.md`](../plans/FINAL-PLAN.md), and [`MODULES.md`](../docs/MODULES.md) before implementing here.
 
@@ -39,6 +40,10 @@ The implemented scope includes typed contracts and composition:
 - seed and caller-provided `Flow` discovery;
 - callback, no-output, and bounded `Flow<Produced<T>>` output;
 - no-response and bounded in-memory response stores;
+- bounded JDK file response store and typed file output using caller-supplied
+  codecs;
+- response capture/cache policies, replay selection, typed output codecs,
+  batching/retry/idempotency decorators, and independent retention contracts;
 - generic lifecycle events and ordered observers;
 - opt-in manual, finite, fixed-delay, fixed-rate, and daily timezone-aware
   coroutine scheduling with bounded overlap handling.
@@ -53,20 +58,26 @@ The implemented scope includes typed contracts and composition:
 
 See the focused [typed core contracts feature record](../docs/TYPED-CORE-CONTRACTS.md),
 [in-memory engine feature record](../docs/IN-MEMORY-ENGINE.md), and
-[resumable discovery feature record](../docs/RECURRING-DISCOVERY.md) for
+[resumable discovery feature record](../docs/RECURRING-DISCOVERY.md), and
+[response/output feature record](../docs/RESPONSE-OUTPUT.md) for
 ownership, capability, lifecycle, registration, bound, and delivery details.
 
 Core does not implement database adapters, Ktor, web policies, site parsing, or
-domain models. The Phase 4 durable hooks remain adapter-neutral; the PostgreSQL
-implementation lives in `trawler-postgres`. A file response/output adapter is
-also not implemented.
+domain models. The PostgreSQL implementation lives in `trawler-postgres` and
+owns its response/output/outbox tables. File stores use host-selected paths,
+caller codecs, bounded rotation, and explicit lifecycle cleanup.
+
+The engine runtime also bounds UTF-8 target, method, header, and attribute
+metadata in addition to request and response bodies. Replay requires the
+response store to enforce ownership for the selected pipeline before applying
+the bounded response query limit.
 
 ## Later bundled implementations
 
-Subsequent core work may add the bounded JDK file response/output
-implementations using caller codecs. Technology-specific transport, web, and
-durable modules remain separate artifacts; the implemented PostgreSQL state
-adapter is documented in [`POSTGRES-STATE.md`](../docs/POSTGRES-STATE.md).
+Technology-specific transport, web, and durable modules remain separate
+artifacts; the implemented PostgreSQL state/response/output adapter is
+documented in [`POSTGRES-STATE.md`](../docs/POSTGRES-STATE.md) and
+[`RESPONSE-OUTPUT.md`](../docs/RESPONSE-OUTPUT.md).
 
 Bundled does not mean automatically active. Every implementation remains explicitly selected and replaceable.
 

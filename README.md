@@ -2,7 +2,7 @@
 
 Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-> **Project status: Phase 5 implemented.** `trawler-core` provides the typed composition boundary, bounded database-free engine, opt-in scheduling, resumable checkpoint contracts, recurring harvest policies, backlog admission, and optional pipeline health state. The optional `trawler-web` artifact provides the Ktor/CIO transport, replaceable web policies, and bounded RSS/Atom/sitemap discovery. The optional `trawler-postgres` artifact provides durable operational state, fenced leases, versioned request codecs, durable checkpoints, harvest state, health, and eligibility overrides. Response archival, produced-data output, and later specialized adapters remain planned. Artifacts are unreleased.
+> **Project status: Phase 6 implemented.** `trawler-core` provides the typed composition boundary, bounded database-free engine, opt-in scheduling, resumable checkpoint contracts, recurring harvest policies, backlog admission, optional pipeline health state, bounded in-memory/file response stores, replay, typed file output, and output decorators. The optional `trawler-web` artifact provides the Ktor/CIO transport, replaceable web policies, and bounded RSS/Atom/sitemap discovery. The optional `trawler-postgres` artifact provides durable operational state, fenced leases, versioned request codecs, durable checkpoints, harvest state, health, eligibility overrides, response history, typed output history, fenced outbox delivery, and independent retention. Later specialized adapters remain planned. Artifacts are unreleased.
 
 The governing product rule is:
 
@@ -123,7 +123,7 @@ The current core is usable with:
 - a caller-provided extractor;
 - callback output or direct `Flow<Produced<T>>` collection;
 - no SQL database;
-- no response archive;
+- no response archive when no response store is selected;
 - no scheduler, by calling `runOnce` directly;
 - no JSON library;
 - no web-specific policy.
@@ -137,10 +137,11 @@ retention, and output choices remain explicit:
 - callback/no-output collection;
 - direct bounded `Flow<Produced<T>>` output collection;
 - no-response and bounded in-memory response stores;
+- bounded JDK file response/output stores using caller-supplied codecs;
+- response capture/cache policies, replay through the normal typed path, and
+  output batching/retry/idempotency decorators;
 - common generic policies;
 - a coroutine scheduler with fixed-delay, fixed-rate, daily timezone-aware, immediate-first-run, and overlap behavior.
-
-Bounded JDK file response/output implementations using caller codecs remain planned.
 
 The implemented optional `trawler-web` adapter provides:
 
@@ -154,13 +155,15 @@ The implemented optional `trawler-postgres` adapter provides:
 - stable resources, visit jobs, active-work deduplication, cooldown state,
   PostgreSQL row-lock claims, lease fencing, and meaningful attempt history;
 - adapter-owned Flyway migrations and versioned request codecs;
-- durable checkpoint, harvest, health, and eligibility state without response or produced-data tables;
-- no response archive, produced-data table, or outbox.
+- durable checkpoint, harvest, health, and eligibility state;
+- optional append-only response history, typed output history, fenced outbox
+  delivery, and independent retention; these are not part of operational state
+  and do not define a universal extracted-record table.
 
 Future adapters may provide:
 
-- PostgreSQL, object-store, or WARC response storage;
-- PostgreSQL, queue, or outbox-backed outputs;
+- object-store or WARC response storage;
+- queue-backed outputs and external delivery integrations;
 - specialized discovery beyond the bounded RSS/Atom/sitemap and pagination hooks;
 - FlareSolverr or browser challenge resolution;
 - SLF4J, Micrometer, or OpenTelemetry observers;
@@ -213,10 +216,9 @@ A separate artifact is used when a capability introduces an external technology 
 
 ## Current repository state
 
-The repository contains the Phase 5 core contracts/runtime, optional Ktor web
-adapter, and optional durable PostgreSQL operational-state adapter. Response
-archival, produced-data output, and later specialized adapter phases remain
-unimplemented.
+The repository contains the Phase 6 core contracts/runtime, optional Ktor web
+adapter, and optional durable PostgreSQL state/response/output adapter. Later
+specialized adapter phases remain unimplemented.
 
 ```text
 Trawler/
@@ -226,7 +228,7 @@ Trawler/
 ├── pom.xml                    Maven parent and reactor
 ├── trawler-core/
 │   ├── pom.xml                core artifact
-│   ├── src/main/kotlin/       typed contracts, runtime, and core built-ins
+│   ├── src/main/kotlin/       typed contracts, runtime, stores, outputs, and core built-ins
 │   └── README.md              core-specific scope and starting point
 ├── trawler-web/
 │   ├── pom.xml                optional web adapter artifact
@@ -234,7 +236,7 @@ Trawler/
 │   └── README.md              web-specific scope and build entry point
 ├── trawler-postgres/
 │   ├── pom.xml                optional durable state adapter artifact
-│   ├── src/main/kotlin/       PostgreSQL state, leases, attempts, codecs, and recurring state
+│   ├── src/main/kotlin/       PostgreSQL state, response/output history, leases, attempts, codecs, and recurring state
 │   ├── src/main/resources/    adapter-owned Flyway migrations
 │   └── README.md              PostgreSQL-specific scope and build entry point
 ├── docs/
@@ -247,6 +249,7 @@ Trawler/
 │   ├── WEB-ADAPTER.md         Phase 3 web adapter feature record
 │   ├── POSTGRES-STATE.md      Phase 4 durable state feature record
 │   ├── RECURRING-DISCOVERY.md Phase 5 resumable/recurring discovery record
+│   ├── RESPONSE-OUTPUT.md     Phase 6 response/output/replay/retention record
 │   └── decisions/             architecture decision records
 └── plans/
     └── FINAL-PLAN.md          authoritative implementation plan
@@ -274,20 +277,23 @@ Package and run all configured Maven lifecycle checks:
 mvn clean verify
 ```
 
-The Phase 5 reactor contains the core JAR, optional `trawler-web` JAR, and
+The Phase 6 reactor contains the core JAR, optional `trawler-web` JAR, and
 optional `trawler-postgres` JAR. Core contains typed contracts, immutable
-configuration, bounded runtime/scheduling, and generic resumable-discovery
-coordination; the web artifact owns Ktor/HTTP and bounded XML discovery; the
-PostgreSQL artifact owns JDBC, Hikari, Flyway, durable operational state,
-leases, attempts, request codecs, checkpoints, harvest state, and eligibility
-state. Do not add placeholder classes or resources to represent later phases.
+configuration, bounded runtime/scheduling, generic resumable-discovery
+coordination, optional response stores/replay, and typed file output; the web
+artifact owns Ktor/HTTP and bounded XML discovery; the PostgreSQL artifact owns
+JDBC, Hikari, Flyway, durable operational state, response/output history,
+fenced outbox delivery, leases, attempts, request codecs, checkpoints, harvest
+state, eligibility state, and independent retention. Do not add placeholder
+classes or resources to represent later phases.
 
 There is currently no runnable main class; the engine and adapters are library
 APIs. See the [typed core contracts feature record](docs/TYPED-CORE-CONTRACTS.md),
 the [in-memory engine feature record](docs/IN-MEMORY-ENGINE.md), the [web
 adapter feature record](docs/WEB-ADAPTER.md), the [PostgreSQL state feature
-record](docs/POSTGRES-STATE.md), and the [recurring discovery feature record](docs/RECURRING-DISCOVERY.md)
-for the implemented Phase 1 through Phase 5 boundaries.
+record](docs/POSTGRES-STATE.md), the [recurring discovery feature record](docs/RECURRING-DISCOVERY.md),
+and the [response/output feature record](docs/RESPONSE-OUTPUT.md) for the
+implemented Phase 1 through Phase 6 boundaries.
 
 ## Dependencies
 

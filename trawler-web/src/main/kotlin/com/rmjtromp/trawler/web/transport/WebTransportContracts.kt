@@ -4,6 +4,7 @@ import com.rmjtromp.trawler.model.CrawlResponse
 import com.rmjtromp.trawler.policy.Clock
 import com.rmjtromp.trawler.policy.SystemClock
 import com.rmjtromp.trawler.web.policy.RetryAfterPolicy
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -16,6 +17,7 @@ import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
@@ -160,15 +162,17 @@ public class JdkNetworkAddressResolver(
     override val id: String = "jdk-dns"
 
     private val closed = AtomicBoolean(false)
-    private val executor = Executors.newFixedThreadPool(
-        maxParallelLookups,
-        DaemonThreadFactory("trawler-web-dns"),
-    )
-    private val dispatcher = executor.asCoroutineDispatcher()
+    private val executor: ExecutorService
+    private val dispatcher: ExecutorCoroutineDispatcher
 
     init {
         require(maxParallelLookups > 0) { "DNS parallelism must be positive" }
         require(maxResolvedAddresses > 0) { "DNS address bound must be positive" }
+        executor = Executors.newFixedThreadPool(
+            maxParallelLookups,
+            DaemonThreadFactory("trawler-web-dns"),
+        )
+        dispatcher = executor.asCoroutineDispatcher()
     }
 
     override suspend fun resolve(host: String): List<InetAddress> {

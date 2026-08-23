@@ -16,7 +16,7 @@ Three ideas must remain distinct:
 
 Physical modules exist to isolate dependencies, technology stacks, heavy operational footprints, or meaningful independent replacement—not to mirror every interface.
 
-> **Current repository status:** The reactor contains the build-only `trawler-parent`, `trawler-core`, and the implemented optional `trawler-web` and `trawler-postgres` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, resumable/recurring discovery coordination, Ktor/web behavior, bounded XML discovery, and durable PostgreSQL operational state are implemented. Response archival, produced-data output, and specialized modules remain planned.
+> **Current repository status:** The reactor contains the build-only `trawler-parent`, `trawler-core`, and the implemented optional `trawler-web` and `trawler-postgres` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, resumable/recurring discovery coordination, Ktor/web behavior, bounded XML discovery, durable PostgreSQL operational state, optional response storage/replay, typed file output, PostgreSQL output, and fenced outbox delivery are implemented. Specialized modules remain planned.
 
 ## Module admission test
 
@@ -73,7 +73,7 @@ Bundled official implementations:
 - callback, no-output, and bounded `Flow<Produced<T>>` collection (implemented in Phase 2);
 - generic retry, identity, active-deduplication, recrawl, ordering, concurrency, pacing, and budget policies (implemented in Phase 2);
 - coroutine scheduler supporting finite/manual triggers, fixed delay, fixed rate, daily local time with timezone, immediate-first-run option, and explicit overlap behavior (implemented in Phase 2);
-- bounded JDK file response/output implementations using caller-supplied codecs (planned; not part of Phase 2).
+- bounded JDK file response/output implementations using caller-supplied codecs (implemented in Phase 6).
 
 Bundling these does not add an external technology requirement. The ordinary
 builder selects the bounded in-memory state and generic policy preset; the
@@ -132,10 +132,10 @@ JDBC/pool/migration stack:
 
 These capabilities are independently activated. Depending on
 `trawler-postgres` does not force response archival, user-data output, or
-outbox delivery. Response storage, produced-data output, and outbox behavior
-remain later implementations inside this cohesive artifact or another
-explicitly justified adapter; Phase 5 adds optional checkpoints, harvest
-state, health, and eligibility state.
+outbox delivery. Phase 5 adds optional checkpoints, harvest state, health, and
+eligibility state; Phase 6 adds separate PostgreSQL response history, typed
+output history, optional outbox delivery, local response lineage, and
+independent retention without adding a universal produced-data table.
 
 A generic multi-database JDBC abstraction is not part of this initial artifact. Add `trawler-jdbc` later only if real non-PostgreSQL implementations demonstrate a shared contract and implementation worth extracting.
 
@@ -170,9 +170,9 @@ Examples remain in the repository but are not published as production runtime de
 | Callback/no-output | `trawler-core` | Implemented fundamental host handoff with no dependency. |
 | In-memory response store | `trawler-core` | Implemented optional bounded retention/replay without a storage dependency. |
 | Generic policies | `trawler-core` | Implemented reusable defaults with no technology coupling. |
-| Bounded file response/output | `trawler-core` | Planned JDK-only, codec-driven standard capability; no separate tiny artifact. WARC/object storage remains separate. |
+| Bounded file response/output | `trawler-core` | Implemented JDK-only, codec-driven standard capability; no separate tiny artifact. WARC/object storage remains separate. |
 | Ktor + web policies and bounded RSS/Atom/sitemap discovery | `trawler-web` | Cohesive HTTP semantics and shared external stack; XML behavior uses JDK APIs without a parser dependency. |
-| PostgreSQL state, run history, leases, attempts, request codecs, checkpoints, and recurring state | `trawler-postgres` | Cohesive database stack; Phase 4/5 capabilities remain separately activated. |
+| PostgreSQL state, run history, leases, attempts, request codecs, checkpoints, recurring state, response history, typed output, outbox, and retention | `trawler-postgres` | Cohesive database stack; Phase 4/5/6 capabilities remain separately activated. |
 
 ## What must not become a module
 

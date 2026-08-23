@@ -43,6 +43,15 @@ public class PostgresStateConfiguration(
     public val maxCheckpointPayloadBytes: Int = 2 * 1024 * 1024,
     public val maxEncodedRequestBytes: Int = 8 * 1_024 * 1_024,
     public val maxRequestBodyBytes: Int = 8 * 1_024 * 1_024,
+    public val maxResponseBodyBytes: Int = 8 * 1_024 * 1_024,
+    public val maxEncodedResponseBytes: Int = 8 * 1_024 * 1_024,
+    public val maxOutputPayloadBytes: Int = 1 * 1_024 * 1_024,
+    public val maxOutputBatchItems: Int = 256,
+    public val maxResponseQueryLimit: Int = 4_096,
+    public val maxOutboxClaimBatch: Int = 64,
+    public val maxRetentionRows: Int = 4_096,
+    public val outboxLeaseDuration: Duration = Duration.ofMinutes(5),
+    public val maxOutboxAttempts: Int = 10,
     public val maxHeaderCount: Int = 256,
     public val maxAttributeCount: Int = 256,
     public val maxHeaderNameBytes: Int = 1_024,
@@ -95,6 +104,15 @@ public class PostgresStateConfiguration(
         require(maxCheckpointPayloadBytes > 0) { "Checkpoint payload bound must be positive" }
         require(maxEncodedRequestBytes > 0) { "Encoded request bound must be positive" }
         require(maxRequestBodyBytes >= 0) { "Request body bound must not be negative" }
+        require(maxResponseBodyBytes > 0) { "Response body bound must be positive" }
+        require(maxEncodedResponseBytes > 0) { "Encoded response bound must be positive" }
+        require(maxOutputPayloadBytes > 0) { "Output payload bound must be positive" }
+        require(maxOutputBatchItems > 0) { "Output batch bound must be positive" }
+        require(maxResponseQueryLimit > 0) { "Response query bound must be positive" }
+        require(maxOutboxClaimBatch > 0) { "Outbox claim batch must be positive" }
+        require(maxRetentionRows > 0) { "Retention row bound must be positive" }
+        requireTimeout(outboxLeaseDuration, "outbox lease duration")
+        require(maxOutboxAttempts > 0) { "Outbox attempt bound must be positive" }
         require(maxHeaderCount >= 0) { "Header count bound must not be negative" }
         require(maxAttributeCount >= 0) { "Attribute count bound must not be negative" }
         require(maxHeaderNameBytes > 0) { "Header name bound must be positive" }

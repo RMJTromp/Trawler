@@ -75,10 +75,13 @@ runtime work. A scheduler is never started by construction or by direct
 
 `EngineRuntimeOptions` bounds queue admission, pending direct runs, work per
 run, discovery emissions, follow-ups, values per response, request/response
-bodies, produced values, attempts, workers, claims, output batches, lease
-duration, run and shutdown waits, and retained in-memory state. Invalid or
-non-positive bounds fail during configuration construction. `RunRequest` and
-`DaemonConfig` copy selected pipeline IDs at construction.
+bodies, request/response targets, methods, headers, attributes, produced
+values, attempts, workers, claims, output batches, lease duration, run and
+shutdown waits, and retained in-memory state. Invalid or non-positive bounds
+fail during configuration construction. `RunRequest` and `DaemonConfig` copy
+selected pipeline IDs at construction. Metadata bounds are enforced again
+after canonicalization, middleware, and response adaptation so extensions
+cannot grow the in-memory request/response graph without a configured limit.
 
 Single-cardinality configuration remains explicit: `stateStore`, response
 store, transport, extractor, policy slots, and inherited defaults reject
@@ -105,6 +108,12 @@ the configured bound, cancels the engine-owned root scope, stops engine
 extensions in reverse order, and closes outputs implementing `OutputLifecycle`.
 Non-cooperative caller code cannot extend the shutdown wait indefinitely.
 
+Network-free response replay uses a separate `REPLAYING` lifecycle branch from
+`NEW`. It starts only explicitly replay-safe lifecycle resources, never starts
+the crawl-state extension, and returns to `NEW` after its bounded response
+processing completes. A replay running beside an already `RUNNING` engine does
+not restart shared engine extensions.
+
 One `runOnce` call is an engine run. Direct runs are serialized at the engine
 boundary while selected pipeline runs execute under `supervisorScope`, so a
 failure in one pipeline produces a failed pipeline result without
@@ -116,7 +125,9 @@ pipeline failures return `FAILED`; successful drained runs return
 
 Pipeline extensions start in declared order for that pipeline run and stop in
 reverse order with a completion, failure, abandonment, or cancellation
-reason. Discovery is collected before worker draining, through the
+reason. A pipeline-owned lifecycle object cannot also be registered as an
+engine extension; this prevents double start/stop ownership. Discovery is
+collected before worker draining, through the
 engine-provided `RequestExecutor`. Workers claim only their pipeline's work,
 execute bounded processing, and stop when the state store reports no active
 work. `awaitIdle` joins active engine runs with its explicit timeout.
