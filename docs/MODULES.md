@@ -16,7 +16,7 @@ Three ideas must remain distinct:
 
 Physical modules exist to isolate dependencies, technology stacks, heavy operational footprints, or meaningful independent replacement—not to mirror every interface.
 
-> **Current repository status:** The reactor contains the build-only `trawler-parent`, `trawler-core`, and the implemented optional `trawler-web` and `trawler-postgres` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, Ktor/web behavior, and durable PostgreSQL operational state are implemented. Response archival, produced-data output, checkpoints, and specialized modules remain planned.
+> **Current repository status:** The reactor contains the build-only `trawler-parent`, `trawler-core`, and the implemented optional `trawler-web` and `trawler-postgres` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, resumable/recurring discovery coordination, Ktor/web behavior, bounded XML discovery, and durable PostgreSQL operational state are implemented. Response archival, produced-data output, and specialized modules remain planned.
 
 ## Module admission test
 
@@ -106,10 +106,10 @@ Bundles the common public-web technology surface:
 - public-network/SSRF safety preset;
 - HTTP failure classification and retry defaults;
 - origin concurrency, pacing, and `Retry-After` behavior;
-- bounded transport/robots foundations for later RSS/Atom and sitemap discovery;
+- bounded RSS/Atom and sitemap discovery through engine-controlled transport;
 - web cache/conditional-request policies that do not require persistence.
 
-These belong together because they share HTTP semantics and the Ktor/web dependency stack. They remain separate extension contracts internally. RSS/Atom and sitemap parsers/discovery are still Phase 5 work. A user may use `trawler-core` with another transport and omit this artifact entirely.
+These belong together because they share HTTP semantics and the Ktor/web dependency stack. They remain separate extension contracts internally. A user may use `trawler-core` with another transport and omit this artifact entirely.
 
 Do not add Jsoup, Jackson, or another parser/codec automatically. Add one only when implemented behavior proves it is needed and record it in `docs/DEPENDENCIES.md`.
 
@@ -131,10 +131,11 @@ JDBC/pool/migration stack:
   fencing, history, cancellation, ordering, and run recovery.
 
 These capabilities are independently activated. Depending on
-`trawler-postgres` does not force response archival, user-data output,
-checkpoints, or outbox delivery. Response storage, produced-data output,
-checkpoints, harvest state, and outbox behavior remain later implementations
-inside this cohesive artifact or another explicitly justified adapter.
+`trawler-postgres` does not force response archival, user-data output, or
+outbox delivery. Response storage, produced-data output, and outbox behavior
+remain later implementations inside this cohesive artifact or another
+explicitly justified adapter; Phase 5 adds optional checkpoints, harvest
+state, health, and eligibility state.
 
 A generic multi-database JDBC abstraction is not part of this initial artifact. Add `trawler-jdbc` later only if real non-PostgreSQL implementations demonstrate a shared contract and implementation worth extracting.
 
@@ -170,8 +171,8 @@ Examples remain in the repository but are not published as production runtime de
 | In-memory response store | `trawler-core` | Implemented optional bounded retention/replay without a storage dependency. |
 | Generic policies | `trawler-core` | Implemented reusable defaults with no technology coupling. |
 | Bounded file response/output | `trawler-core` | Planned JDK-only, codec-driven standard capability; no separate tiny artifact. WARC/object storage remains separate. |
-| Ktor + web policies and bounded discovery foundations | `trawler-web` | Cohesive HTTP semantics and shared external stack; RSS/sitemap implementations remain Phase 5. |
-| PostgreSQL state, run history, leases, attempts, and request codecs | `trawler-postgres` | Cohesive database stack; implemented Phase 4 capabilities remain separately activated. |
+| Ktor + web policies and bounded RSS/Atom/sitemap discovery | `trawler-web` | Cohesive HTTP semantics and shared external stack; XML behavior uses JDK APIs without a parser dependency. |
+| PostgreSQL state, run history, leases, attempts, request codecs, checkpoints, and recurring state | `trawler-postgres` | Cohesive database stack; Phase 4/5 capabilities remain separately activated. |
 
 ## What must not become a module
 

@@ -36,6 +36,24 @@ public enum class CrawlStateCapability {
     /** Work acceptance and checkpoint advancement share one atomic boundary. */
     ATOMIC_ENQUEUE_AND_CHECKPOINT,
 
+    /** Incompatible checkpoints can be retained for explicit operator action. */
+    CHECKPOINT_QUARANTINE,
+
+    /** Opaque harvest state can be loaded and advanced. */
+    HARVEST_STATE,
+
+    /** Incompatible harvest state can be retained for explicit operator action. */
+    HARVEST_STATE_QUARANTINE,
+
+    /** Queue metrics needed by admission watermarks are available. */
+    QUEUE_WATERMARKS,
+
+    /** Pipeline health snapshots can be loaded and compare-and-set. */
+    PIPELINE_HEALTH,
+
+    /** Operator pipeline eligibility overrides can be loaded and changed. */
+    PIPELINE_ELIGIBILITY_OVERRIDES,
+
     /** Historical operational state can be queried by the selected adapter. */
     QUERYABLE_HISTORY,
 
@@ -439,6 +457,8 @@ public data class DiscoveryCheckpoint(
     public val codecVersion: Int,
     public val payload: CheckpointPayload,
     public val generationId: String? = null,
+    public val strategyId: String? = null,
+    public val completed: Boolean = false,
 ) {
     init {
         require(revision >= 0) { "Checkpoint revision must not be negative" }
@@ -446,6 +466,9 @@ public data class DiscoveryCheckpoint(
         require(codecVersion >= 0) { "Checkpoint codec version must not be negative" }
         require(generationId == null || generationId.isNotBlank()) {
             "Checkpoint generation ID must not be blank when present"
+        }
+        require(strategyId == null || strategyId.isNotBlank()) {
+            "Checkpoint strategy ID must not be blank when present"
         }
     }
 }
@@ -468,4 +491,110 @@ public interface DiscoveryCheckpointStore {
         expectedRevision: Long?,
         next: DiscoveryCheckpoint,
     ): Boolean
+}
+
+/** Codec descriptor persisted beside an opaque checkpoint payload. */
+public data class DiscoveryCheckpointCodecDescriptor(
+    public val id: String,
+    public val version: Int,
+) {
+    init {
+        require(id.isNotBlank()) { "Discovery checkpoint codec ID must not be blank" }
+        require(version >= 0) { "Discovery checkpoint codec version must not be negative" }
+    }
+}
+
+/** Explicit result of resolving a stored checkpoint against a current codec. */
+public sealed interface CheckpointResolution {
+    /** The loaded checkpoint is compatible and may be supplied to discovery. */
+    public data class Use(public val checkpoint: DiscoveryCheckpoint) : CheckpointResolution
+
+    /** An older payload was converted by the extension-owned codec. */
+    public data class Migrated(public val checkpoint: DiscoveryCheckpoint) : CheckpointResolution
+
+    /** The state is intentionally reset to an empty current-codec payload. */
+    public data class Reset(public val reason: String) : CheckpointResolution {
+        init {
+            require(reason.isNotBlank()) { "Checkpoint reset reason must not be blank" }
+        }
+    }
+
+    /** The incompatible state must be retained for explicit operator action. */
+    public data class Quarantine(public val reason: String) : CheckpointResolution {
+        init {
+            require(reason.isNotBlank()) { "Checkpoint quarantine reason must not be blank" }
+        }
+    }
+}
+
+/** Work item supplied to an atomic discovery admission operation. */
+public data class DiscoveryWorkItem(
+    public val request: CrawlRequest,
+    public val identity: RequestIdentity,
+    public val context: CrawlerContext,
+)
+
+/** Result of an adapter-owned enqueue plus checkpoint transaction. */
+public sealed interface AtomicEnqueueCheckpointResult {
+    /** All items were accepted/suppressed and the checkpoint committed. */
+    public data class Advanced(
+        public val enqueueResults: List<EnqueueResult>,
+        public val checkpoint: DiscoveryCheckpoint,
+    ) : AtomicEnqueueCheckpointResult
+
+    /** A different writer advanced the checkpoint first; no work was committed. */
+    public data object RevisionConflict : AtomicEnqueueCheckpointResult
+
+    /** The bounded queue could not accept the batch; no checkpoint advanced. */
+    public data class Rejected(public val reason: String) : AtomicEnqueueCheckpointResult {
+        init {
+            require(reason.isNotBlank()) { "Atomic enqueue rejection reason must not be blank" }
+        }
+    }
+}
+
+/**
+ * Optional transaction boundary for durable discovery admission.
+ *
+ * Implementations must keep [items] bounded, perform active deduplication in
+ * the same transaction as checkpoint advancement, and roll back both when a
+ * revision conflict or queue rejection occurs. The engine still owns the
+ * response supplied by [com.rmjtromp.trawler.discovery.DiscoveryEmission.ExistingResponse].
+ */
+public interface AtomicEnqueueAndCheckpointStore : DiscoveryCheckpointStore {
+    /** Enqueues [items] and advances [next] under one adapter-owned boundary. */
+    public suspend fun enqueueAndCheckpoint(
+        pipelineId: String,
+        discoveryId: String,
+        expectedRevision: Long?,
+        next: DiscoveryCheckpoint,
+        items: List<DiscoveryWorkItem>,
+    ): AtomicEnqueueCheckpointResult
+}
+
+/** Retains incompatible checkpoint bytes and the reason they were quarantined. */
+public interface CheckpointQuarantineStore {
+    /** Stores one bounded operational quarantine record without executing it. */
+    public suspend fun quarantine(
+        pipelineId: String,
+        discoveryId: String,
+        checkpoint: DiscoveryCheckpoint,
+        reason: String,
+    )
+}
+
+/** Immutable queue metrics used by admission policies. */
+public data class WorkQueueMetrics(
+    public val openWorkCount: Int,
+    public val oldestOpenWorkAt: Instant?,
+) {
+    init {
+        require(openWorkCount >= 0) { "Open work count must not be negative" }
+    }
+}
+
+/** Optional bounded queue metrics capability for watermark admission. */
+public interface WorkQueueMetricsStore {
+    /** Returns scalar metrics without loading work rows into memory. */
+    public suspend fun metrics(pipelineId: String): WorkQueueMetrics
 }

@@ -107,11 +107,13 @@ Owns engine-operational state such as work, claims, retries, optional checkpoint
 
 The implemented `trawler-postgres` adapter supplies durable resources, visit
 jobs, row-lock claims, sequence-backed fencing tokens, meaningful attempts,
-cooldown/next-eligibility state, and engine/pipeline run summaries. Its
+cooldown/next-eligibility state, engine/pipeline run summaries, resumable
+checkpoints, harvest state, pipeline health, and eligibility overrides. Its
 `RunHistoryStore` hook remains lifecycle metadata only; stale summary recovery
 does not release job leases or bypass the lease predicates. The adapter does
-not add response, output, checkpoint, or user-data tables. See
-[`POSTGRES-STATE.md`](POSTGRES-STATE.md).
+not add response, output, or user-data tables. See
+[`POSTGRES-STATE.md`](POSTGRES-STATE.md) and
+[`RECURRING-DISCOVERY.md`](RECURRING-DISCOVERY.md).
 
 ### Response store
 
@@ -139,6 +141,10 @@ Rules:
 - every lease-owned mutation includes its token;
 - checkpoints advance after accepted work, never before;
 - checkpoint codecs are extension-owned and versioned;
+- checkpoint and harvest revisions use compare-and-set, with explicit
+  migration, reset, or quarantine outcomes;
+- atomic enqueue-plus-checkpoint is an adapter capability; the fallback is
+  replay-safe and may emit an at-least-once duplicate;
 - response references are optional and opaque;
 - user output never enters state tables.
 
@@ -147,6 +153,22 @@ Rules:
 Historical/incremental behavior is an installed strategy, not universal engine state. A historical completion claim is allowed only after its discovery end condition, relevant checkpoints, dependent jobs, run outcome, and configured completion predicate are all settled.
 
 Stateless and one-shot pipelines must not pay for harvest state they do not use.
+
+## Phase 5 resumable discovery
+
+The implemented recurring-discovery layer loads compatible state before a
+discovery walk, supplies the checkpoint and optional incremental window through
+`DiscoveryContext`, and advances checkpoint state only after accepted work.
+`BacklogFirst`, `Continuous`, and queue-watermark admission are replaceable
+policies. A harvest strategy can commit state only after all relevant
+resumable discoveries reach natural end, generated work settles, the run is
+completed, and its predicate passes. Budget exhaustion and cancellation leave
+state resumable and do not claim historical coverage.
+
+RSS, Atom, and sitemap discovery live in `trawler-web` and use the same
+engine-controlled request path as ordinary work. Their JDK StAX/gzip parser is
+bounded and does not introduce a core parser dependency. See
+[`RECURRING-DISCOVERY.md`](RECURRING-DISCOVERY.md).
 
 ## Delivery semantics
 
@@ -218,16 +240,18 @@ PostgreSQL state adapter
 
 Both profiles use the same core contracts.
 
-## Phase 4 PostgreSQL state adapter
+## Phase 4/5 PostgreSQL state adapter
 
 `trawler-postgres` is an optional adapter profile that can replace the
 in-memory state store without changing a typed pipeline. Startup runs the
-adapter-owned Flyway migration and bounded stale run-summary recovery; runtime
+adapter-owned Flyway migrations and bounded stale run-summary recovery; runtime
 claims use PostgreSQL `FOR UPDATE SKIP LOCKED`, active work uses a partial
 unique index, and every lease-owned mutation checks the current owner and
 fencing token. Lease expiry is reclaimed at the beginning of a bounded claim
 transaction. A lease is not an attempt: `attempt_count` changes only when a
-worker successfully begins meaningful execution.
+worker successfully begins meaningful execution. V2 adds revisioned
+checkpoints, harvest state, quarantine records, health, and eligibility state;
+it still has no response or produced-data table.
 
 The adapter owns a Hikari pool and a fixed dispatcher whose parallelism cannot
 exceed the pool size. Its queue, claim/cancellation/recovery batches, request

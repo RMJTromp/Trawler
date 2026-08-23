@@ -166,9 +166,10 @@ Phase 1 defines the contracts that Phase 2 executes:
 `ExtensionLifecycle.start` receives an engine-owned `CoroutineScope` and
 `stop` receives an explicit reason. The Phase 2 runtime starts and stops
 extensions in those orders, transitions in-memory jobs through bounded
-lease-owned states, and closes selected output lifecycle resources. Durable
-checkpointing, response replay, and adapter recovery remain outside this
-phase.
+lease-owned states, and closes selected output lifecycle resources. Phase 5
+adds optional resumable checkpoint/harvest coordination; durable persistence,
+migration, and quarantine remain adapter capabilities. Response replay remains
+outside this phase.
 
 ## Capabilities and dependencies
 
@@ -208,9 +209,9 @@ Outputs declare required versus best-effort delivery, but no output or engine
 configuration claims exactly-once delivery. Non-transactional output adapters
 must document their duplicate/loss window and idempotency requirements. The
 Phase 2 in-memory runtime reports worker completion and supports optional
-in-memory response replay. Durable checkpointing remains unimplemented; the
-optional Phase 4 PostgreSQL adapter adds durable run-summary recovery and
-fenced operational state without changing these core contracts.
+in-memory response replay. Phase 5 adds resumable discovery and recurring
+harvest contracts; the optional PostgreSQL adapter supplies their durable
+revisioned state without changing the typed value boundary.
 
 ## Security, privacy, and retention
 

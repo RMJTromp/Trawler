@@ -14,8 +14,9 @@ This directory contains focused, normative project documentation.
 | [Decisions](decisions/README.md) | Architecture Decision Record index and process. | A cross-cutting or difficult-to-reverse decision is made. |
 | [Typed core contracts](TYPED-CORE-CONTRACTS.md) | Implemented Phase 1 public contracts, composition, validation, and registration safety. | Typed core contracts or their composition semantics change. |
 | [In-memory engine](IN-MEMORY-ENGINE.md) | Implemented Phase 2 database-free runtime, state, outputs, events, and scheduler. | Runtime lifecycle, bounds, in-memory guarantees, or scheduler behavior changes. |
-| [Ktor web adapter](WEB-ADAPTER.md) | Implemented Phase 3 HTTP transport, redirect, public-web, robots, session, and origin-policy behavior. | Web transport, safety, robots, session, or web dependency behavior changes. |
-| [Durable PostgreSQL state](POSTGRES-STATE.md) | Implemented Phase 4 PostgreSQL operational state, leases, attempts, run history, and request codecs. | PostgreSQL state schema, fencing, recovery, codec, pool, or retention behavior changes. |
+| [Ktor web adapter](WEB-ADAPTER.md) | Implemented Phase 3/5 HTTP transport, redirect, public-web, robots, session, origin-policy, and bounded XML discovery behavior. | Web transport, safety, robots, session, discovery, or web dependency behavior changes. |
+| [Durable PostgreSQL state](POSTGRES-STATE.md) | Implemented Phase 4/5 PostgreSQL operational state, leases, attempts, run history, request codecs, checkpoints, and recurring state. | PostgreSQL state schema, fencing, recovery, codec, pool, recurring state, or retention behavior changes. |
+| [Resumable and recurring discovery](RECURRING-DISCOVERY.md) | Implemented Phase 5 checkpoints, harvest strategies, admission, XML discovery, and recurring state. | Discovery checkpoints, harvest completion, backlog admission, XML bounds, or recurring state changes. |
 
 The full architecture plan remains [FINAL-PLAN.md](../plans/FINAL-PLAN.md). Root repository rules remain [AGENTS.md](../AGENTS.md).
 

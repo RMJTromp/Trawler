@@ -40,6 +40,8 @@ public data class EngineRuntimeOptions(
     public val shutdownTimeout: Duration = Duration.ofSeconds(10),
     public val maxRetainedJobs: Int = 8_192,
     public val maxRetainedResources: Int = 8_192,
+    public val maxRetainedDiscoveryState: Int = 2_048,
+    public val maxCheckpointPayloadBytes: Int = 2 * 1024 * 1024,
 ) {
     init {
         require(maxQueueSize > 0) { "Runtime queue size must be positive" }
@@ -77,6 +79,12 @@ public data class EngineRuntimeOptions(
         }
         require(maxRetainedResources >= maxQueueSize) {
             "Runtime retained resources must be at least the queue size"
+        }
+        require(maxRetainedDiscoveryState > 0) {
+            "Runtime retained discovery state bound must be positive"
+        }
+        require(maxCheckpointPayloadBytes > 0) {
+            "Runtime checkpoint payload bound must be positive"
         }
     }
 }

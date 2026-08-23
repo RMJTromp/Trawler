@@ -39,6 +39,8 @@ public class PostgresStateConfiguration(
     public val maxClaimBatch: Int = 64,
     public val maxCancellationRows: Int = 4_096,
     public val maxRecoveryRows: Int = 1_024,
+    public val maxCheckpointBatch: Int = 64,
+    public val maxCheckpointPayloadBytes: Int = 2 * 1024 * 1024,
     public val maxEncodedRequestBytes: Int = 8 * 1_024 * 1_024,
     public val maxRequestBodyBytes: Int = 8 * 1_024 * 1_024,
     public val maxHeaderCount: Int = 256,
@@ -89,6 +91,8 @@ public class PostgresStateConfiguration(
         }
         require(maxCancellationRows > 0) { "PostgreSQL cancellation batch must be positive" }
         require(maxRecoveryRows > 0) { "PostgreSQL recovery batch must be positive" }
+        require(maxCheckpointBatch > 0) { "PostgreSQL checkpoint batch must be positive" }
+        require(maxCheckpointPayloadBytes > 0) { "Checkpoint payload bound must be positive" }
         require(maxEncodedRequestBytes > 0) { "Encoded request bound must be positive" }
         require(maxRequestBodyBytes >= 0) { "Request body bound must not be negative" }
         require(maxHeaderCount >= 0) { "Header count bound must not be negative" }

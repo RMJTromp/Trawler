@@ -1,6 +1,6 @@
 # Durable PostgreSQL State
 
-> **Status:** Implemented Phase 4; unreleased
+> **Status:** Implemented Phase 4/5; unreleased
 >
 > **Owner:** `trawler-postgres`
 >
@@ -10,8 +10,10 @@
 
 `trawler-postgres` is the optional durable operational-state adapter for
 Trawler. It gives the core engine restart-surviving resources, visit jobs,
-leases, meaningful attempts, run summaries, and request-codec payloads while
-keeping response retention and produced-data output independent.
+leases, meaningful attempts, run summaries, request-codec payloads, resumable
+discovery checkpoints, optional harvest state, pipeline health, and eligibility
+overrides while keeping response retention and produced-data output
+independent.
 
 The module is selected explicitly. Configure one `PostgresCrawlStateStore` as
 the engine state store and register the same instance as an engine lifecycle
@@ -26,7 +28,6 @@ This phase does not implement:
 - extracted-record, entity, schema, or user-data tables;
 - a mandatory response-body archive or replay store;
 - produced-data output, an outbox, or exactly-once delivery;
-- discovery checkpoints or checkpoint/enqueue atomicity;
 - HTTP/Ktor, robots, RSS/Atom, sitemap, browser, or anti-bot behavior;
 - a generic JDBC abstraction for another database;
 - a serializer for `T` or a universal JSON representation of requests.
@@ -45,7 +46,11 @@ The core owns the adapter-neutral capability contracts:
 - `AttemptStore` and `ExecutionAttempt`;
 - `ResourceHistoryStore` and `ResourceHistory`;
 - `WorkCancellationStore`, `WorkOrderingStore`, and `WorkQueueStatus`;
-- `RunHistoryStore` and `DurableRunStatus`.
+- `RunHistoryStore` and `DurableRunStatus`;
+- `DiscoveryCheckpointStore`, atomic checkpoint admission, and checkpoint
+  quarantine;
+- `HarvestStateStore`, harvest-state quarantine, queue metrics, pipeline health,
+  and eligibility override capabilities.
 
 The PostgreSQL module owns:
 
@@ -76,6 +81,8 @@ start. Its defaults are deliberately finite:
 | `maxClaimBatch` | 64 | Maximum rows claimed or reclaimed in one transaction. |
 | `maxCancellationRows` | 4,096 | Maximum rows selected by one bounded cancellation batch. |
 | `maxRecoveryRows` | 1,024 | Maximum stale rows recovered per run-summary table per call. |
+| `maxCheckpointBatch` | 64 | Maximum work items in one enqueue-plus-checkpoint transaction. |
+| `maxCheckpointPayloadBytes` | 2 MiB | Maximum checkpoint or harvest payload. |
 | `maxEncodedRequestBytes` | 8 MiB | Maximum stored request-codec payload. |
 | `maxRequestBodyBytes` | 8 MiB | Maximum decoded request body. |
 | `maxHeaderCount` / `maxAttributeCount` | 256 / 256 | Maximum entries in one request. |
@@ -127,6 +134,12 @@ The migration creates only operational tables and sequences:
 | `resources` | Stable `(pipeline_id, identity_value)`, last completion, `next_eligible_at`, visit count, and maintenance timestamps. |
 | `jobs` | One desired visit: job ID, resource FK, versioned request codec ID/version/payload, status, queue sequence, retry time, lease fields, attempt count, active attempt, completion, reason, and update time. |
 | `attempts` | One append-only meaningful attempt row with job/pipeline IDs, attempt number, lease token/owner, start/completion, outcome, and reason. |
+| `discovery_checkpoints` | One revisioned opaque checkpoint per `(pipeline_id, discovery_id)`, with codec ID/version, strategy, generation, and completion flag. |
+| `discovery_checkpoint_quarantine` | Retained incompatible checkpoint payloads and reasons. |
+| `harvest_state` | One revisioned opaque strategy state per `(pipeline_id, strategy_id)`. |
+| `harvest_state_quarantine` | Retained incompatible harvest-state payloads and reasons. |
+| `pipeline_health` | Compare-and-set health counters and optional circuit-open time. |
+| `pipeline_overrides` | Explicit operator eligibility state and optional expiry. |
 | `flyway_schema_history` | Flyway's adapter-owned migration bookkeeping. |
 
 The `jobs_one_active_resource_idx` partial unique index enforces at most one
@@ -136,7 +149,8 @@ resource can receive a later job. The resource uniqueness constraint is only
 for stable identity; it is not a permanent “seen” suppression rule.
 
 There is no `extracted_records`, user-payload, response-body, output, or
-outbox table in this migration.
+outbox table in these migrations. Checkpoint and harvest payloads are opaque
+operational bytes with caller/strategy-owned codec metadata.
 
 ## State transitions
 
@@ -184,6 +198,9 @@ recovered worker cannot overwrite an already terminal summary.
 | Transition | A fenced row lock captures the current attempt, then the status/lease transition, attempt cleanup, and resource cooldown/completion update commit together. |
 | Cancellation | Bounded `QUEUED`/`RETRY_WAIT` batches transition without pretending to own active leases. |
 | Run history | Each run-summary mutation is its own bounded transaction and never changes job leases. |
+| Checkpoint admission | V2's atomic path locks capacity, applies active deduplication, and advances the checkpoint in one transaction; rollback leaves both unchanged. |
+| Checkpoint fallback | Core's non-atomic adapter fallback enqueues before checkpoint CAS and documents its replay window. |
+| Harvest/health/override state | Each revisioned mutation uses a row lock and compare-and-set; incompatible payloads are quarantined before reset. |
 
 All lease-owned mutations reject stale tokens with `LeaseMutationResult.Stale`.
 The database sequence makes each newly issued token distinct within the
@@ -204,8 +221,11 @@ available until all rows using it are drained or explicitly migrated, and add
 an adapter-owned Flyway/data operation if the payload requires a controlled
 conversion. There is no universal JSON fallback and no automatic reinterpretation.
 
-The schema itself is versioned by Flyway. `V1__create_trawler_state.sql` is
-owned by this module and is applied only during explicit extension startup.
+The schema itself is versioned by Flyway. `V1__create_trawler_state.sql` and
+`V2__add_discovery_and_pipeline_state.sql` are owned by this module and are
+applied only during explicit extension startup. Checkpoint and harvest codec
+migration is strategy/extension-owned; incompatible bytes are retained in the
+corresponding quarantine table before an explicit reset.
 
 ## Capability declaration and validation
 
@@ -216,11 +236,14 @@ The adapter advertises:
 `PIPELINE_SCOPED_WORK`, `CANCELLATION`, `WORK_ORDERING`, `WORK_STATUS`,
 `RUN_HISTORY`, and `RUN_RECOVERY`.
 
-It intentionally does not advertise `DISCOVERY_CHECKPOINTS` or
-`ATOMIC_ENQUEUE_AND_CHECKPOINT`. Core validates advertised runtime capabilities
-against the actual focused interfaces before background work starts. The
-adapter accepts only the `fifo` ordering policy and reports a deterministic
-configuration issue for another ordering instead of silently substituting it.
+It additionally advertises `DISCOVERY_CHECKPOINTS`,
+`ATOMIC_ENQUEUE_AND_CHECKPOINT`, `CHECKPOINT_QUARANTINE`, `HARVEST_STATE`,
+`HARVEST_STATE_QUARANTINE`, `QUEUE_WATERMARKS`, `PIPELINE_HEALTH`, and
+`PIPELINE_ELIGIBILITY_OVERRIDES`. Core validates advertised runtime
+capabilities against the actual focused interfaces before background work
+starts. The adapter accepts only the `fifo` ordering policy and reports a
+deterministic configuration issue for another ordering instead of silently
+substituting it.
 
 ## Recovery, retention, security, and delivery
 
@@ -238,13 +261,13 @@ explicit retention strategy; the migration does not silently delete history.
 
 ## Verification and limitations
 
-Verified for this phase with:
+Verified for these phases with:
 
 - focused reactor compilation of `trawler-postgres` and `trawler-core`;
 - a real local PostgreSQL 17.9 smoke run using three independently pooled
   adapter instances against one database schema;
-- inspection of the smoke schema showing only migration, run, resource, job,
-  and attempt tables;
+- inspection of the smoke schema showing V1 operational tables plus the V2
+  checkpoint, harvest, health, override, and quarantine tables;
 - Maven runtime dependency-tree inspection.
 
 The smoke run is a manual demonstration, not an automated test, and it does

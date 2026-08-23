@@ -1,16 +1,18 @@
 # Trawler PostgreSQL
 
-> **Status:** Phase 4 implemented; unreleased.
+> **Status:** Phase 5 implemented; unreleased.
 
 `trawler-postgres` is the optional durable operational-state adapter for
 Trawler. It depends on `trawler-core` and owns PostgreSQL connections, a
 bounded database dispatcher, Flyway migrations, request-state codecs, durable
 run summaries, resources, visit jobs, attempts, leases, retry eligibility,
-and stale-run recovery.
+stale-run recovery, discovery checkpoints, harvest state, pipeline health,
+and eligibility overrides.
 
 It does not store produced values, extracted records, response bodies, or
-outbox data. Checkpoint persistence remains a later discovery capability. The
-same pipeline can select `InMemoryCrawlStateStore` and omit this artifact.
+outbox data. Checkpoints and recurring state are operational coordination
+data, not user-data storage. The same pipeline can select
+`InMemoryCrawlStateStore` and omit this artifact.
 
 The adapter owns its Hikari pool and must be registered both as the configured
 state store and as an engine lifecycle extension:

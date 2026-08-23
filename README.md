@@ -2,7 +2,7 @@
 
 Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-> **Project status: Phase 4 implemented.** `trawler-core` provides the typed composition boundary and a database-free, bounded end-to-end engine with opt-in scheduling. The optional `trawler-web` artifact provides the Ktor/CIO transport and replaceable web policies. The optional `trawler-postgres` artifact provides durable PostgreSQL operational state with fenced leases and versioned request codecs; response archival, produced-data output, checkpoints, and specialized adapter phases remain planned. Artifacts are unreleased.
+> **Project status: Phase 5 implemented.** `trawler-core` provides the typed composition boundary, bounded database-free engine, opt-in scheduling, resumable checkpoint contracts, recurring harvest policies, backlog admission, and optional pipeline health state. The optional `trawler-web` artifact provides the Ktor/CIO transport, replaceable web policies, and bounded RSS/Atom/sitemap discovery. The optional `trawler-postgres` artifact provides durable operational state, fenced leases, versioned request codecs, durable checkpoints, harvest state, health, and eligibility overrides. Response archival, produced-data output, and later specialized adapters remain planned. Artifacts are unreleased.
 
 The governing product rule is:
 
@@ -146,7 +146,7 @@ The implemented optional `trawler-web` adapter provides:
 
 - Ktor HTTP transport and response adaptation;
 - bounded redirects, public-web safety, robots, cookies, origin pacing, and HTTP classification;
-- the bounded HTTP/robots foundation that later discovery adapters may reuse.
+- bounded RSS, Atom, sitemap, gzip, and XML discovery through the normal engine transport path.
 
 The implemented optional `trawler-postgres` adapter provides:
 
@@ -154,13 +154,14 @@ The implemented optional `trawler-postgres` adapter provides:
 - stable resources, visit jobs, active-work deduplication, cooldown state,
   PostgreSQL row-lock claims, lease fencing, and meaningful attempt history;
 - adapter-owned Flyway migrations and versioned request codecs;
-- no response archive, produced-data table, checkpoint table, or outbox.
+- durable checkpoint, harvest, health, and eligibility state without response or produced-data tables;
+- no response archive, produced-data table, or outbox.
 
 Future adapters may provide:
 
 - PostgreSQL, object-store, or WARC response storage;
 - PostgreSQL, queue, or outbox-backed outputs;
-- RSS/Atom, sitemap, pagination, or specialized discovery;
+- specialized discovery beyond the bounded RSS/Atom/sitemap and pagination hooks;
 - FlareSolverr or browser challenge resolution;
 - SLF4J, Micrometer, or OpenTelemetry observers;
 - specialized external scheduling integrations when the built-in coroutine scheduler is insufficient.
@@ -212,10 +213,10 @@ A separate artifact is used when a capability introduces an external technology 
 
 ## Current repository state
 
-The repository contains the Phase 4 core contracts, database-free runtime,
-optional Ktor web adapter, and optional durable PostgreSQL operational-state
-adapter. Response archival, produced-data output, checkpoints, and specialized
-adapter phases remain unimplemented.
+The repository contains the Phase 5 core contracts/runtime, optional Ktor web
+adapter, and optional durable PostgreSQL operational-state adapter. Response
+archival, produced-data output, and later specialized adapter phases remain
+unimplemented.
 
 ```text
 Trawler/
@@ -229,11 +230,11 @@ Trawler/
 │   └── README.md              core-specific scope and starting point
 ├── trawler-web/
 │   ├── pom.xml                optional web adapter artifact
-│   ├── src/main/kotlin/       Ktor transport and replaceable web policies
+│   ├── src/main/kotlin/       Ktor transport, web policies, and XML discovery
 │   └── README.md              web-specific scope and build entry point
 ├── trawler-postgres/
 │   ├── pom.xml                optional durable state adapter artifact
-│   ├── src/main/kotlin/       PostgreSQL state, leases, attempts, and codecs
+│   ├── src/main/kotlin/       PostgreSQL state, leases, attempts, codecs, and recurring state
 │   ├── src/main/resources/    adapter-owned Flyway migrations
 │   └── README.md              PostgreSQL-specific scope and build entry point
 ├── docs/
@@ -245,6 +246,7 @@ Trawler/
 │   ├── IN-MEMORY-ENGINE.md    Phase 2 runtime feature record
 │   ├── WEB-ADAPTER.md         Phase 3 web adapter feature record
 │   ├── POSTGRES-STATE.md      Phase 4 durable state feature record
+│   ├── RECURRING-DISCOVERY.md Phase 5 resumable/recurring discovery record
 │   └── decisions/             architecture decision records
 └── plans/
     └── FINAL-PLAN.md          authoritative implementation plan
@@ -272,19 +274,20 @@ Package and run all configured Maven lifecycle checks:
 mvn clean verify
 ```
 
-The Phase 4 reactor contains the core JAR, optional `trawler-web` JAR, and
-optional `trawler-postgres` JAR. Core contains the typed contracts, immutable
-configuration, bounded in-memory runtime, and opt-in scheduler; the web
-artifact owns Ktor/HTTP behavior; the PostgreSQL artifact owns JDBC, Hikari,
-Flyway, durable operational state, leases, attempts, and request codecs. Do
-not add placeholder classes or resources to represent later adapter phases.
+The Phase 5 reactor contains the core JAR, optional `trawler-web` JAR, and
+optional `trawler-postgres` JAR. Core contains typed contracts, immutable
+configuration, bounded runtime/scheduling, and generic resumable-discovery
+coordination; the web artifact owns Ktor/HTTP and bounded XML discovery; the
+PostgreSQL artifact owns JDBC, Hikari, Flyway, durable operational state,
+leases, attempts, request codecs, checkpoints, harvest state, and eligibility
+state. Do not add placeholder classes or resources to represent later phases.
 
 There is currently no runnable main class; the engine and adapters are library
 APIs. See the [typed core contracts feature record](docs/TYPED-CORE-CONTRACTS.md),
 the [in-memory engine feature record](docs/IN-MEMORY-ENGINE.md), the [web
-adapter feature record](docs/WEB-ADAPTER.md), and the [PostgreSQL state feature
-record](docs/POSTGRES-STATE.md) for the implemented Phase 1 through Phase 4
-boundaries.
+adapter feature record](docs/WEB-ADAPTER.md), the [PostgreSQL state feature
+record](docs/POSTGRES-STATE.md), and the [recurring discovery feature record](docs/RECURRING-DISCOVERY.md)
+for the implemented Phase 1 through Phase 5 boundaries.
 
 ## Dependencies
 

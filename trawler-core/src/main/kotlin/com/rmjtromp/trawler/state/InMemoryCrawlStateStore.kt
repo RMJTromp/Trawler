@@ -32,6 +32,8 @@ public class InMemoryCrawlStateStore(
     public val maxQueueSize: Int = 1_024,
     public val maxRetainedJobs: Int = 8_192,
     public val maxRetainedResources: Int = 8_192,
+    public val maxRetainedDiscoveryState: Int = 2_048,
+    public val maxCheckpointPayloadBytes: Int = 2 * 1024 * 1024,
     public val leaseDuration: Duration = Duration.ofMinutes(5),
     private val clock: Clock = SystemClock,
 ) : CrawlStateStore,
@@ -41,7 +43,15 @@ public class InMemoryCrawlStateStore(
     ResourceHistoryStore,
     WorkCancellationStore,
     WorkOrderingStore,
-    WorkQueueStatus {
+    WorkQueueStatus,
+    DiscoveryCheckpointStore,
+    AtomicEnqueueAndCheckpointStore,
+    CheckpointQuarantineStore,
+    HarvestStateStore,
+    HarvestStateQuarantineStore,
+    PipelineEligibilityOverrideStore,
+    PipelineHealthStore,
+    WorkQueueMetricsStore {
 
     private val mutex = Mutex()
     private var nextSequence: Long = 0
@@ -51,6 +61,12 @@ public class InMemoryCrawlStateStore(
     private val resources = LinkedHashMap<ResourceKey, MutableResource>()
     private val attempts = LinkedHashMap<AttemptId, MutableAttempt>()
     private val orderings = mutableMapOf<String, WorkOrderingPolicy>()
+    private val checkpoints = LinkedHashMap<CheckpointKey, DiscoveryCheckpoint>()
+    private val harvestStates = LinkedHashMap<HarvestKey, HarvestState>()
+    private val eligibilityOverrides = LinkedHashMap<String, PipelineEligibilityOverride>()
+    private val health = LinkedHashMap<String, PipelineHealthSnapshot>()
+    private val quarantinedCheckpoints = ArrayDeque<QuarantinedCheckpoint>()
+    private val quarantinedHarvestStates = ArrayDeque<QuarantinedHarvestState>()
 
     override val capabilities: Set<CrawlStateCapability> = setOf(
         CrawlStateCapability.WORK_QUEUE,
@@ -62,6 +78,14 @@ public class InMemoryCrawlStateStore(
         CrawlStateCapability.WORK_ORDERING,
         CrawlStateCapability.WORK_STATUS,
         CrawlStateCapability.QUERYABLE_HISTORY,
+        CrawlStateCapability.DISCOVERY_CHECKPOINTS,
+        CrawlStateCapability.ATOMIC_ENQUEUE_AND_CHECKPOINT,
+        CrawlStateCapability.CHECKPOINT_QUARANTINE,
+        CrawlStateCapability.HARVEST_STATE,
+        CrawlStateCapability.HARVEST_STATE_QUARANTINE,
+        CrawlStateCapability.QUEUE_WATERMARKS,
+        CrawlStateCapability.PIPELINE_HEALTH,
+        CrawlStateCapability.PIPELINE_ELIGIBILITY_OVERRIDES,
     )
 
     init {
@@ -73,6 +97,12 @@ public class InMemoryCrawlStateStore(
         require(maxRetainedResources >= maxQueueSize) {
             "Retained resource history must be at least the queue size"
         }
+        require(maxRetainedDiscoveryState > 0) {
+            "Retained discovery state bound must be positive"
+        }
+        require(maxCheckpointPayloadBytes > 0) {
+            "Checkpoint payload bound must be positive"
+        }
         require(!leaseDuration.isNegative && !leaseDuration.isZero) {
             "In-memory lease duration must be positive"
         }
@@ -82,16 +112,63 @@ public class InMemoryCrawlStateStore(
         request: CrawlRequest,
         identity: RequestIdentity,
         context: CrawlerContext,
-    ): EnqueueResult = mutex.withLock {
+    ): EnqueueResult = mutex.withLock { enqueueLocked(request, identity, context) }
+
+    override suspend fun enqueueAndCheckpoint(
+        pipelineId: String,
+        discoveryId: String,
+        expectedRevision: Long?,
+        next: DiscoveryCheckpoint,
+        items: List<DiscoveryWorkItem>,
+    ): AtomicEnqueueCheckpointResult = mutex.withLock {
+        require(pipelineId.isNotBlank()) { "Pipeline ID must not be blank" }
+        require(discoveryId.isNotBlank()) { "Discovery ID must not be blank" }
+        require(items.isNotEmpty()) { "Atomic discovery admission requires work" }
+        require(items.size <= maxQueueSize) { "Atomic discovery admission batch exceeds the queue bound" }
+        val key = CheckpointKey(pipelineId, discoveryId)
+        if (checkpoints[key]?.revision != expectedRevision) {
+            return@withLock AtomicEnqueueCheckpointResult.RevisionConflict
+        }
+        require(next.revision == (expectedRevision ?: -1L) + 1L) {
+            "Next checkpoint revision must immediately follow the expected revision"
+        }
+        require(next.payload.size <= maxCheckpointPayloadBytes) {
+            "Checkpoint payload exceeds the in-memory state bound"
+        }
+        reclaimExpiredLeases(null, clock.now())
+        val prospective = items.map { item ->
+            ResourceKey(item.context.pipelineId, item.identity)
+        }.distinct().count { resourceKey ->
+            resources[resourceKey]?.activeJobs?.none { jobs[it]?.isActive() == true } != false
+        }
+        val activeCount = jobs.values.count { it.isActive() }
+        if (activeCount + prospective > maxQueueSize) {
+            return@withLock AtomicEnqueueCheckpointResult.Rejected(
+                "In-memory active work capacity is full",
+            )
+        }
+        val results = items.map { item ->
+            enqueueLocked(item.request, item.identity, item.context)
+        }
+        if (!compareAndSetLocked(key, expectedRevision, next)) {
+            return@withLock AtomicEnqueueCheckpointResult.RevisionConflict
+        }
+        trimRecurringState()
+        AtomicEnqueueCheckpointResult.Advanced(results, next)
+    }
+
+    private fun enqueueLocked(
+        request: CrawlRequest,
+        identity: RequestIdentity,
+        context: CrawlerContext,
+    ): EnqueueResult {
         reclaimExpiredLeases(context.pipelineId, clock.now())
         val key = ResourceKey(context.pipelineId, identity)
         val existingResource = resources[key]
         val active = existingResource?.activeJobs?.firstNotNullOfOrNull { jobs[it] }
-        if (active != null) {
-            return@withLock EnqueueResult.AlreadyActive(active.id)
-        }
+        if (active != null) return EnqueueResult.AlreadyActive(active.id)
         if (jobs.values.count { it.isActive() } >= maxQueueSize) {
-            return@withLock EnqueueResult.Rejected("In-memory active work capacity is full")
+            return EnqueueResult.Rejected("In-memory active work capacity is full")
         }
 
         val resource = resources.getOrPut(key) { MutableResource(key) }
@@ -107,7 +184,7 @@ public class InMemoryCrawlStateStore(
         jobs[workItemId] = job
         resource.activeJobs += workItemId
         trimHistory()
-        EnqueueResult.Accepted(workItemId)
+        return EnqueueResult.Accepted(workItemId)
     }
 
     override suspend fun claim(
@@ -227,6 +304,140 @@ public class InMemoryCrawlStateStore(
     override suspend fun activeWorkCount(pipelineId: String): Int = mutex.withLock {
         require(pipelineId.isNotBlank()) { "Pipeline ID must not be blank" }
         jobs.values.count { it.pipelineId == pipelineId && it.isActive() }
+    }
+
+    override suspend fun metrics(pipelineId: String): WorkQueueMetrics = mutex.withLock {
+        require(pipelineId.isNotBlank()) { "Pipeline ID must not be blank" }
+        val open = jobs.values.filter { it.pipelineId == pipelineId && it.isActive() }
+        WorkQueueMetrics(
+            openWorkCount = open.size,
+            oldestOpenWorkAt = open.minOfOrNull { it.enqueuedAt },
+        )
+    }
+
+    override suspend fun load(pipelineId: String, discoveryId: String): DiscoveryCheckpoint? = mutex.withLock {
+        checkpoints[CheckpointKey(pipelineId, discoveryId)]
+    }
+
+    override suspend fun compareAndSet(
+        pipelineId: String,
+        discoveryId: String,
+        expectedRevision: Long?,
+        next: DiscoveryCheckpoint,
+    ): Boolean = mutex.withLock {
+        compareAndSetLocked(CheckpointKey(pipelineId, discoveryId), expectedRevision, next)
+    }
+
+    private fun compareAndSetLocked(
+        key: CheckpointKey,
+        expectedRevision: Long?,
+        next: DiscoveryCheckpoint,
+    ): Boolean {
+        val current = checkpoints[key]
+        if (current?.revision != expectedRevision) return false
+        require(next.revision == (expectedRevision ?: -1L) + 1L) {
+            "Next checkpoint revision must immediately follow the expected revision"
+        }
+        checkpoints[key] = next
+        return true
+    }
+
+    override suspend fun quarantine(
+        pipelineId: String,
+        discoveryId: String,
+        checkpoint: DiscoveryCheckpoint,
+        reason: String,
+    ): Unit = mutex.withLock {
+        require(pipelineId.isNotBlank()) { "Pipeline ID must not be blank" }
+        require(discoveryId.isNotBlank()) { "Discovery ID must not be blank" }
+        require(reason.isNotBlank()) { "Checkpoint quarantine reason must not be blank" }
+        require(checkpoint.payload.size <= maxCheckpointPayloadBytes) {
+            "Checkpoint payload exceeds the in-memory state bound"
+        }
+        if (quarantinedCheckpoints.size >= maxRetainedDiscoveryState) {
+            quarantinedCheckpoints.removeFirst()
+        }
+        quarantinedCheckpoints.addLast(QuarantinedCheckpoint(pipelineId, discoveryId, checkpoint, reason))
+    }
+
+    override suspend fun loadHarvestState(pipelineId: String, strategyId: String): HarvestState? = mutex.withLock {
+        harvestStates[HarvestKey(pipelineId, strategyId)]
+    }
+
+    override suspend fun quarantineHarvestState(
+        pipelineId: String,
+        strategyId: String,
+        state: HarvestState,
+        reason: String,
+    ): Unit = mutex.withLock {
+        require(pipelineId.isNotBlank()) { "Pipeline ID must not be blank" }
+        require(strategyId.isNotBlank()) { "Harvest strategy ID must not be blank" }
+        require(reason.isNotBlank()) { "Harvest-state quarantine reason must not be blank" }
+        require(state.payload.size <= maxCheckpointPayloadBytes) {
+            "Harvest payload exceeds the in-memory state bound"
+        }
+        if (quarantinedHarvestStates.size >= maxRetainedDiscoveryState) {
+            quarantinedHarvestStates.removeFirst()
+        }
+        quarantinedHarvestStates.addLast(
+            QuarantinedHarvestState(
+                pipelineId,
+                strategyId,
+                state,
+                reason,
+            ),
+        )
+    }
+
+    override suspend fun compareAndSetHarvestState(
+        pipelineId: String,
+        strategyId: String,
+        expectedRevision: Long?,
+        next: HarvestState,
+    ): Boolean = mutex.withLock {
+        val key = HarvestKey(pipelineId, strategyId)
+        val current = harvestStates[key]
+        if (current?.revision != expectedRevision) return@withLock false
+        require(next.revision == (expectedRevision ?: -1L) + 1L) {
+            "Next harvest-state revision must immediately follow the expected revision"
+        }
+        require(next.payload.size <= maxCheckpointPayloadBytes) {
+            "Harvest payload exceeds the in-memory state bound"
+        }
+        harvestStates[key] = next
+        trimRecurringState()
+        true
+    }
+
+    override suspend fun loadEligibilityOverride(pipelineId: String): PipelineEligibilityOverride? =
+        mutex.withLock { eligibilityOverrides[pipelineId] }
+
+    override suspend fun setEligibilityOverride(
+        pipelineId: String,
+        override: PipelineEligibilityOverride?,
+    ): Unit = mutex.withLock {
+        require(pipelineId.isNotBlank()) { "Pipeline ID must not be blank" }
+        if (override == null) eligibilityOverrides.remove(pipelineId)
+        else eligibilityOverrides[pipelineId] = override
+        trimRecurringState()
+    }
+
+    override suspend fun loadPipelineHealth(pipelineId: String): PipelineHealthSnapshot? =
+        mutex.withLock { health[pipelineId] }
+
+    override suspend fun compareAndSetPipelineHealth(
+        pipelineId: String,
+        expectedRevision: Long?,
+        next: PipelineHealthSnapshot,
+    ): Boolean = mutex.withLock {
+        val current = health[pipelineId]
+        if (current?.revision != expectedRevision) return@withLock false
+        require(next.revision == (expectedRevision ?: -1L) + 1L) {
+            "Next pipeline-health revision must immediately follow the expected revision"
+        }
+        health[pipelineId] = next
+        trimRecurringState()
+        true
     }
 
     private fun claimLocked(
@@ -399,9 +610,48 @@ public class InMemoryCrawlStateStore(
         }
     }
 
+    private fun trimRecurringState() {
+        while (checkpoints.size > maxRetainedDiscoveryState) {
+            checkpoints.remove(checkpoints.keys.first())
+        }
+        while (harvestStates.size > maxRetainedDiscoveryState) {
+            harvestStates.remove(harvestStates.keys.first())
+        }
+        while (eligibilityOverrides.size > maxRetainedDiscoveryState) {
+            eligibilityOverrides.remove(eligibilityOverrides.keys.first())
+        }
+        while (health.size > maxRetainedDiscoveryState) {
+            health.remove(health.keys.first())
+        }
+    }
+
     private data class ResourceKey(
         val pipelineId: String,
         val identity: RequestIdentity,
+    )
+
+    private data class CheckpointKey(
+        val pipelineId: String,
+        val discoveryId: String,
+    )
+
+    private data class HarvestKey(
+        val pipelineId: String,
+        val strategyId: String,
+    )
+
+    private data class QuarantinedCheckpoint(
+        val pipelineId: String,
+        val discoveryId: String,
+        val checkpoint: DiscoveryCheckpoint,
+        val reason: String,
+    )
+
+    private data class QuarantinedHarvestState(
+        val pipelineId: String,
+        val strategyId: String,
+        val state: HarvestState,
+        val reason: String,
     )
 
     private class MutableResource(

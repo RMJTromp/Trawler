@@ -1,6 +1,6 @@
 # Trawler Core
 
-> **Status:** Phase 4 core support surface implemented; unreleased.
+> **Status:** Phase 5 core support surface implemented; unreleased.
 
 `trawler-core` is the primary planned published artifact. It contains the
 typed models and extension contracts, immutable composition configuration,
@@ -44,9 +44,16 @@ The implemented scope includes typed contracts and composition:
   coroutine scheduling with bounded overlap handling.
 - adapter-neutral durable run-history and resource-cooldown capabilities used
   by the optional PostgreSQL state artifact.
+- resumable discovery checkpoints with codec resolution, CAS, and replay-safe
+  fallback admission;
+- optional cursor, watermark, and historical-then-incremental harvest
+  strategies with deterministic overlap boundaries;
+- backlog admission, pipeline eligibility, health, and circuit-breaker
+  contracts with bounded in-memory state.
 
-See the focused [typed core contracts feature record](../docs/TYPED-CORE-CONTRACTS.md)
-and [in-memory engine feature record](../docs/IN-MEMORY-ENGINE.md) for
+See the focused [typed core contracts feature record](../docs/TYPED-CORE-CONTRACTS.md),
+[in-memory engine feature record](../docs/IN-MEMORY-ENGINE.md), and
+[resumable discovery feature record](../docs/RECURRING-DISCOVERY.md) for
 ownership, capability, lifecycle, registration, bound, and delivery details.
 
 Core does not implement database adapters, Ktor, web policies, site parsing, or

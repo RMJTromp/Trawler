@@ -13,7 +13,9 @@ import com.rmjtromp.trawler.policy.ConcurrencyPolicy
 import com.rmjtromp.trawler.policy.CrawlBudgetPolicy
 import com.rmjtromp.trawler.policy.CrawlScopePolicy
 import com.rmjtromp.trawler.policy.DeduplicationPolicy
+import com.rmjtromp.trawler.policy.CircuitBreakerPolicy
 import com.rmjtromp.trawler.policy.DefaultRandomSource
+import com.rmjtromp.trawler.policy.DiscoveryAdmissionPolicy
 import com.rmjtromp.trawler.policy.FailureClassifier
 import com.rmjtromp.trawler.policy.RandomSource
 import com.rmjtromp.trawler.policy.RecrawlPolicy
@@ -21,8 +23,13 @@ import com.rmjtromp.trawler.policy.RequestCanonicalizer
 import com.rmjtromp.trawler.policy.RequestIdentityStrategy
 import com.rmjtromp.trawler.policy.RequestPacingPolicy
 import com.rmjtromp.trawler.policy.RetryPolicy
+import com.rmjtromp.trawler.policy.PipelineEligibilityPolicy
+import com.rmjtromp.trawler.policy.PipelineHealthPolicy
 import com.rmjtromp.trawler.policy.SystemClock
 import com.rmjtromp.trawler.policy.WorkOrderingPolicy
+import com.rmjtromp.trawler.discovery.HarvestStrategy
+import com.rmjtromp.trawler.discovery.ResumableDiscovery
+import com.rmjtromp.trawler.discovery.StatelessHarvestStrategy
 import com.rmjtromp.trawler.response.ResponseStore
 import com.rmjtromp.trawler.response.ResponseStoreCapability
 import com.rmjtromp.trawler.state.CrawlStateCapability
@@ -65,6 +72,12 @@ public data class PipelinePolicies(
     public val authorization: AuthorizationPolicy,
     public val ordering: WorkOrderingPolicy,
     public val budget: CrawlBudgetPolicy,
+    public val admission: DiscoveryAdmissionPolicy = com.rmjtromp.trawler.policy.Continuous,
+    public val eligibility: PipelineEligibilityPolicy =
+        com.rmjtromp.trawler.policy.AlwaysEligiblePipelinePolicy,
+    public val health: PipelineHealthPolicy = com.rmjtromp.trawler.policy.NoOpPipelineHealthPolicy,
+    public val circuitBreaker: CircuitBreakerPolicy =
+        com.rmjtromp.trawler.policy.NeverOpenCircuitBreakerPolicy,
 )
 
 /**
@@ -111,6 +124,7 @@ public class Pipeline<T : Any>(
     validators: List<Validator<T>> = emptyList(),
     outputs: List<OutputBinding<T>> = emptyList(),
     public val policies: PipelinePolicies,
+    public val harvestStrategy: HarvestStrategy = StatelessHarvestStrategy,
     extensions: List<ExtensionLifecycle> = emptyList(),
 ) {
     public val id: String
@@ -165,6 +179,11 @@ public class PipelineBuilder<T : Any> public constructor(
     private var authorization: AuthorizationPolicy? = null
     private var ordering: WorkOrderingPolicy? = null
     private var budget: CrawlBudgetPolicy? = null
+    private var admission: DiscoveryAdmissionPolicy? = null
+    private var eligibility: PipelineEligibilityPolicy? = null
+    private var health: PipelineHealthPolicy? = null
+    private var circuitBreaker: CircuitBreakerPolicy? = null
+    private var harvestStrategy: HarvestStrategy? = null
 
     private var requestMiddlewareReplacement: List<RequestMiddleware>? = null
     private var responseMiddlewareReplacement: List<ResponseMiddleware>? = null
@@ -428,6 +447,67 @@ public class PipelineBuilder<T : Any> public constructor(
         return this
     }
 
+    /** Replaces the inherited discovery-admission policy once. */
+    public fun admission(policy: DiscoveryAdmissionPolicy): PipelineBuilder<T> {
+        admission = assignPolicy("admission", admission, policy)
+        return this
+    }
+
+    /** Explicitly replaces the discovery-admission policy. */
+    public fun replaceAdmission(policy: DiscoveryAdmissionPolicy): PipelineBuilder<T> {
+        admission = policy
+        return this
+    }
+
+    /** Replaces the inherited pipeline eligibility policy once. */
+    public fun eligibility(policy: PipelineEligibilityPolicy): PipelineBuilder<T> {
+        eligibility = assignPolicy("eligibility", eligibility, policy)
+        return this
+    }
+
+    /** Explicitly replaces the pipeline eligibility policy. */
+    public fun replaceEligibility(policy: PipelineEligibilityPolicy): PipelineBuilder<T> {
+        eligibility = policy
+        return this
+    }
+
+    /** Replaces the inherited health policy once. */
+    public fun health(policy: PipelineHealthPolicy): PipelineBuilder<T> {
+        health = assignPolicy("health", health, policy)
+        return this
+    }
+
+    /** Explicitly replaces the health policy. */
+    public fun replaceHealth(policy: PipelineHealthPolicy): PipelineBuilder<T> {
+        health = policy
+        return this
+    }
+
+    /** Replaces the inherited circuit-breaker policy once. */
+    public fun circuitBreaker(policy: CircuitBreakerPolicy): PipelineBuilder<T> {
+        circuitBreaker = assignPolicy("circuitBreaker", circuitBreaker, policy)
+        return this
+    }
+
+    /** Explicitly replaces the circuit-breaker policy. */
+    public fun replaceCircuitBreaker(policy: CircuitBreakerPolicy): PipelineBuilder<T> {
+        circuitBreaker = policy
+        return this
+    }
+
+    /** Installs one explicit recurring-harvest strategy for this pipeline. */
+    public fun harvest(strategy: HarvestStrategy): PipelineBuilder<T> {
+        recordSingleAssignment("harvest", harvestStrategy != null, replacement = false)
+        harvestStrategy = strategy
+        return this
+    }
+
+    /** Explicitly replaces the recurring-harvest strategy. */
+    public fun replaceHarvest(strategy: HarvestStrategy): PipelineBuilder<T> {
+        harvestStrategy = strategy
+        return this
+    }
+
     /** Appends a pipeline-owned lifecycle extension after engine extensions. */
     public fun extension(extension: ExtensionLifecycle): PipelineBuilder<T> {
         extensions += extension
@@ -481,6 +561,9 @@ public class PipelineBuilder<T : Any> public constructor(
         addIdentifierIssues(issues, "pipeline[${definition.id}].validators", validators.map { it.id })
         addIdentifierIssues(issues, "pipeline[${definition.id}].outputs", outputs.map { it.output.id })
         addIdentifierIssues(issues, "pipeline[${definition.id}].extensions", extensions.map { it.id })
+        harvestStrategy?.let {
+            addIdentifierIssues(issues, "pipeline[${definition.id}].harvest", listOf(it.id))
+        }
 
         effectiveTransport?.let {
             addIdentifierIssues(issues, "pipeline[${definition.id}].transport", listOf(it.id))
@@ -518,6 +601,7 @@ public class PipelineBuilder<T : Any> public constructor(
             validators = validators,
             outputs = outputs,
             policies = effectivePolicies,
+            harvestStrategy = harvestStrategy ?: StatelessHarvestStrategy,
             extensions = extensions,
         )
     }
@@ -537,6 +621,10 @@ public class PipelineBuilder<T : Any> public constructor(
             authorization = authorization ?: base.authorization,
             ordering = ordering ?: base.ordering,
             budget = budget ?: base.budget,
+            admission = admission ?: base.admission,
+            eligibility = eligibility ?: base.eligibility,
+            health = health ?: base.health,
+            circuitBreaker = circuitBreaker ?: base.circuitBreaker,
         )
     }
 
@@ -596,6 +684,8 @@ public class EngineConfiguration(
         maxQueueSize = runtimeOptions.maxQueueSize,
         maxRetainedJobs = runtimeOptions.maxRetainedJobs,
         maxRetainedResources = runtimeOptions.maxRetainedResources,
+        maxRetainedDiscoveryState = runtimeOptions.maxRetainedDiscoveryState,
+        maxCheckpointPayloadBytes = runtimeOptions.maxCheckpointPayloadBytes,
         leaseDuration = runtimeOptions.leaseDuration,
         clock = clock,
     )
@@ -875,6 +965,8 @@ public class EngineConfigurationBuilder public constructor() {
             maxQueueSize = runtimeOptions.maxQueueSize,
             maxRetainedJobs = runtimeOptions.maxRetainedJobs,
             maxRetainedResources = runtimeOptions.maxRetainedResources,
+            maxRetainedDiscoveryState = runtimeOptions.maxRetainedDiscoveryState,
+            maxCheckpointPayloadBytes = runtimeOptions.maxCheckpointPayloadBytes,
             leaseDuration = runtimeOptions.leaseDuration,
             clock = clock,
         )
@@ -1082,6 +1174,7 @@ internal object ConfigurationValidator {
         addIdentifierIssues(issues, "$path.validators", pipeline.validators.map { it.id })
         addIdentifierIssues(issues, "$path.outputs", pipeline.outputs.map { it.output.id })
         addIdentifierIssues(issues, "$path.extensions", pipeline.extensions.map { it.id })
+        addIdentifierIssues(issues, "$path.harvest", listOf(pipeline.harvestStrategy.id))
         addPolicyIdentifierIssues(issues, pipeline.id, pipeline.policies)
         return sortedIssues(issues)
     }
@@ -1158,6 +1251,38 @@ internal object ConfigurationValidator {
                 )
             }
         }
+        pipelines.forEach { pipeline ->
+            val resumable = pipeline.discoveries.filterIsInstance<ResumableDiscovery>()
+            if (resumable.isNotEmpty() &&
+                (stateStore !is com.rmjtromp.trawler.state.DiscoveryCheckpointStore ||
+                    !stateStore.capabilities.contains(CrawlStateCapability.DISCOVERY_CHECKPOINTS))
+            ) {
+                issues += ConfigurationIssue(
+                    path = "pipeline[${pipeline.id}].discoveries.checkpoint",
+                    code = ConfigurationIssueCode.MISSING_RUNTIME_CAPABILITY,
+                    message = "Resumable discoveries require a checkpoint-capable state store",
+                )
+            }
+            if (pipeline.harvestStrategy.mode != com.rmjtromp.trawler.discovery.HarvestMode.STATELESS &&
+                pipeline.discoveries.none { it is ResumableDiscovery }
+            ) {
+                issues += ConfigurationIssue(
+                    path = "pipeline[${pipeline.id}].harvest",
+                    code = ConfigurationIssueCode.MISSING_REQUIRED_EXTENSION,
+                    message = "Non-stateless harvest strategies require at least one resumable discovery",
+                )
+            }
+            if (pipeline.harvestStrategy.stateCodec != null &&
+                (stateStore !is com.rmjtromp.trawler.state.HarvestStateStore ||
+                    !stateStore.capabilities.contains(CrawlStateCapability.HARVEST_STATE))
+            ) {
+                issues += ConfigurationIssue(
+                    path = "pipeline[${pipeline.id}].harvest",
+                    code = ConfigurationIssueCode.MISSING_RUNTIME_CAPABILITY,
+                    message = "Non-stateless harvest strategies require harvest state storage",
+                )
+            }
+        }
         return sortedIssues(issues)
     }
 
@@ -1204,6 +1329,38 @@ internal object ConfigurationValidator {
                 !store.capabilities.contains(CrawlStateCapability.RUN_RECOVERY) ||
                     store is RunHistoryStore
                 ),
+            "DISCOVERY_CHECKPOINTS" to (
+                !store.capabilities.contains(CrawlStateCapability.DISCOVERY_CHECKPOINTS) ||
+                    store is com.rmjtromp.trawler.state.DiscoveryCheckpointStore
+                ),
+            "ATOMIC_ENQUEUE_AND_CHECKPOINT" to (
+                !store.capabilities.contains(CrawlStateCapability.ATOMIC_ENQUEUE_AND_CHECKPOINT) ||
+                    store is com.rmjtromp.trawler.state.AtomicEnqueueAndCheckpointStore
+                ),
+            "CHECKPOINT_QUARANTINE" to (
+                !store.capabilities.contains(CrawlStateCapability.CHECKPOINT_QUARANTINE) ||
+                    store is com.rmjtromp.trawler.state.CheckpointQuarantineStore
+                ),
+            "HARVEST_STATE" to (
+                !store.capabilities.contains(CrawlStateCapability.HARVEST_STATE) ||
+                    store is com.rmjtromp.trawler.state.HarvestStateStore
+                ),
+            "HARVEST_STATE_QUARANTINE" to (
+                !store.capabilities.contains(CrawlStateCapability.HARVEST_STATE_QUARANTINE) ||
+                    store is com.rmjtromp.trawler.state.HarvestStateQuarantineStore
+                ),
+            "QUEUE_WATERMARKS" to (
+                !store.capabilities.contains(CrawlStateCapability.QUEUE_WATERMARKS) ||
+                    store is com.rmjtromp.trawler.state.WorkQueueMetricsStore
+                ),
+            "PIPELINE_HEALTH" to (
+                !store.capabilities.contains(CrawlStateCapability.PIPELINE_HEALTH) ||
+                    store is com.rmjtromp.trawler.state.PipelineHealthStore
+                ),
+            "PIPELINE_ELIGIBILITY_OVERRIDES" to (
+                !store.capabilities.contains(CrawlStateCapability.PIPELINE_ELIGIBILITY_OVERRIDES) ||
+                    store is com.rmjtromp.trawler.state.PipelineEligibilityOverrideStore
+                ),
         )
         requirements.filterNot { it.second }.forEach { (capability, _) ->
             issues += ConfigurationIssue(
@@ -1233,6 +1390,10 @@ private fun addPolicyIdentifierIssues(
         "authorization" to policies.authorization.id,
         "ordering" to policies.ordering.id,
         "budget" to policies.budget.id,
+        "admission" to policies.admission.id,
+        "eligibility" to policies.eligibility.id,
+        "health" to policies.health.id,
+        "circuitBreaker" to policies.circuitBreaker.id,
     )
     entries.forEach { (slot, id) ->
         addIdentifierIssues(issues, "pipeline[$pipelineId].policies.$slot", listOf(id))

@@ -4,6 +4,10 @@ import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.model.CrawlResponse
 import com.rmjtromp.trawler.model.CrawlerContext
 import com.rmjtromp.trawler.model.RequestContext
+import com.rmjtromp.trawler.state.DiscoveryCheckpoint
+import com.rmjtromp.trawler.state.HarvestState
+import com.rmjtromp.trawler.state.PipelineEligibilityOverride
+import com.rmjtromp.trawler.state.PipelineHealthSnapshot
 import java.time.Duration
 import java.time.Instant
 
@@ -396,6 +400,163 @@ public sealed interface BudgetDecision {
     ) : BudgetDecision {
         init {
             require(reason.isNotBlank()) { "Budget stop reason must not be blank" }
+        }
+    }
+}
+
+/** Snapshot supplied to pipeline eligibility and circuit-breaker policies. */
+public data class PipelineEligibilityContext(
+    public val pipelineId: String,
+    public val now: Instant,
+    public val health: PipelineHealthSnapshot,
+    public val override: PipelineEligibilityOverride?,
+) {
+    init {
+        require(pipelineId.isNotBlank()) { "Pipeline ID must not be blank" }
+    }
+}
+
+/** Decides whether one pipeline may participate in this run. */
+public interface PipelineEligibilityPolicy {
+    /** Stable identifier used for deterministic configuration validation. */
+    public val id: String
+
+    /** Makes a local decision without network or state mutation. */
+    public fun decide(context: PipelineEligibilityContext): PipelineEligibilityDecision
+}
+
+/** Expected pipeline eligibility outcomes. */
+public sealed interface PipelineEligibilityDecision {
+    /** The pipeline may start discovery and processing. */
+    public data object Eligible : PipelineEligibilityDecision
+
+    /** The pipeline is intentionally deferred while retaining resumable state. */
+    public data class Deferred(
+        public val until: Instant? = null,
+        public val reason: String,
+    ) : PipelineEligibilityDecision {
+        init {
+            require(reason.isNotBlank()) { "Eligibility deferral reason must not be blank" }
+        }
+    }
+
+    /** The pipeline is disabled for this run. */
+    public data class Disabled(public val reason: String) : PipelineEligibilityDecision {
+        init {
+            require(reason.isNotBlank()) { "Eligibility disable reason must not be blank" }
+        }
+    }
+}
+
+/** Outcome observed by the optional pipeline health policy. */
+public enum class PipelineHealthOutcome {
+    SUCCESS,
+    FAILURE,
+    ABANDONED,
+    CANCELLED,
+}
+
+/** Bounded, value-free observation used to update health state. */
+public data class PipelineHealthObservation(
+    public val outcome: PipelineHealthOutcome,
+    public val observedAt: Instant,
+)
+
+/** Produces the next health snapshot without owning persistence. */
+public interface PipelineHealthPolicy {
+    /** Stable identifier used for deterministic configuration validation. */
+    public val id: String
+
+    /** Applies one outcome to an immutable health snapshot. */
+    public fun observe(
+        snapshot: PipelineHealthSnapshot,
+        observation: PipelineHealthObservation,
+    ): PipelineHealthSnapshot
+}
+
+/** Decides whether the current health state opens a pipeline circuit. */
+public interface CircuitBreakerPolicy {
+    /** Stable identifier used for deterministic configuration validation. */
+    public val id: String
+
+    /** Evaluates the current health without changing it. */
+    public fun decide(snapshot: PipelineHealthSnapshot, now: Instant): CircuitBreakerDecision
+}
+
+/** Expected circuit-breaker outcomes. */
+public sealed interface CircuitBreakerDecision {
+    /** The circuit is closed for this run. */
+    public data object Closed : CircuitBreakerDecision
+
+    /** The pipeline is deferred until [until] or operator intervention. */
+    public data class Open(
+        public val until: Instant? = null,
+        public val reason: String,
+    ) : CircuitBreakerDecision {
+        init {
+            require(reason.isNotBlank()) { "Circuit-open reason must not be blank" }
+        }
+    }
+}
+
+/** Context supplied to discovery-admission policies. */
+public data class DiscoveryAdmissionContext(
+    public val pipelineId: String,
+    public val discoveryId: String,
+    public val openWorkCount: Int,
+    public val oldestOpenWorkAt: Instant?,
+    public val checkpoint: DiscoveryCheckpoint?,
+    public val harvestState: HarvestState?,
+    public val budget: BudgetSnapshot,
+    public val health: PipelineHealthSnapshot,
+    public val now: Instant,
+) {
+    init {
+        require(pipelineId.isNotBlank()) { "Pipeline ID must not be blank" }
+        require(discoveryId.isNotBlank()) { "Discovery ID must not be blank" }
+        require(openWorkCount >= 0) { "Open work count must not be negative" }
+    }
+}
+
+/** Decides whether a discovery may emit new work on this run. */
+public interface DiscoveryAdmissionPolicy {
+    /** Stable identifier used for deterministic configuration validation. */
+    public val id: String
+
+    /** Makes a bounded, value-free admission decision. */
+    public fun decide(context: DiscoveryAdmissionContext): DiscoveryAdmissionDecision
+}
+
+/** Expected discovery-admission outcomes. */
+public sealed interface DiscoveryAdmissionDecision {
+    /** Discovery may be collected under the engine's emission bound. */
+    public data object Admit : DiscoveryAdmissionDecision
+
+    /** Discovery is deferred and its checkpoint/work remains resumable. */
+    public data class Defer(public val reason: String) : DiscoveryAdmissionDecision {
+        init {
+            require(reason.isNotBlank()) { "Discovery deferral reason must not be blank" }
+        }
+    }
+}
+
+/** Deterministic incremental interval supplied to recurring discovery. */
+public interface IncrementalBoundaryPolicy {
+    /** Stable identifier used for compatibility and diagnostics. */
+    public val id: String
+
+    /** Calculates a bounded half-open window from the last committed boundary. */
+    public fun next(lastBoundary: Instant?, now: Instant): Window
+
+    /** Immutable half-open interval; either endpoint may be absent initially. */
+    public data class Window(
+        public val startInclusive: Instant?,
+        public val endExclusive: Instant,
+    ) {
+        init {
+            require(startInclusive == null || !startInclusive.isAfter(endExclusive)) {
+                "Incremental window start must not follow its end"
+            }
         }
     }
 }

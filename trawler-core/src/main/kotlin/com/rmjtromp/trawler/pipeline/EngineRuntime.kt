@@ -2,6 +2,12 @@ package com.rmjtromp.trawler.pipeline
 
 import com.rmjtromp.trawler.discovery.DiscoveryContext
 import com.rmjtromp.trawler.discovery.DiscoveryEmission
+import com.rmjtromp.trawler.discovery.DiscoveryCheckpointCandidate
+import com.rmjtromp.trawler.discovery.HarvestCompletion
+import com.rmjtromp.trawler.discovery.HarvestCompletionContext
+import com.rmjtromp.trawler.discovery.HarvestContext
+import com.rmjtromp.trawler.discovery.HarvestRunOutcome
+import com.rmjtromp.trawler.discovery.ResumableDiscovery
 import com.rmjtromp.trawler.event.CrawlerEvent
 import com.rmjtromp.trawler.event.CrawlerEventType
 import com.rmjtromp.trawler.event.EventContext
@@ -31,6 +37,13 @@ import com.rmjtromp.trawler.policy.RecrawlDecision
 import com.rmjtromp.trawler.policy.RetryDecision
 import com.rmjtromp.trawler.policy.ScopeDecision
 import com.rmjtromp.trawler.policy.BudgetDecision
+import com.rmjtromp.trawler.policy.CircuitBreakerDecision
+import com.rmjtromp.trawler.policy.DiscoveryAdmissionContext
+import com.rmjtromp.trawler.policy.DiscoveryAdmissionDecision
+import com.rmjtromp.trawler.policy.PipelineEligibilityContext
+import com.rmjtromp.trawler.policy.PipelineEligibilityDecision
+import com.rmjtromp.trawler.policy.PipelineHealthObservation
+import com.rmjtromp.trawler.policy.PipelineHealthOutcome
 import com.rmjtromp.trawler.response.ResponseStore
 import com.rmjtromp.trawler.schedule.ScheduleSubmission
 import com.rmjtromp.trawler.schedule.Scheduler
@@ -39,11 +52,25 @@ import com.rmjtromp.trawler.schedule.SchedulerHandle
 import com.rmjtromp.trawler.state.AttemptStartResult
 import com.rmjtromp.trawler.state.AttemptOutcome
 import com.rmjtromp.trawler.state.AttemptStore
+import com.rmjtromp.trawler.state.AtomicEnqueueCheckpointResult
+import com.rmjtromp.trawler.state.AtomicEnqueueAndCheckpointStore
+import com.rmjtromp.trawler.state.CheckpointPayload
+import com.rmjtromp.trawler.state.CheckpointQuarantineStore
 import com.rmjtromp.trawler.state.CrawlStateCapability
+import com.rmjtromp.trawler.state.DiscoveryCheckpoint
+import com.rmjtromp.trawler.state.DiscoveryCheckpointStore
+import com.rmjtromp.trawler.state.DiscoveryWorkItem
 import com.rmjtromp.trawler.state.ExecutionAttempt
 import com.rmjtromp.trawler.state.DurableRunStatus
 import com.rmjtromp.trawler.state.LeaseMutationResult
 import com.rmjtromp.trawler.state.LeaseStore
+import com.rmjtromp.trawler.state.HarvestState
+import com.rmjtromp.trawler.state.HarvestStateQuarantineStore
+import com.rmjtromp.trawler.state.HarvestStateResolution
+import com.rmjtromp.trawler.state.HarvestStateStore
+import com.rmjtromp.trawler.state.PipelineEligibilityOverrideStore
+import com.rmjtromp.trawler.state.PipelineHealthSnapshot
+import com.rmjtromp.trawler.state.PipelineHealthStore
 import com.rmjtromp.trawler.state.PipelineScopedWorkQueueStore
 import com.rmjtromp.trawler.state.ResourceHistoryStore
 import com.rmjtromp.trawler.state.RunHistoryStore
@@ -52,6 +79,8 @@ import com.rmjtromp.trawler.state.WorkItemId
 import com.rmjtromp.trawler.state.WorkOrderingStore
 import com.rmjtromp.trawler.state.WorkQueueStatus
 import com.rmjtromp.trawler.state.WorkQueueStore
+import com.rmjtromp.trawler.state.WorkQueueMetrics
+import com.rmjtromp.trawler.state.WorkQueueMetricsStore
 import com.rmjtromp.trawler.state.WorkTransition
 import com.rmjtromp.trawler.state.LeasedWork
 import com.rmjtromp.trawler.transport.RequestExecutor
@@ -81,7 +110,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.take
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
@@ -798,6 +826,19 @@ private class PipelineCounters(
     }
 
     suspend fun failureSnapshot(): List<RunFailure> = failureMutex.withLock { failures.toList() }
+
+    fun snapshot(startedAt: Instant, clock: com.rmjtromp.trawler.policy.Clock): BudgetSnapshot {
+        val elapsed = Duration.between(startedAt, clock.now())
+            .let { if (it.isNegative) Duration.ZERO else it }
+        return BudgetSnapshot(
+            requestsStarted = requestsStarted.get(),
+            producedValues = producedValues.get(),
+            bytesRead = bytesRead.get(),
+            failures = failuresCount.get(),
+            discoveryEmissions = discoveryEmissions.get(),
+            elapsed = elapsed,
+        )
+    }
 }
 
 private suspend fun <T : Any> observeBudget(
@@ -838,6 +879,34 @@ private class PolicyRejection(
     val reason: String,
 ) : RuntimeException(reason)
 
+private sealed interface WorkAcceptance {
+    data class Accepted(
+        val item: DiscoveryWorkItem,
+        val result: com.rmjtromp.trawler.state.EnqueueResult.Accepted,
+    ) : WorkAcceptance
+
+    data class AlreadyActive(
+        val item: DiscoveryWorkItem,
+        val result: com.rmjtromp.trawler.state.EnqueueResult.AlreadyActive,
+    ) : WorkAcceptance
+
+    data object Suppressed : WorkAcceptance
+
+    data object Rejected : WorkAcceptance
+}
+
+private class DiscoveryProgress(
+    val discoveryId: String,
+    val resumable: ResumableDiscovery?,
+    val checkpointStore: DiscoveryCheckpointStore?,
+    val quarantineStore: CheckpointQuarantineStore?,
+    var checkpoint: DiscoveryCheckpoint? = null,
+) {
+    var reachedNaturalEnd: Boolean = false
+    var deferred: Boolean = false
+    var failed: Boolean = false
+}
+
 internal suspend fun <T : Any> executeTypedPipeline(
     pipeline: Pipeline<T>,
     context: PipelineExecutionContext,
@@ -847,83 +916,223 @@ internal suspend fun <T : Any> executeTypedPipeline(
     val responses = LinkedHashMap<WorkItemId, CrawlResponse>()
     val responseMutex = Mutex()
     val pipelineExtensions = mutableListOf<com.rmjtromp.trawler.extension.ExtensionLifecycle>()
+    val discoveryProgress = mutableListOf<DiscoveryProgress>()
+    var discoveryBudgetStopped = false
     var cancelled = false
 
     context.event(CrawlerEventType.PIPELINE_RUN_STARTED)
     try {
-        context.orderingStore.setOrdering(pipeline.id, pipeline.policies.ordering)
-        pipeline.extensions.forEach { extension ->
-            extension.start(ExtensionStartContext(CoroutineScope(currentCoroutineContext())))
-            pipelineExtensions += extension
+        val state = context.configuration.stateStore
+        val healthStore = state as? PipelineHealthStore
+        val overrideStore = state as? PipelineEligibilityOverrideStore
+        val health = healthStore?.loadPipelineHealth(pipeline.id) ?: PipelineHealthSnapshot()
+        val now = context.configuration.clock.now()
+        val override = overrideStore?.loadEligibilityOverride(pipeline.id)
+            ?.takeIf { it.expiresAt?.isAfter(now) != false }
+        val eligibility = pipeline.policies.eligibility.decide(
+            PipelineEligibilityContext(pipeline.id, now, health, override),
+        )
+        val circuit = if (eligibility == PipelineEligibilityDecision.Eligible) {
+            pipeline.policies.circuitBreaker.decide(health, context.configuration.clock.now())
+        } else {
+            CircuitBreakerDecision.Closed
         }
+        val blockedReason = when (eligibility) {
+            PipelineEligibilityDecision.Eligible -> when (circuit) {
+                CircuitBreakerDecision.Closed -> null
+                is CircuitBreakerDecision.Open -> "circuit-open:${circuit.reason}"
+            }
 
-        val accept: suspend (CrawlRequest, CrawlResponse?) -> Unit = { request, existingResponse ->
-            acceptWork(pipeline, context, counters, responses, responseMutex, request, existingResponse)
+            is PipelineEligibilityDecision.Deferred ->
+                "pipeline-deferred:${eligibility.reason}"
+
+            is PipelineEligibilityDecision.Disabled ->
+                "pipeline-disabled:${eligibility.reason}"
         }
+        if (blockedReason != null) {
+            counters.abandoned.set(true)
+            context.event(CrawlerEventType.CAPABILITY_WARNING, detail = blockedReason)
+        } else {
+            context.orderingStore.setOrdering(pipeline.id, pipeline.policies.ordering)
+            pipeline.extensions.forEach { extension ->
+                extension.start(ExtensionStartContext(CoroutineScope(currentCoroutineContext())))
+                pipelineExtensions += extension
+            }
 
-        pipeline.discoveries.forEach { discovery ->
-            context.event(CrawlerEventType.DISCOVERY_STARTED, detail = discovery.id)
-            try {
-                val discoveryCrawler = CrawlerContext(
-                    engineRunId = context.engineRunId,
-                    pipelineRunId = context.pipelineRunId,
-                    pipelineId = context.pipelineId,
-                )
-                val executor = RequestExecutor { request, requestContext ->
-                    executeDiscoveryRequest(pipeline, context, request, requestContext)
+            val harvestState = loadHarvestState(pipeline, context)
+
+            val accept: suspend (CrawlRequest, CrawlResponse?) -> Unit = { request, existingResponse ->
+                acceptWork(pipeline, context, counters, responses, responseMutex, request, existingResponse)
+            }
+
+            for (discovery in pipeline.discoveries) {
+                if (discoveryBudgetStopped) break
+                context.event(CrawlerEventType.DISCOVERY_STARTED, detail = discovery.id)
+                val progress = try {
+                    loadDiscoveryProgress(pipeline, context, discovery)
+                } catch (error: Throwable) {
+                    counters.failure("discovery-checkpoint:${discovery.id}", error, terminal = true)
+                    context.event(CrawlerEventType.DISCOVERY_FAILED, detail = discovery.id)
+                    continue
                 }
-                discovery.discover(DiscoveryContext(discoveryCrawler, executor))
-                    .take(context.configuration.runtimeOptions.maxDiscoveryEmissionsPerDiscovery)
-                    .collect { emission ->
-                        if (counters.discoveryEmissions.get() >=
-                            context.configuration.runtimeOptions.maxDiscoveryEmissionsPerRun
-                        ) {
-                            throw BudgetReached("discovery-per-run-bound")
+                discoveryProgress += progress
+                try {
+                    val openMetrics = queueMetrics(context)
+                    val harvestContext = HarvestContext(
+                        pipelineId = pipeline.id,
+                        discoveryId = discovery.id,
+                        checkpoint = progress.checkpoint,
+                        state = harvestState,
+                        openWorkCount = openMetrics.openWorkCount,
+                        now = context.configuration.clock.now(),
+                    )
+                    val harvestWindow = pipeline.harvestStrategy.window(harvestContext)
+                    val harvestAdmission = pipeline.harvestStrategy.admit(
+                        harvestContext.copy(incrementalWindow = harvestWindow),
+                    )
+                    when (harvestAdmission) {
+                        is com.rmjtromp.trawler.discovery.HarvestAdmission.Defer -> {
+                            progress.deferred = true
+                            counters.abandoned.set(true)
+                            context.event(
+                                CrawlerEventType.CAPABILITY_WARNING,
+                                detail = "discovery-deferred:${harvestAdmission.reason}",
+                            )
+                            continue
                         }
-                        counters.discoveryEmissions.incrementAndGet()
-                        observeBudget(
-                            pipeline,
-                            context,
-                            counters,
-                            BudgetObservation.DiscoveryEmitted(1),
-                        )
-                        context.event(CrawlerEventType.DISCOVERY_EMITTED, detail = discovery.id)
-                        when (emission) {
-                            is DiscoveryEmission.Request -> accept(emission.request, null)
-                            is DiscoveryEmission.ExistingResponse ->
-                                accept(emission.request, emission.response)
+
+                        com.rmjtromp.trawler.discovery.HarvestAdmission.Run -> Unit
+                    }
+                    when (val admission = pipeline.policies.admission.decide(
+                        DiscoveryAdmissionContext(
+                            pipelineId = pipeline.id,
+                            discoveryId = discovery.id,
+                            openWorkCount = openMetrics.openWorkCount,
+                            oldestOpenWorkAt = openMetrics.oldestOpenWorkAt,
+                            checkpoint = progress.checkpoint,
+                            harvestState = harvestState,
+                            budget = counters.snapshot(context.startedAt, context.configuration.clock),
+                            health = health,
+                            now = context.configuration.clock.now(),
+                        ),
+                    )) {
+                        DiscoveryAdmissionDecision.Admit -> Unit
+                        is DiscoveryAdmissionDecision.Defer -> {
+                            progress.deferred = true
+                            counters.abandoned.set(true)
+                            context.event(
+                                CrawlerEventType.CAPABILITY_WARNING,
+                                detail = "discovery-deferred:${admission.reason}",
+                            )
+                            continue
                         }
                     }
-                context.event(CrawlerEventType.DISCOVERY_COMPLETED, detail = discovery.id)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (budget: BudgetReached) {
-                counters.abandoned.set(true)
-                context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "budget:${budget.reason}")
-            } catch (error: Throwable) {
-                counters.failure("discovery:${discovery.id}", error, terminal = true)
-                context.event(CrawlerEventType.DISCOVERY_FAILED, detail = discovery.id)
-            }
-        }
-
-        supervisorScope {
-            repeat(context.configuration.runtimeOptions.workerCount) { index ->
-                launch {
-                    workerLoop(
-                        pipeline = pipeline,
-                        context = context,
-                        counters = counters,
-                        responses = responses,
-                        responseMutex = responseMutex,
-                        ownerId = "${context.pipelineRunId}/worker-$index",
-                        accept = accept,
+                    val discoveryCrawler = CrawlerContext(
+                        engineRunId = context.engineRunId,
+                        pipelineRunId = context.pipelineRunId,
+                        pipelineId = context.pipelineId,
                     )
+                    val executor = RequestExecutor { request, requestContext ->
+                        executeDiscoveryRequest(pipeline, context, request, requestContext)
+                    }
+                    var emissionsForDiscovery = 0
+                    discovery.discover(
+                        DiscoveryContext(
+                            crawler = discoveryCrawler,
+                            executor = executor,
+                            checkpoint = progress.checkpoint,
+                            incrementalWindow = harvestWindow,
+                        ),
+                    )
+                        .collect { emission ->
+                            if (emissionsForDiscovery >=
+                                context.configuration.runtimeOptions.maxDiscoveryEmissionsPerDiscovery
+                            ) {
+                                throw BudgetReached("discovery-per-discovery-bound")
+                            }
+                            emissionsForDiscovery++
+                            if (counters.discoveryEmissions.get() >=
+                                context.configuration.runtimeOptions.maxDiscoveryEmissionsPerRun
+                            ) {
+                                throw BudgetReached("discovery-per-run-bound")
+                            }
+                            counters.discoveryEmissions.incrementAndGet()
+                            observeBudget(
+                                pipeline,
+                                context,
+                                counters,
+                                BudgetObservation.DiscoveryEmitted(1),
+                            )
+                            context.event(CrawlerEventType.DISCOVERY_EMITTED, detail = discovery.id)
+                            when (emission) {
+                                is DiscoveryEmission.Request -> acceptWork(
+                                    pipeline,
+                                    context,
+                                    counters,
+                                    responses,
+                                    responseMutex,
+                                    emission.request,
+                                    null,
+                                    emission.checkpoint,
+                                    progress,
+                                )
+
+                                is DiscoveryEmission.ExistingResponse -> acceptWork(
+                                    pipeline,
+                                    context,
+                                    counters,
+                                    responses,
+                                    responseMutex,
+                                    emission.request,
+                                    emission.response,
+                                    emission.checkpoint,
+                                    progress,
+                                )
+                            }
+                        }
+                    progress.reachedNaturalEnd = true
+                    context.event(CrawlerEventType.DISCOVERY_COMPLETED, detail = discovery.id)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (budget: BudgetReached) {
+                    counters.abandoned.set(true)
+                    discoveryBudgetStopped = true
+                    context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "budget:${budget.reason}")
+                } catch (error: Throwable) {
+                    progress.failed = true
+                    counters.failure("discovery:${discovery.id}", error, terminal = true)
+                    context.event(CrawlerEventType.DISCOVERY_FAILED, detail = discovery.id)
                 }
             }
-        }
-        if (context.workStatus.activeWorkCount(context.pipelineId) > 0) {
-            counters.abandoned.set(true)
-            context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "resumable-work-remains")
+
+            supervisorScope {
+                repeat(context.configuration.runtimeOptions.workerCount) { index ->
+                    launch {
+                        workerLoop(
+                            pipeline = pipeline,
+                            context = context,
+                            counters = counters,
+                            responses = responses,
+                            responseMutex = responseMutex,
+                            ownerId = "${context.pipelineRunId}/worker-$index",
+                            accept = accept,
+                        )
+                    }
+                }
+            }
+            val openWork = context.workStatus.activeWorkCount(context.pipelineId)
+            if (openWork > 0) {
+                counters.abandoned.set(true)
+                context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "resumable-work-remains")
+            }
+            finalizeDiscoveryProgress(
+                pipeline,
+                context,
+                discoveryProgress,
+                counters,
+                openWork,
+                harvestState,
+            )
         }
     } catch (cancellation: CancellationException) {
         cancelled = true
@@ -984,6 +1193,7 @@ internal suspend fun <T : Any> executeTypedPipeline(
         startedAt = startedAt,
         completedAt = completedAt,
     )
+    recordPipelineHealth(pipeline, context, result)
     context.event(
         when (status) {
             RunStatus.COMPLETED -> CrawlerEventType.PIPELINE_RUN_COMPLETED
@@ -997,6 +1207,365 @@ internal suspend fun <T : Any> executeTypedPipeline(
     return result
 }
 
+private suspend fun <T : Any> loadDiscoveryProgress(
+    pipeline: Pipeline<T>,
+    context: PipelineExecutionContext,
+    discovery: com.rmjtromp.trawler.discovery.Discovery,
+): DiscoveryProgress {
+    val resumable = discovery as? ResumableDiscovery
+        ?: return DiscoveryProgress(discovery.id, null, null, null)
+    val state = context.configuration.stateStore
+    val checkpointStore = state as? DiscoveryCheckpointStore
+        ?: throw IllegalStateException(
+            "Resumable discovery '${discovery.id}' requires a discovery checkpoint store",
+        )
+    val quarantineStore = state as? CheckpointQuarantineStore
+    var checkpoint = checkpointStore.load(pipeline.id, discovery.id)
+    if (checkpoint != null) {
+        check(checkpoint.payload.size <= context.configuration.runtimeOptions.maxCheckpointPayloadBytes) {
+            "Discovery checkpoint exceeds the configured payload bound"
+        }
+        val current = checkpoint
+        when (val resolution = resumable.checkpointCodec.resolve(current)) {
+            is com.rmjtromp.trawler.state.CheckpointResolution.Use -> {
+                check(resolution.checkpoint.codecId == resumable.checkpointCodec.descriptor.id &&
+                    resolution.checkpoint.codecVersion == resumable.checkpointCodec.descriptor.version &&
+                    resolution.checkpoint.strategyId == resumable.checkpointCodec.strategyId
+                ) { "Checkpoint codec returned an incompatible usable state" }
+                check(resolution.checkpoint.payload.size <=
+                    context.configuration.runtimeOptions.maxCheckpointPayloadBytes
+                ) { "Resolved discovery checkpoint exceeds the configured payload bound" }
+                checkpoint = resolution.checkpoint
+            }
+            is com.rmjtromp.trawler.state.CheckpointResolution.Migrated -> {
+                check(resolution.checkpoint.payload.size <=
+                    context.configuration.runtimeOptions.maxCheckpointPayloadBytes
+                ) { "Migrated discovery checkpoint exceeds the configured payload bound" }
+                val migrated = resolution.checkpoint.copy(
+                    revision = current.revision + 1,
+                    codecId = resumable.checkpointCodec.descriptor.id,
+                    codecVersion = resumable.checkpointCodec.descriptor.version,
+                    strategyId = resumable.checkpointCodec.strategyId,
+                    completed = false,
+                )
+                check(checkpointStore.compareAndSet(
+                    pipeline.id,
+                    discovery.id,
+                    current.revision,
+                    migrated,
+                )) { "Checkpoint migration lost a compare-and-set race" }
+                checkpoint = migrated
+                context.event(CrawlerEventType.DISCOVERY_CHECKPOINTED, detail = "migrated:${discovery.id}")
+            }
+
+            is com.rmjtromp.trawler.state.CheckpointResolution.Reset -> {
+                val reset = resetCheckpoint(current, resumable)
+                check(checkpointStore.compareAndSet(
+                    pipeline.id,
+                    discovery.id,
+                    current.revision,
+                    reset,
+                )) { "Checkpoint reset lost a compare-and-set race" }
+                checkpoint = reset
+                context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "checkpoint-reset:${resolution.reason}")
+            }
+
+            is com.rmjtromp.trawler.state.CheckpointResolution.Quarantine -> {
+                val quarantine = quarantineStore
+                    ?: throw IllegalStateException(
+                        "Checkpoint codec mismatch requires a quarantine-capable state store",
+                    )
+                quarantine.quarantine(pipeline.id, discovery.id, current, resolution.reason)
+                val reset = resetCheckpoint(current, resumable)
+                check(checkpointStore.compareAndSet(
+                    pipeline.id,
+                    discovery.id,
+                    current.revision,
+                    reset,
+                )) { "Checkpoint quarantine reset lost a compare-and-set race" }
+                checkpoint = reset
+                context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "checkpoint-quarantined:${resolution.reason}")
+            }
+        }
+    }
+    return DiscoveryProgress(discovery.id, resumable, checkpointStore, quarantineStore, checkpoint)
+}
+
+private fun resetCheckpoint(
+    previous: DiscoveryCheckpoint,
+    discovery: ResumableDiscovery,
+): DiscoveryCheckpoint = DiscoveryCheckpoint(
+    revision = previous.revision + 1,
+    codecId = discovery.checkpointCodec.descriptor.id,
+    codecVersion = discovery.checkpointCodec.descriptor.version,
+    payload = CheckpointPayload.from(ByteArray(0)),
+    generationId = null,
+    strategyId = discovery.checkpointCodec.strategyId,
+    completed = false,
+)
+
+private suspend fun queueMetrics(context: PipelineExecutionContext): WorkQueueMetrics {
+    val metricsStore = context.configuration.stateStore as? WorkQueueMetricsStore
+    return metricsStore?.metrics(context.pipelineId)
+        ?: WorkQueueMetrics(context.workStatus.activeWorkCount(context.pipelineId), null)
+}
+
+private suspend fun <T : Any> loadHarvestState(
+    pipeline: Pipeline<T>,
+    context: PipelineExecutionContext,
+): HarvestState? {
+    val codec = pipeline.harvestStrategy.stateCodec ?: return null
+    val store = context.configuration.stateStore as? HarvestStateStore
+        ?: throw IllegalStateException(
+            "Harvest strategy '${pipeline.harvestStrategy.id}' requires harvest state storage",
+        )
+    val quarantineStore = context.configuration.stateStore as? HarvestStateQuarantineStore
+    var state = store.loadHarvestState(pipeline.id, pipeline.harvestStrategy.id)
+    if (state == null) return null
+    check(state.payload.size <= context.configuration.runtimeOptions.maxCheckpointPayloadBytes) {
+        "Harvest state exceeds the configured payload bound"
+    }
+    when (val resolution = codec.resolve(state)) {
+        is HarvestStateResolution.Use -> {
+            check(resolution.state.strategyId == codec.strategyId &&
+                resolution.state.codecId == codec.descriptor.id &&
+                resolution.state.codecVersion == codec.descriptor.version
+            ) { "Harvest-state codec returned an incompatible usable state" }
+            check(resolution.state.payload.size <=
+                context.configuration.runtimeOptions.maxCheckpointPayloadBytes
+            ) { "Resolved harvest state exceeds the configured payload bound" }
+            state = resolution.state
+        }
+        is HarvestStateResolution.Migrated -> {
+            check(resolution.state.payload.size <=
+                context.configuration.runtimeOptions.maxCheckpointPayloadBytes
+            ) { "Migrated harvest state exceeds the configured payload bound" }
+            val migrated = resolution.state.copy(
+                revision = state.revision + 1,
+                strategyId = codec.strategyId,
+                codecId = codec.descriptor.id,
+                codecVersion = codec.descriptor.version,
+            )
+            check(store.compareAndSetHarvestState(
+                pipeline.id,
+                pipeline.harvestStrategy.id,
+                state.revision,
+                migrated,
+            )) { "Harvest-state migration lost a compare-and-set race" }
+            state = migrated
+            context.event(CrawlerEventType.DISCOVERY_CHECKPOINTED, detail = "harvest-state-migrated")
+        }
+
+        is HarvestStateResolution.Reset -> {
+            val reset = HarvestState(
+                revision = state.revision + 1,
+                strategyId = codec.strategyId,
+                codecId = codec.descriptor.id,
+                codecVersion = codec.descriptor.version,
+                payload = CheckpointPayload.from(ByteArray(0)),
+                historicalComplete = false,
+            )
+            check(store.compareAndSetHarvestState(
+                pipeline.id,
+                pipeline.harvestStrategy.id,
+                state.revision,
+                reset,
+            )) { "Harvest-state reset lost a compare-and-set race" }
+            state = reset
+            context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "harvest-state-reset:${resolution.reason}")
+        }
+
+        is HarvestStateResolution.Quarantine -> {
+            val quarantine = quarantineStore
+                ?: throw IllegalStateException(
+                    "Harvest-state codec mismatch requires a quarantine-capable state store",
+                )
+            quarantine.quarantineHarvestState(
+                pipeline.id,
+                pipeline.harvestStrategy.id,
+                state,
+                resolution.reason,
+            )
+            val reset = HarvestState(
+                revision = state.revision + 1,
+                strategyId = codec.strategyId,
+                codecId = codec.descriptor.id,
+                codecVersion = codec.descriptor.version,
+                payload = CheckpointPayload.from(ByteArray(0)),
+                historicalComplete = false,
+            )
+            check(store.compareAndSetHarvestState(
+                pipeline.id,
+                pipeline.harvestStrategy.id,
+                state.revision,
+                reset,
+            )) { "Harvest-state quarantine reset lost a compare-and-set race" }
+            state = reset
+            context.event(
+                CrawlerEventType.CAPABILITY_WARNING,
+                detail = "harvest-state-quarantined:${resolution.reason}",
+            )
+        }
+    }
+    return state
+}
+
+private suspend fun <T : Any> finalizeDiscoveryProgress(
+    pipeline: Pipeline<T>,
+    context: PipelineExecutionContext,
+    progress: List<DiscoveryProgress>,
+    counters: PipelineCounters,
+    openWork: Int,
+    previousState: HarvestState?,
+) {
+    val outcome = when {
+        counters.terminalFailure.get() -> HarvestRunOutcome.FAILED
+        counters.abandoned.get() -> HarvestRunOutcome.ABANDONED
+        else -> HarvestRunOutcome.COMPLETED
+    }
+    val resumable = progress.filter { it.resumable != null }
+    if (resumable.isEmpty()) return
+    val completion = pipeline.harvestStrategy.complete(
+        HarvestCompletionContext(
+            discoveryReachedNaturalEnd = resumable.all {
+                it.reachedNaturalEnd && !it.deferred && !it.failed
+            },
+            checkpointWorkSettled = openWork == 0,
+            generationWorkOpen = openWork,
+            runOutcome = outcome,
+            completionPredicatePassed = outcome == HarvestRunOutcome.COMPLETED,
+            now = context.configuration.clock.now(),
+            previousState = previousState,
+        ),
+    )
+    when (completion) {
+        is HarvestCompletion.Incomplete -> context.event(
+            CrawlerEventType.CAPABILITY_WARNING,
+            detail = "harvest-incomplete:${completion.reason}",
+        )
+
+        is HarvestCompletion.Commit -> {
+            val commitAllowed = outcome == HarvestRunOutcome.COMPLETED &&
+                openWork == 0 &&
+                resumable.all { it.reachedNaturalEnd && !it.deferred && !it.failed }
+            if (!commitAllowed) {
+                counters.abandoned.set(true)
+                context.event(
+                    CrawlerEventType.CAPABILITY_WARNING,
+                    detail = "harvest-commit-rejected-by-engine",
+                )
+                return
+            }
+
+            val nextHarvestState: Pair<HarvestStateStore, HarvestState>? = completion.state?.let { candidate ->
+                val codec = pipeline.harvestStrategy.stateCodec
+                    ?: run {
+                        counters.abandoned.set(true)
+                        context.event(
+                            CrawlerEventType.CAPABILITY_WARNING,
+                            detail = "harvest-state-codec-missing",
+                        )
+                        return
+                    }
+                require(candidate.strategyId == codec.strategyId) {
+                    "Harvest candidate strategy does not match its strategy codec"
+                }
+                require(candidate.codecId == codec.descriptor.id &&
+                    candidate.codecVersion == codec.descriptor.version
+                ) { "Harvest candidate codec does not match its strategy codec" }
+                require(candidate.payload.size <= context.configuration.runtimeOptions.maxCheckpointPayloadBytes) {
+                    "Harvest state exceeds the configured payload bound"
+                }
+                val store = context.configuration.stateStore as? HarvestStateStore
+                    ?: run {
+                        counters.abandoned.set(true)
+                        context.event(
+                            CrawlerEventType.CAPABILITY_WARNING,
+                            detail = "harvest-state-store-missing",
+                        )
+                        return
+                    }
+                store to HarvestState(
+                    revision = (previousState?.revision ?: -1L) + 1L,
+                    strategyId = candidate.strategyId,
+                    codecId = candidate.codecId,
+                    codecVersion = candidate.codecVersion,
+                    payload = candidate.payload,
+                    historicalComplete = candidate.historicalComplete,
+                )
+            }
+
+            var checkpointsCommitted = true
+            resumable.forEach { currentProgress ->
+                if (!checkpointsCommitted) return@forEach
+                val checkpoint = currentProgress.checkpoint
+                if (checkpoint == null || checkpoint.completed) return@forEach
+                val completed = checkpoint.copy(
+                    revision = checkpoint.revision + 1,
+                    completed = true,
+                )
+                val advanced = currentProgress.checkpointStore?.compareAndSet(
+                    context.pipelineId,
+                    currentProgress.discoveryId,
+                    checkpoint.revision,
+                    completed,
+                ) == true
+                if (advanced) {
+                    currentProgress.checkpoint = completed
+                    context.event(
+                        CrawlerEventType.DISCOVERY_CHECKPOINTED,
+                        detail = "completed:${currentProgress.discoveryId}",
+                    )
+                } else {
+                    checkpointsCommitted = false
+                    counters.abandoned.set(true)
+                    context.event(
+                        CrawlerEventType.CAPABILITY_WARNING,
+                        detail = "checkpoint-completion-conflict:${currentProgress.discoveryId}",
+                    )
+                }
+            }
+            if (!checkpointsCommitted) return
+
+            nextHarvestState?.let { (store, next) ->
+                if (!store.compareAndSetHarvestState(
+                    context.pipelineId,
+                    next.strategyId,
+                    previousState?.revision,
+                    next,
+                )) {
+                    counters.abandoned.set(true)
+                    context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "harvest-state-conflict")
+                }
+            }
+        }
+    }
+}
+
+private suspend fun <T : Any> recordPipelineHealth(
+    pipeline: Pipeline<T>,
+    context: PipelineExecutionContext,
+    result: PipelineRunResult,
+) {
+    val store = context.configuration.stateStore as? PipelineHealthStore ?: return
+    val stored = store.loadPipelineHealth(pipeline.id)
+    val current = stored ?: PipelineHealthSnapshot()
+    val outcome = when (result.status) {
+        RunStatus.COMPLETED -> PipelineHealthOutcome.SUCCESS
+        RunStatus.FAILED -> PipelineHealthOutcome.FAILURE
+        RunStatus.ABANDONED -> PipelineHealthOutcome.ABANDONED
+        RunStatus.CANCELLED -> PipelineHealthOutcome.CANCELLED
+        RunStatus.RUNNING -> PipelineHealthOutcome.FAILURE
+    }
+    val next = pipeline.policies.health.observe(
+        current,
+        PipelineHealthObservation(outcome, result.completedAt),
+    ).copy(revision = (stored?.revision ?: -1L) + 1L)
+    if (!store.compareAndSetPipelineHealth(pipeline.id, stored?.revision, next)) {
+        context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "pipeline-health-conflict")
+    }
+}
+
 private suspend fun <T : Any> acceptWork(
     pipeline: Pipeline<T>,
     context: PipelineExecutionContext,
@@ -1005,24 +1574,26 @@ private suspend fun <T : Any> acceptWork(
     responseMutex: Mutex,
     request: CrawlRequest,
     existingResponse: CrawlResponse?,
-) {
+    checkpointCandidate: DiscoveryCheckpointCandidate? = null,
+    progress: DiscoveryProgress? = null,
+): WorkAcceptance {
     val options = context.configuration.runtimeOptions
     if (!counters.reserveWork(options.maxWorkItemsPerRun)) {
         counters.abandoned.set(true)
         context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "work-per-run-bound")
-        return
+        return WorkAcceptance.Rejected
     }
     var accepted = false
     try {
         if ((request.body?.size ?: 0) > options.maxRequestBodyBytes) {
             counters.abandoned.set(true)
             context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "request-body-bound")
-            return
+            return WorkAcceptance.Rejected
         }
         if (existingResponse != null && existingResponse.body.size > options.maxResponseBodyBytes) {
             counters.abandoned.set(true)
             context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "response-body-bound")
-            return
+            return WorkAcceptance.Rejected
         }
         val crawler = CrawlerContext(context.engineRunId, context.pipelineRunId, context.pipelineId)
         val requestContext = RequestContext(crawler, request)
@@ -1038,13 +1609,13 @@ private suspend fun <T : Any> acceptWork(
                     CrawlerEventType.REQUEST_FAILED,
                     detail = "recrawl-deferred:${recrawl.reason ?: "policy"}",
                 )
-                return
+                return WorkAcceptance.Suppressed
             }
 
             is RecrawlDecision.Rejected -> {
                 counters.suppressedWork.incrementAndGet()
                 context.event(CrawlerEventType.REQUEST_FAILED, detail = "recrawl-rejected:${recrawl.reason}")
-                return
+                return WorkAcceptance.Suppressed
             }
         }
         when (val scope = pipeline.policies.scope.evaluate(canonical, canonicalContext)) {
@@ -1052,7 +1623,7 @@ private suspend fun <T : Any> acceptWork(
             is ScopeDecision.Rejected -> {
                 counters.suppressedWork.incrementAndGet()
                 context.event(CrawlerEventType.REQUEST_FAILED, detail = "scope-rejected:${scope.reason}")
-                return
+                return WorkAcceptance.Suppressed
             }
         }
         when (val dedup = pipeline.policies.deduplication.decide(canonical, identity, canonicalContext)) {
@@ -1060,10 +1631,110 @@ private suspend fun <T : Any> acceptWork(
             is DeduplicationDecision.Suppress -> {
                 counters.suppressedWork.incrementAndGet()
                 context.event(CrawlerEventType.REQUEST_FAILED, detail = "deduplicated:${dedup.reason}")
-                return
+                return WorkAcceptance.Suppressed
             }
         }
-        when (val result = context.workQueue.enqueue(canonical, identity, crawler)) {
+        val item = DiscoveryWorkItem(canonical, identity, crawler)
+        val nextCheckpoint = checkpointCandidate?.let { candidate ->
+            require(candidate.payload.size <= options.maxCheckpointPayloadBytes) {
+                "Discovery checkpoint exceeds the configured payload bound"
+            }
+            val activeProgress = progress
+                ?: throw IllegalStateException("Checkpoint candidate was emitted outside discovery")
+            val resumable = activeProgress.resumable
+                ?: throw IllegalStateException("Checkpoint candidate requires a resumable discovery")
+            require(candidate.descriptor == resumable.checkpointCodec.descriptor) {
+                "Discovery checkpoint candidate codec does not match its discovery codec"
+            }
+            require(candidate.strategyId == resumable.checkpointCodec.strategyId) {
+                "Discovery checkpoint candidate strategy does not match its discovery codec"
+            }
+            DiscoveryCheckpoint(
+                revision = (activeProgress.checkpoint?.revision ?: -1L) + 1L,
+                codecId = candidate.descriptor.id,
+                codecVersion = candidate.descriptor.version,
+                payload = candidate.payload,
+                generationId = candidate.generationId,
+                strategyId = candidate.strategyId,
+                completed = false,
+            )
+        }
+        val enqueueResult = if (nextCheckpoint != null) {
+            val activeProgress = requireNotNull(progress)
+            val state = context.configuration.stateStore
+            val atomic = state as? AtomicEnqueueAndCheckpointStore
+            if (atomic != null) {
+                when (val atomicResult = atomic.enqueueAndCheckpoint(
+                    pipelineId = context.pipelineId,
+                    discoveryId = activeProgress.discoveryId,
+                    expectedRevision = activeProgress.checkpoint?.revision,
+                    next = nextCheckpoint,
+                    items = listOf(item),
+                )) {
+                    is AtomicEnqueueCheckpointResult.Advanced -> {
+                        activeProgress.checkpoint = atomicResult.checkpoint
+                        context.event(
+                            CrawlerEventType.DISCOVERY_CHECKPOINTED,
+                            detail = activeProgress.discoveryId,
+                        )
+                        atomicResult.enqueueResults.single()
+                    }
+
+                    AtomicEnqueueCheckpointResult.RevisionConflict -> {
+                        counters.abandoned.set(true)
+                        context.event(
+                            CrawlerEventType.CAPABILITY_WARNING,
+                            detail = "checkpoint-revision-conflict:${activeProgress.discoveryId}",
+                        )
+                        return WorkAcceptance.Rejected
+                    }
+
+                    is AtomicEnqueueCheckpointResult.Rejected -> {
+                        counters.abandoned.set(true)
+                        context.event(
+                            CrawlerEventType.CAPABILITY_WARNING,
+                            detail = "work-rejected:${atomicResult.reason}",
+                        )
+                        return WorkAcceptance.Rejected
+                    }
+                }
+            } else {
+                val result = context.workQueue.enqueue(canonical, identity, crawler)
+                if (result is com.rmjtromp.trawler.state.EnqueueResult.Accepted ||
+                    result is com.rmjtromp.trawler.state.EnqueueResult.AlreadyActive
+                ) {
+                    val store = activeProgress.checkpointStore
+                        ?: throw IllegalStateException("Checkpoint store disappeared during discovery")
+                    if (store.compareAndSet(
+                            context.pipelineId,
+                            activeProgress.discoveryId,
+                            activeProgress.checkpoint?.revision,
+                            nextCheckpoint,
+                        )
+                    ) {
+                        activeProgress.checkpoint = nextCheckpoint
+                        context.event(
+                            CrawlerEventType.DISCOVERY_CHECKPOINTED,
+                            detail = activeProgress.discoveryId,
+                        )
+                    } else {
+                        counters.abandoned.set(true)
+                        activeProgress.checkpoint = store.load(
+                            context.pipelineId,
+                            activeProgress.discoveryId,
+                        )
+                        context.event(
+                            CrawlerEventType.CAPABILITY_WARNING,
+                            detail = "checkpoint-revision-conflict:${activeProgress.discoveryId}",
+                        )
+                    }
+                }
+                result
+            }
+        } else {
+            context.workQueue.enqueue(canonical, identity, crawler)
+        }
+        when (val result = enqueueResult) {
             is com.rmjtromp.trawler.state.EnqueueResult.Accepted -> {
                 accepted = true
                 if (existingResponse != null) {
@@ -1075,16 +1746,19 @@ private suspend fun <T : Any> acceptWork(
                     }
                 }
                 context.event(CrawlerEventType.REQUEST_QUEUED, work = null, detail = result.workItemId.value)
+                return WorkAcceptance.Accepted(item, result)
             }
 
             is com.rmjtromp.trawler.state.EnqueueResult.AlreadyActive -> {
                 counters.suppressedWork.incrementAndGet()
                 context.event(CrawlerEventType.REQUEST_FAILED, detail = "active-duplicate")
+                return WorkAcceptance.AlreadyActive(item, result)
             }
 
             is com.rmjtromp.trawler.state.EnqueueResult.Rejected -> {
                 counters.abandoned.set(true)
                 context.event(CrawlerEventType.CAPABILITY_WARNING, detail = "work-rejected:${result.reason}")
+                return WorkAcceptance.Rejected
             }
         }
     } finally {

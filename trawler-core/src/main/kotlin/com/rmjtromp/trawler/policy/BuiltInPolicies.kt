@@ -31,6 +31,10 @@ public object BuiltInPolicies {
             authorization = AllowAllAuthorizationPolicy,
             ordering = FifoWorkOrderingPolicy,
             budget = UnlimitedBudgetPolicy,
+            admission = Continuous,
+            eligibility = AlwaysEligiblePipelinePolicy,
+            health = NoOpPipelineHealthPolicy,
+            circuitBreaker = NeverOpenCircuitBreakerPolicy,
         )
 }
 
@@ -219,6 +223,139 @@ public object UnlimitedBudgetPolicy : CrawlBudgetPolicy {
 
     override fun evaluate(snapshot: BudgetSnapshot, observation: BudgetObservation): BudgetDecision =
         BudgetDecision.Continue
+}
+
+/** Always allows a selected pipeline unless an operator override disables it. */
+public object AlwaysEligiblePipelinePolicy : PipelineEligibilityPolicy {
+    override val id: String = "always-eligible"
+
+    override fun decide(context: PipelineEligibilityContext): PipelineEligibilityDecision =
+        when (context.override?.takeIf { it.expiresAt?.isAfter(context.now) != false }?.enabled) {
+            false -> PipelineEligibilityDecision.Disabled(
+                context.override.reason ?: "Pipeline disabled by operator override",
+            )
+
+            else -> PipelineEligibilityDecision.Eligible
+        }
+}
+
+/** Retains health counters without opening a circuit or adding state. */
+public object NoOpPipelineHealthPolicy : PipelineHealthPolicy {
+    override val id: String = "health-observe-only"
+
+    override fun observe(
+        snapshot: com.rmjtromp.trawler.state.PipelineHealthSnapshot,
+        observation: PipelineHealthObservation,
+    ): com.rmjtromp.trawler.state.PipelineHealthSnapshot = snapshot.copy(
+        revision = snapshot.revision + 1,
+        totalSuccesses = snapshot.totalSuccesses +
+            if (observation.outcome == PipelineHealthOutcome.SUCCESS) 1 else 0,
+        totalFailures = snapshot.totalFailures +
+            if (observation.outcome == PipelineHealthOutcome.FAILURE) 1 else 0,
+        consecutiveFailures = if (observation.outcome == PipelineHealthOutcome.FAILURE) {
+            snapshot.consecutiveFailures + 1
+        } else {
+            0
+        },
+        lastObservedAt = observation.observedAt,
+        circuitOpenUntil = null,
+    )
+}
+
+/** Default circuit policy that never suppresses a pipeline. */
+public object NeverOpenCircuitBreakerPolicy : CircuitBreakerPolicy {
+    override val id: String = "circuit-disabled"
+
+    override fun decide(
+        snapshot: com.rmjtromp.trawler.state.PipelineHealthSnapshot,
+        now: java.time.Instant,
+    ): CircuitBreakerDecision = CircuitBreakerDecision.Closed
+}
+
+/**
+ * Opens a pipeline after a bounded number of consecutive failures. It is a
+ * replaceable policy and never affects unrelated pipelines.
+ */
+public class ConsecutiveFailureCircuitBreaker(
+    private val failureThreshold: Int,
+    private val coolDown: Duration,
+    override val id: String = "consecutive-failure-circuit-$failureThreshold",
+) : CircuitBreakerPolicy {
+    init {
+        require(failureThreshold > 0) { "Circuit failure threshold must be positive" }
+        require(!coolDown.isNegative && !coolDown.isZero) { "Circuit cooldown must be positive" }
+        require(id.isNotBlank()) { "Circuit policy ID must not be blank" }
+    }
+
+    override fun decide(
+        snapshot: com.rmjtromp.trawler.state.PipelineHealthSnapshot,
+        now: java.time.Instant,
+    ): CircuitBreakerDecision {
+        val persisted = snapshot.circuitOpenUntil
+        if (persisted != null && persisted.isAfter(now)) {
+            return CircuitBreakerDecision.Open(persisted, "Persisted circuit cooldown is active")
+        }
+        return if (snapshot.consecutiveFailures >= failureThreshold) {
+            CircuitBreakerDecision.Open(now.plus(coolDown), "Consecutive failure threshold reached")
+        } else {
+            CircuitBreakerDecision.Closed
+        }
+    }
+}
+
+/** Default admission that runs discovery whenever the selected pipeline runs. */
+public object Continuous : DiscoveryAdmissionPolicy {
+    override val id: String = "continuous"
+
+    override fun decide(context: DiscoveryAdmissionContext): DiscoveryAdmissionDecision =
+        DiscoveryAdmissionDecision.Admit
+}
+
+/**
+ * Defers fresh discovery while open work exists, but always lets an
+ * unfinished checkpoint resume so interrupted generation is not starved.
+ */
+public object BacklogFirst : DiscoveryAdmissionPolicy {
+    override val id: String = "backlog-first"
+
+    override fun decide(context: DiscoveryAdmissionContext): DiscoveryAdmissionDecision =
+        if (context.checkpoint?.completed == false) {
+            DiscoveryAdmissionDecision.Admit
+        } else if (context.openWorkCount > 0) {
+            DiscoveryAdmissionDecision.Defer("open backlog remains")
+        } else {
+            DiscoveryAdmissionDecision.Admit
+        }
+}
+
+/**
+ * Hysteresis admission gate. It closes at [highWatermark] and reopens only
+ * after the queue falls to [lowWatermark]. An active unfinished checkpoint is
+ * always allowed to resume.
+ */
+public class QueueWatermark(
+    private val highWatermark: Int,
+    private val lowWatermark: Int,
+    override val id: String = "queue-watermark-$lowWatermark-$highWatermark",
+) : DiscoveryAdmissionPolicy {
+    private val admitting = AtomicBoolean(true)
+
+    init {
+        require(lowWatermark >= 0) { "Queue low watermark must not be negative" }
+        require(highWatermark > lowWatermark) { "Queue high watermark must exceed low watermark" }
+        require(id.isNotBlank()) { "Queue watermark policy ID must not be blank" }
+    }
+
+    override fun decide(context: DiscoveryAdmissionContext): DiscoveryAdmissionDecision {
+        if (context.checkpoint?.completed == false) return DiscoveryAdmissionDecision.Admit
+        if (context.openWorkCount >= highWatermark) admitting.set(false)
+        if (context.openWorkCount <= lowWatermark) admitting.set(true)
+        return if (admitting.get()) {
+            DiscoveryAdmissionDecision.Admit
+        } else {
+            DiscoveryAdmissionDecision.Defer("queue high watermark reached")
+        }
+    }
 }
 
 private fun ByteArray.toHex(): String = buildString(size * 2) {

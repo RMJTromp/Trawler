@@ -20,11 +20,9 @@ lookups, HTTP semantics, and web-specific safety decisions.
 ## Non-goals
 
 This phase does not implement PostgreSQL, durable response storage, browser or
-FlareSolverr behavior, HTML parsing, RSS/Atom or sitemap discovery, recurring
-discovery, external scheduling, or automatic retries hidden inside transport.
-The RSS/Atom and sitemap work planned for Phase 5 can use this module's
-bounded HTTP and robots capabilities, but no Phase 5 parser or discovery type
-is present here.
+FlareSolverr behavior, HTML parsing, external scheduling, or automatic retries
+hidden inside transport. Phase 5 XML discovery is intentionally limited to
+bounded RSS/Atom/sitemap locations and does not provide site-specific parsing.
 
 ## Public contracts and ownership
 
@@ -38,6 +36,7 @@ is present here.
 | Origin controls | `OriginConcurrencyPolicy`, `OriginPacingPolicy`, `RetryAfterPolicy` | Policies own permits, pacing state, server cooldowns, and their bounds. |
 | Sessions | `CookieSession`, `InMemoryCookieSession` | The session owns process-local cookie values and retention. It is not durable. |
 | HTTP outcomes | `HttpFailureClassifier`, `DefaultWebFailureClassifier`, `DefaultHttpRetryPolicy` | Classification and retry remain distinct; core still owns visible retry accounting. |
+| XML discovery | `RssDiscovery`, `AtomDiscovery`, `SitemapDiscovery`, `XmlDiscoveryBounds`, `XmlCursorCheckpointCodec` | The adapter owns bounded JDK StAX/gzip parsing and calls only the engine-provided `RequestExecutor`. |
 
 Ktor types appear only in this adapter's public `KtorTransport` construction
 surface. No Ktor type is imported by or exposed from `trawler-core`.
@@ -150,6 +149,29 @@ middleware runs in declared order after the final adapted response. The web
 module provides small opt-in header/attribute middleware helpers; it does not
 create a second Ktor interceptor chain or hide retries in middleware.
 
+## RSS, Atom, and sitemap discovery
+
+The Phase 5 discovery implementations are resumable core `Discovery` values.
+Each fetches its document through the pipeline's engine-controlled executor,
+emits bounded request/checkpoint pairs, and lets core apply scope,
+authorization, pacing, concurrency, middleware, and active deduplication.
+RSS item links and Atom entry links are resolved against the feed target.
+Sitemap traversal accepts both `urlset` and `sitemapindex`, follows index
+locations breadth first, and resolves each child against the document that
+listed it. Recursion depth and document count are finite; reaching a bound
+raises a visible discovery failure rather than silently truncating historical
+coverage.
+
+The parser disables DTD and external entities. It accepts a gzip member by
+magic-byte detection and bounds both input/compressed and decompressed bytes.
+The transport normally performs content-encoding adaptation first, so this
+additional gzip handling covers a bounded raw gzip document supplied to a
+custom transport. Locations must resolve to absolute HTTP(S) targets.
+
+Custom paginated discovery uses core's `PaginationStrategy` hook. The hook
+returns at most one next request per response; the owning discovery remains
+responsible for page bounds, checkpoint candidates, and cancellation.
+
 ## Bodies, headers, and response adaptation
 
 The transport disables Ktor `expectSuccess`, so non-2xx responses remain
@@ -227,9 +249,10 @@ Direct runtime dependencies are limited to:
 
 Ktor brings its required client, HTTP, network/TLS, serialization plumbing,
 Kotlinx I/O, and SLF4J API transitives. No Ktor retry, content-negotiation,
-Jackson, Jsoup, database, browser, telemetry backend, or test dependency is
-declared. Those transitive APIs are not exposed through core and are not used
-to serialize produced values.
+Jackson, Jsoup, parser, database, browser, telemetry backend, or test
+dependency is declared. The XML discovery uses JDK StAX and gzip, so Phase 5
+adds no dependency or POM change. Those transitive APIs are not exposed
+through core and are not used to serialize produced values.
 
 ## Verification
 
@@ -247,5 +270,5 @@ automated tests were authorized, added, or run.
   support for every robots extension.
 - Redirect history is retained during one request and exposed as bounded
   metadata, not as a durable audit record.
-- RSS/Atom, sitemap, HTML parsing, recurring discovery, and response replay
-  remain later-phase behavior.
+- HTML parsing, response replay, and site-specific recurring strategies remain
+  later-phase or host-owned behavior.

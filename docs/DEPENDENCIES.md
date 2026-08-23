@@ -10,18 +10,15 @@
 |---|---|---|---|
 | `trawler-parent` | `pom` | No | Reactor, version, dependency, and plugin management. It has no runtime dependencies. |
 | `trawler-core` | `jar` | Yes, once releases begin | Generic contracts/engine and lightweight official implementations. |
-| `trawler-web` | `jar` | Yes, once releases begin | Optional Ktor/CIO HTTP transport and replaceable web policies. |
-| `trawler-postgres` | `jar` | Yes, once releases begin | Optional PostgreSQL operational state, leases, attempts, run history, and request codecs. |
+| `trawler-web` | `jar` | Yes, once releases begin | Optional Ktor/CIO HTTP transport, replaceable web policies, and bounded XML discovery. |
+| `trawler-postgres` | `jar` | Yes, once releases begin | Optional PostgreSQL operational state, leases, attempts, run history, request codecs, checkpoints, and recurring state. |
 
 Future module ownership is defined in [`MODULES.md`](MODULES.md). Modules are not created before their implementation begins.
 
 The ownership and purpose descriptions below include approved future core
-capabilities. Phase 1 contracts and the Phase 2 database-free runtime are
-implemented in `trawler-core`; Phase 3 adds the implemented optional
-`trawler-web` adapter; Phase 4 adds the implemented optional
-`trawler-postgres` operational-state adapter. Response archival, produced-data
-output, checkpoints, and later specialized adapters remain planned and do not
-justify additional dependencies.
+capabilities. Phases 1 through 5 are implemented in the current core/web/
+PostgreSQL sources. Response archival, produced-data output, and later
+specialized adapters remain planned and do not justify additional dependencies.
 
 All project modules use the group ID `com.rmjtromp.trawler` and inherit the coordinated version from `trawler-parent`.
 
@@ -44,7 +41,7 @@ core consumers do not inherit Ktor.
 | `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `ktor.coroutines.version` in parent `pom.xml` (`1.11.0`) | Compile | `trawler-web` | Suspending bounded DNS dispatch, policy synchronization, pacing, and cancellation. | Ktor 3.5.1 is compiled against coroutines 1.11.0; the adapter keeps that binary-compatible runtime isolated from core's 1.10.2 dependency tree. |
 | `io.ktor:ktor-client-cio-jvm` | `ktor.version` in parent `pom.xml` (`3.5.1`) | Compile | `trawler-web` | One owned CIO HTTP client, request/response adaptation, timeout plugins, and byte-channel access. | A real HTTP transport is the current Phase 3 implementation need; JDK URL APIs do not provide the required replaceable Ktor client boundary and timeout/body behavior. |
 
-The Phase 3 direct external technology dependency is Ktor CIO. Ktor is Apache
+The Phase 3/5 direct external technology dependency remains Ktor CIO. Ktor is Apache
 License 2.0, is pinned through one parent property, and is maintained in its
 upstream repository. The web adapter's direct coroutines version is an explicit
 compatibility alignment with Ktor; `trawler-core` continues to resolve its
@@ -82,11 +79,13 @@ requests, `T`, responses, or state payloads by Trawler. Replacing Flyway would
 remove that transitive graph only if another migration implementation supplied
 the same validated lifecycle.
 
-Phase 2 added no dependency or Maven-module change. The in-memory state and
-response stores, callback/flow outputs, generic policies, and coroutine
-scheduler use only the already-approved Kotlin standard library, coroutines,
-and JDK APIs. No serializer, database, HTTP, parser, logging, telemetry,
-browser, or anti-bot type enters core.
+Phases 2 and 5 added no dependency or Maven-module change. The in-memory state
+and response stores, callback/flow outputs, generic policies, coroutine
+scheduler, checkpoint/harvest codecs, and pipeline health/admission policies
+use only the already-approved Kotlin standard library, coroutines, and JDK
+APIs. Phase 5 XML discovery likewise uses JDK StAX and gzip inside
+`trawler-web`; no parser or compression dependency was added. No serializer,
+database, HTTP, logging, telemetry, browser, or anti-bot type enters core.
 
 ## Resolved transitive runtime dependencies
 
@@ -229,7 +228,7 @@ in the current delivery. They are not approval to add dependencies now:
 | Capability | Expected owner |
 |---|---|
 | Built-in coroutine scheduling | `trawler-core`; no additional dependency |
-| RSS/Atom and sitemap parsing/discovery | `trawler-web`; dependencies added only if the Phase 5 implementation requires them |
+| RSS/Atom and sitemap parsing/discovery | `trawler-web`; implemented with JDK StAX/gzip and no new direct dependency |
 | PostgreSQL JDBC, HikariCP, Flyway | `trawler-postgres` |
 | Jackson or another codec | Only the adapter selecting that codec |
 | Jsoup | `trawler-web` or an example only if its actual parser requires it |

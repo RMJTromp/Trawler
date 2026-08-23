@@ -13,14 +13,28 @@ import com.rmjtromp.trawler.policy.WorkOrderingPolicy
 import com.rmjtromp.trawler.state.AttemptOutcome
 import com.rmjtromp.trawler.state.AttemptStartResult
 import com.rmjtromp.trawler.state.AttemptStore
+import com.rmjtromp.trawler.state.AtomicEnqueueAndCheckpointStore
+import com.rmjtromp.trawler.state.AtomicEnqueueCheckpointResult
+import com.rmjtromp.trawler.state.CheckpointQuarantineStore
+import com.rmjtromp.trawler.state.CheckpointPayload
 import com.rmjtromp.trawler.state.CrawlStateCapability
 import com.rmjtromp.trawler.state.CrawlStateStore
+import com.rmjtromp.trawler.state.DiscoveryCheckpoint
+import com.rmjtromp.trawler.state.DiscoveryCheckpointStore
+import com.rmjtromp.trawler.state.DiscoveryWorkItem
 import com.rmjtromp.trawler.state.DurableRunStatus
 import com.rmjtromp.trawler.state.EnqueueResult
 import com.rmjtromp.trawler.state.ExecutionAttempt
 import com.rmjtromp.trawler.state.LeaseMutationResult
 import com.rmjtromp.trawler.state.LeaseStore
 import com.rmjtromp.trawler.state.LeasedWork
+import com.rmjtromp.trawler.state.HarvestState
+import com.rmjtromp.trawler.state.HarvestStateQuarantineStore
+import com.rmjtromp.trawler.state.HarvestStateStore
+import com.rmjtromp.trawler.state.PipelineEligibilityOverride
+import com.rmjtromp.trawler.state.PipelineEligibilityOverrideStore
+import com.rmjtromp.trawler.state.PipelineHealthSnapshot
+import com.rmjtromp.trawler.state.PipelineHealthStore
 import com.rmjtromp.trawler.state.PipelineScopedWorkQueueStore
 import com.rmjtromp.trawler.state.ResourceHistoryStore
 import com.rmjtromp.trawler.state.RunHistoryStore
@@ -29,6 +43,8 @@ import com.rmjtromp.trawler.state.WorkItemId
 import com.rmjtromp.trawler.state.WorkOrderingStore
 import com.rmjtromp.trawler.state.WorkQueueStatus
 import com.rmjtromp.trawler.state.WorkTransition
+import com.rmjtromp.trawler.state.WorkQueueMetrics
+import com.rmjtromp.trawler.state.WorkQueueMetricsStore
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import kotlinx.coroutines.CoroutineDispatcher
@@ -82,6 +98,14 @@ public class PostgresCrawlStateStore(
     WorkOrderingStore,
     WorkQueueStatus,
     RunHistoryStore,
+    DiscoveryCheckpointStore,
+    AtomicEnqueueAndCheckpointStore,
+    CheckpointQuarantineStore,
+    HarvestStateStore,
+    HarvestStateQuarantineStore,
+    PipelineEligibilityOverrideStore,
+    PipelineHealthStore,
+    WorkQueueMetricsStore,
     ExtensionLifecycle {
 
     private val requestCodecs: PostgresRequestCodecRegistry = requestCodecs
@@ -128,6 +152,14 @@ public class PostgresCrawlStateStore(
         CrawlStateCapability.WORK_STATUS,
         CrawlStateCapability.RUN_HISTORY,
         CrawlStateCapability.RUN_RECOVERY,
+        CrawlStateCapability.DISCOVERY_CHECKPOINTS,
+        CrawlStateCapability.ATOMIC_ENQUEUE_AND_CHECKPOINT,
+        CrawlStateCapability.CHECKPOINT_QUARANTINE,
+        CrawlStateCapability.HARVEST_STATE,
+        CrawlStateCapability.HARVEST_STATE_QUARANTINE,
+        CrawlStateCapability.QUEUE_WATERMARKS,
+        CrawlStateCapability.PIPELINE_HEALTH,
+        CrawlStateCapability.PIPELINE_ELIGIBILITY_OVERRIDES,
     )
 
     init {
@@ -195,12 +227,24 @@ public class PostgresCrawlStateStore(
         requireUtf8Bound(encoded.descriptor.id, configuration.maxIdentifierBytes, "request codec ID")
         val now = clock.now()
         return transaction { connection ->
-            val resourceId = upsertResource(connection, context.pipelineId, identity.value, now)
-            val existing = findActiveJob(connection, resourceId)
-            if (existing != null) {
-                return@transaction EnqueueResult.AlreadyActive(existing)
-            }
             lockEnqueueCapacity(connection)
+            enqueueEncoded(connection, request, identity, context, encoded, now, checkCapacity = true)
+        }
+    }
+
+    private fun enqueueEncoded(
+        connection: Connection,
+        request: CrawlRequest,
+        identity: RequestIdentity,
+        context: CrawlerContext,
+        encoded: EncodedPostgresRequest,
+        now: Instant,
+        checkCapacity: Boolean,
+    ): EnqueueResult {
+        val resourceId = upsertResource(connection, context.pipelineId, identity.value, now)
+        val existing = findActiveJob(connection, resourceId)
+        if (existing != null) return EnqueueResult.AlreadyActive(existing)
+        if (checkCapacity) {
             val activeCount = connection.prepare(
                 "SELECT COUNT(*) FROM ${table("jobs")} WHERE status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')",
             ).use { statement ->
@@ -210,38 +254,579 @@ public class PostgresCrawlStateStore(
                 }
             }
             if (activeCount >= configuration.maxActiveJobs) {
-                return@transaction EnqueueResult.Rejected(
+                return EnqueueResult.Rejected(
                     "PostgreSQL active work capacity ${configuration.maxActiveJobs} is full",
                 )
             }
-            val workItemId = WorkItemId("postgres-work-${UUID.randomUUID()}")
-            val inserted = connection.prepare(
-                """
-                INSERT INTO ${table("jobs")} (
-                    job_id, pipeline_id, resource_id, request_codec_id,
-                    request_codec_version, request_payload, status, enqueued_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)
-                ON CONFLICT (resource_id) WHERE status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')
-                DO NOTHING
-                RETURNING job_id
-                """.trimIndent(),
-            ).use { statement ->
-                statement.setString(1, workItemId.value)
-                statement.setString(2, context.pipelineId)
-                statement.setLong(3, resourceId)
-                statement.setString(4, encoded.descriptor.id)
-                statement.setInt(5, encoded.descriptor.version)
-                statement.setBytes(6, encoded.toByteArray())
-                statement.setTimestamp(7, timestamp(now))
-                statement.setTimestamp(8, timestamp(now))
-                statement.executeQuery().use { result -> result.next() }
+        }
+        val workItemId = WorkItemId("postgres-work-${UUID.randomUUID()}")
+        val inserted = connection.prepare(
+            """
+            INSERT INTO ${table("jobs")} (
+                job_id, pipeline_id, resource_id, request_codec_id,
+                request_codec_version, request_payload, status, enqueued_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)
+            ON CONFLICT (resource_id) WHERE status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')
+            DO NOTHING
+            RETURNING job_id
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, workItemId.value)
+            statement.setString(2, context.pipelineId)
+            statement.setLong(3, resourceId)
+            statement.setString(4, encoded.descriptor.id)
+            statement.setInt(5, encoded.descriptor.version)
+            statement.setBytes(6, encoded.toByteArray())
+            statement.setTimestamp(7, timestamp(now))
+            statement.setTimestamp(8, timestamp(now))
+            statement.executeQuery().use { result -> result.next() }
+        }
+        return if (inserted) EnqueueResult.Accepted(workItemId)
+        else EnqueueResult.AlreadyActive(findActiveJob(connection, resourceId))
+    }
+
+    override suspend fun enqueueAndCheckpoint(
+        pipelineId: String,
+        discoveryId: String,
+        expectedRevision: Long?,
+        next: DiscoveryCheckpoint,
+        items: List<DiscoveryWorkItem>,
+    ): AtomicEnqueueCheckpointResult {
+        requireIdentifier(pipelineId, "pipeline ID")
+        requireIdentifier(discoveryId, "discovery ID")
+        require(items.isNotEmpty()) { "Atomic discovery admission requires work" }
+        require(items.size <= configuration.maxCheckpointBatch) {
+            "Atomic discovery admission batch exceeds the PostgreSQL bound"
+        }
+        items.forEach { item ->
+            require(item.context.pipelineId == pipelineId) {
+                "Atomic discovery admission item belongs to another pipeline"
             }
-            if (inserted) {
-                EnqueueResult.Accepted(workItemId)
-            } else {
-                EnqueueResult.AlreadyActive(findActiveJob(connection, resourceId))
+            validateRequest(item.request)
+            requireUtf8Bound(item.identity.value, configuration.maxIdentityBytes, "request identity")
+        }
+        validateCheckpoint(next)
+        val encoded = items.map { item ->
+            requestCodecs.encode(item.request).also { encodedRequest ->
+                require(encodedRequest.size <= configuration.maxEncodedRequestBytes) {
+                    "Encoded request exceeds the PostgreSQL state bound"
+                }
+                requireUtf8Bound(encodedRequest.descriptor.id, configuration.maxIdentifierBytes, "request codec ID")
             }
         }
+        return try {
+            transaction { connection ->
+                val current = loadCheckpoint(connection, pipelineId, discoveryId)
+                if (current?.revision != expectedRevision) {
+                    return@transaction AtomicEnqueueCheckpointResult.RevisionConflict
+                }
+                require(next.revision == (expectedRevision ?: -1L) + 1L) {
+                    "Next checkpoint revision must immediately follow the expected revision"
+                }
+                lockEnqueueCapacity(connection)
+                val activeCount = activeJobCount(connection)
+                val newResources = items.map { it.identity.value }.distinct().count { identity ->
+                    !hasActiveResourceJob(connection, pipelineId, identity)
+                }
+                if (activeCount + newResources > configuration.maxActiveJobs) {
+                    return@transaction AtomicEnqueueCheckpointResult.Rejected(
+                        "PostgreSQL active work capacity ${configuration.maxActiveJobs} is full",
+                    )
+                }
+                val now = clock.now()
+                val results = items.mapIndexed { index, item ->
+                    when (val result = enqueueEncoded(
+                        connection,
+                        item.request,
+                        item.identity,
+                        item.context,
+                        encoded[index],
+                        now,
+                        checkCapacity = false,
+                    )) {
+                        is EnqueueResult.Rejected -> throw AtomicAdmissionRejected(result.reason)
+                        else -> result
+                    }
+                }
+                if (!compareAndSetCheckpoint(connection, pipelineId, discoveryId, expectedRevision, next)) {
+                    throw AtomicCheckpointConflict()
+                }
+                AtomicEnqueueCheckpointResult.Advanced(results, next)
+            }
+        } catch (_: AtomicCheckpointConflict) {
+            AtomicEnqueueCheckpointResult.RevisionConflict
+        } catch (rejected: AtomicAdmissionRejected) {
+            AtomicEnqueueCheckpointResult.Rejected(rejected.reason)
+        }
+    }
+
+    private fun activeJobCount(connection: Connection): Long = connection.prepare(
+        "SELECT COUNT(*) FROM ${table("jobs")} WHERE status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')",
+    ).use { statement ->
+        statement.executeQuery().use { result ->
+            require(result.next()) { "PostgreSQL active-job count returned no row" }
+            result.getLong(1)
+        }
+    }
+
+    private fun hasActiveResourceJob(connection: Connection, pipelineId: String, identity: String): Boolean =
+        connection.prepare(
+            """
+            SELECT 1
+            FROM ${table("resources")} r
+            JOIN ${table("jobs")} j ON j.resource_id = r.resource_id
+            WHERE r.pipeline_id = ? AND r.identity_value = ?
+              AND j.status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')
+            LIMIT 1
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, pipelineId)
+            statement.setString(2, identity)
+            statement.executeQuery().use { result -> result.next() }
+        }
+
+    override suspend fun load(pipelineId: String, discoveryId: String): DiscoveryCheckpoint? =
+        database { connection -> loadCheckpoint(connection, pipelineId, discoveryId) }
+
+    override suspend fun compareAndSet(
+        pipelineId: String,
+        discoveryId: String,
+        expectedRevision: Long?,
+        next: DiscoveryCheckpoint,
+    ): Boolean = transaction { connection ->
+        compareAndSetCheckpoint(connection, pipelineId, discoveryId, expectedRevision, next)
+    }
+
+    private fun loadCheckpoint(
+        connection: Connection,
+        pipelineId: String,
+        discoveryId: String,
+    ): DiscoveryCheckpoint? = connection.prepare(
+        """
+        SELECT revision, codec_id, codec_version, payload, generation_id,
+               strategy_id, completed
+        FROM ${table("discovery_checkpoints")}
+        WHERE pipeline_id = ? AND discovery_id = ?
+        """.trimIndent(),
+    ).use { statement ->
+        statement.setString(1, pipelineId)
+        statement.setString(2, discoveryId)
+        statement.executeQuery().use { result ->
+            if (!result.next()) null else DiscoveryCheckpoint(
+                revision = result.getLong("revision"),
+                codecId = result.getString("codec_id"),
+                codecVersion = result.getInt("codec_version"),
+                payload = CheckpointPayload.from(result.getBytes("payload")),
+                generationId = result.getString("generation_id"),
+                strategyId = result.getString("strategy_id"),
+                completed = result.getBoolean("completed"),
+            )
+        }
+    }
+
+    private fun compareAndSetCheckpoint(
+        connection: Connection,
+        pipelineId: String,
+        discoveryId: String,
+        expectedRevision: Long?,
+        next: DiscoveryCheckpoint,
+    ): Boolean {
+        requireIdentifier(pipelineId, "pipeline ID")
+        requireIdentifier(discoveryId, "discovery ID")
+        validateCheckpoint(next)
+        require(next.revision == (expectedRevision ?: -1L) + 1L) {
+            "Next checkpoint revision must immediately follow the expected revision"
+        }
+        if (expectedRevision == null) {
+            connection.prepare(
+                """
+                INSERT INTO ${table("discovery_checkpoints")} (
+                    pipeline_id, discovery_id, revision, codec_id, codec_version,
+                    payload, generation_id, strategy_id, completed, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (pipeline_id, discovery_id) DO NOTHING
+                RETURNING revision
+                """.trimIndent(),
+            ).use { statement ->
+                bindCheckpoint(statement, pipelineId, discoveryId, next)
+                statement.executeQuery().use { result -> return result.next() }
+            }
+        } else {
+            connection.prepare(
+                """
+                UPDATE ${table("discovery_checkpoints")}
+                SET revision = ?, codec_id = ?, codec_version = ?, payload = ?,
+                    generation_id = ?, strategy_id = ?, completed = ?, updated_at = ?
+                WHERE pipeline_id = ? AND discovery_id = ? AND revision = ?
+                """.trimIndent(),
+            ).use { statement ->
+                bindCheckpointUpdate(statement, pipelineId, discoveryId, next, expectedRevision)
+                return statement.executeUpdate() == 1
+            }
+        }
+    }
+
+    private fun bindCheckpoint(
+        statement: PreparedStatement,
+        pipelineId: String,
+        discoveryId: String,
+        checkpoint: DiscoveryCheckpoint,
+    ) {
+        statement.setString(1, pipelineId)
+        statement.setString(2, discoveryId)
+        statement.setLong(3, checkpoint.revision)
+        statement.setString(4, checkpoint.codecId)
+        statement.setInt(5, checkpoint.codecVersion)
+        statement.setBytes(6, checkpoint.payload.toByteArray())
+        setNullableString(statement, 7, checkpoint.generationId)
+        setNullableString(statement, 8, checkpoint.strategyId)
+        statement.setBoolean(9, checkpoint.completed)
+        statement.setTimestamp(10, timestamp(clock.now()))
+    }
+
+    private fun bindCheckpointUpdate(
+        statement: PreparedStatement,
+        pipelineId: String,
+        discoveryId: String,
+        checkpoint: DiscoveryCheckpoint,
+        expectedRevision: Long,
+    ) {
+        statement.setLong(1, checkpoint.revision)
+        statement.setString(2, checkpoint.codecId)
+        statement.setInt(3, checkpoint.codecVersion)
+        statement.setBytes(4, checkpoint.payload.toByteArray())
+        setNullableString(statement, 5, checkpoint.generationId)
+        setNullableString(statement, 6, checkpoint.strategyId)
+        statement.setBoolean(7, checkpoint.completed)
+        statement.setTimestamp(8, timestamp(clock.now()))
+        statement.setString(9, pipelineId)
+        statement.setString(10, discoveryId)
+        statement.setLong(11, expectedRevision)
+    }
+
+    private fun validateCheckpoint(checkpoint: DiscoveryCheckpoint) {
+        requireUtf8Bound(checkpoint.codecId, configuration.maxIdentifierBytes, "checkpoint codec ID")
+        checkpoint.strategyId?.let {
+            requireUtf8Bound(it, configuration.maxIdentifierBytes, "checkpoint strategy ID")
+        }
+        checkpoint.generationId?.let {
+            requireUtf8Bound(it, configuration.maxIdentifierBytes, "checkpoint generation ID")
+        }
+        require(checkpoint.payload.size <= configuration.maxCheckpointPayloadBytes) {
+            "Checkpoint payload exceeds the PostgreSQL state bound"
+        }
+    }
+
+    override suspend fun quarantine(
+        pipelineId: String,
+        discoveryId: String,
+        checkpoint: DiscoveryCheckpoint,
+        reason: String,
+    ) {
+        requireIdentifier(pipelineId, "pipeline ID")
+        requireIdentifier(discoveryId, "discovery ID")
+        validateCheckpoint(checkpoint)
+        requireUtf8Bound(reason, configuration.maxReasonBytes, "checkpoint quarantine reason")
+        transaction { connection ->
+            connection.prepare(
+                """
+                INSERT INTO ${table("discovery_checkpoint_quarantine")} (
+                    pipeline_id, discovery_id, revision, codec_id, codec_version,
+                    payload, generation_id, strategy_id, completed, reason, quarantined_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, pipelineId)
+                statement.setString(2, discoveryId)
+                statement.setLong(3, checkpoint.revision)
+                statement.setString(4, checkpoint.codecId)
+                statement.setInt(5, checkpoint.codecVersion)
+                statement.setBytes(6, checkpoint.payload.toByteArray())
+                setNullableString(statement, 7, checkpoint.generationId)
+                setNullableString(statement, 8, checkpoint.strategyId)
+                statement.setBoolean(9, checkpoint.completed)
+                statement.setString(10, reason)
+                statement.setTimestamp(11, timestamp(clock.now()))
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    override suspend fun loadHarvestState(pipelineId: String, strategyId: String): HarvestState? =
+        database { connection ->
+            requireIdentifier(pipelineId, "pipeline ID")
+            requireIdentifier(strategyId, "harvest strategy ID")
+            connection.prepare(
+                """
+                SELECT revision, codec_id, codec_version, payload, historical_complete
+                FROM ${table("harvest_state")}
+                WHERE pipeline_id = ? AND strategy_id = ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, pipelineId)
+                statement.setString(2, strategyId)
+                statement.executeQuery().use { result ->
+                    if (!result.next()) null else HarvestState(
+                        revision = result.getLong("revision"),
+                        strategyId = strategyId,
+                        codecId = result.getString("codec_id"),
+                        codecVersion = result.getInt("codec_version"),
+                        payload = CheckpointPayload.from(result.getBytes("payload")),
+                        historicalComplete = result.getBoolean("historical_complete"),
+                    )
+                }
+            }
+        }
+
+    override suspend fun compareAndSetHarvestState(
+        pipelineId: String,
+        strategyId: String,
+        expectedRevision: Long?,
+        next: HarvestState,
+    ): Boolean = transaction { connection ->
+        requireIdentifier(pipelineId, "pipeline ID")
+        requireIdentifier(strategyId, "harvest strategy ID")
+        require(next.strategyId == strategyId) { "Harvest state strategy does not match its key" }
+        require(next.revision == (expectedRevision ?: -1L) + 1L) {
+            "Next harvest-state revision must immediately follow the expected revision"
+        }
+        requireUtf8Bound(next.codecId, configuration.maxIdentifierBytes, "harvest codec ID")
+        require(next.payload.size <= configuration.maxCheckpointPayloadBytes) {
+            "Harvest payload exceeds the PostgreSQL state bound"
+        }
+        val current = connection.prepare(
+            "SELECT revision FROM ${table("harvest_state")} WHERE pipeline_id = ? AND strategy_id = ? FOR UPDATE",
+        ).use { statement ->
+            statement.setString(1, pipelineId)
+            statement.setString(2, strategyId)
+            statement.executeQuery().use { result -> if (result.next()) result.getLong(1) else null }
+        }
+        if (current != expectedRevision) return@transaction false
+        if (current == null) {
+            connection.prepare(
+                """
+                INSERT INTO ${table("harvest_state")} (
+                    pipeline_id, strategy_id, revision, codec_id, codec_version,
+                    payload, historical_complete, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (pipeline_id, strategy_id) DO NOTHING
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, pipelineId)
+                statement.setString(2, strategyId)
+                statement.setLong(3, next.revision)
+                statement.setString(4, next.codecId)
+                statement.setInt(5, next.codecVersion)
+                statement.setBytes(6, next.payload.toByteArray())
+                statement.setBoolean(7, next.historicalComplete)
+                statement.setTimestamp(8, timestamp(clock.now()))
+                if (statement.executeUpdate() != 1) return@transaction false
+            }
+        } else {
+            connection.prepare(
+                """
+                UPDATE ${table("harvest_state")}
+                SET revision = ?, codec_id = ?, codec_version = ?, payload = ?,
+                    historical_complete = ?, updated_at = ?
+                WHERE pipeline_id = ? AND strategy_id = ? AND revision = ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setLong(1, next.revision)
+                statement.setString(2, next.codecId)
+                statement.setInt(3, next.codecVersion)
+                statement.setBytes(4, next.payload.toByteArray())
+                statement.setBoolean(5, next.historicalComplete)
+                statement.setTimestamp(6, timestamp(clock.now()))
+                statement.setString(7, pipelineId)
+                statement.setString(8, strategyId)
+                statement.setLong(9, expectedRevision!!)
+                if (statement.executeUpdate() != 1) return@transaction false
+            }
+        }
+        true
+    }
+
+    override suspend fun quarantineHarvestState(
+        pipelineId: String,
+        strategyId: String,
+        state: HarvestState,
+        reason: String,
+    ) {
+        requireIdentifier(pipelineId, "pipeline ID")
+        requireIdentifier(strategyId, "harvest strategy ID")
+        requireUtf8Bound(reason, configuration.maxReasonBytes, "harvest-state quarantine reason")
+        requireUtf8Bound(state.strategyId, configuration.maxIdentifierBytes, "harvest strategy ID")
+        requireUtf8Bound(state.codecId, configuration.maxIdentifierBytes, "harvest codec ID")
+        require(state.payload.size <= configuration.maxCheckpointPayloadBytes) {
+            "Harvest payload exceeds the PostgreSQL state bound"
+        }
+        transaction { connection ->
+            connection.prepare(
+                """
+                INSERT INTO ${table("harvest_state_quarantine")} (
+                    pipeline_id, strategy_id, revision, codec_id, codec_version,
+                    payload, historical_complete, reason, quarantined_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, pipelineId)
+                statement.setString(2, strategyId)
+                statement.setLong(3, state.revision)
+                statement.setString(4, state.codecId)
+                statement.setInt(5, state.codecVersion)
+                statement.setBytes(6, state.payload.toByteArray())
+                statement.setBoolean(7, state.historicalComplete)
+                statement.setString(8, reason)
+                statement.setTimestamp(9, timestamp(clock.now()))
+                statement.executeUpdate()
+            }
+        }
+    }
+
+    override suspend fun loadEligibilityOverride(pipelineId: String): PipelineEligibilityOverride? =
+        database { connection ->
+            requireIdentifier(pipelineId, "pipeline ID")
+            connection.prepare(
+                "SELECT enabled, reason, expires_at FROM ${table("pipeline_overrides")} WHERE pipeline_id = ?",
+            ).use { statement ->
+                statement.setString(1, pipelineId)
+                statement.executeQuery().use { result ->
+                    if (!result.next()) null else PipelineEligibilityOverride(
+                        enabled = result.getBoolean("enabled"),
+                        reason = result.getString("reason"),
+                        expiresAt = result.instant("expires_at"),
+                    )
+                }
+            }
+        }
+
+    override suspend fun setEligibilityOverride(
+        pipelineId: String,
+        override: PipelineEligibilityOverride?,
+    ) {
+        requireIdentifier(pipelineId, "pipeline ID")
+        override?.reason?.let { requireUtf8Bound(it, configuration.maxReasonBytes, "eligibility override reason") }
+        transaction { connection ->
+            if (override == null) {
+                connection.prepare(
+                    "DELETE FROM ${table("pipeline_overrides")} WHERE pipeline_id = ?",
+                ).use { statement ->
+                    statement.setString(1, pipelineId)
+                    statement.executeUpdate()
+                }
+            } else {
+                connection.prepare(
+                    """
+                    INSERT INTO ${table("pipeline_overrides")} (pipeline_id, enabled, reason, expires_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (pipeline_id) DO UPDATE SET enabled = EXCLUDED.enabled,
+                        reason = EXCLUDED.reason, expires_at = EXCLUDED.expires_at,
+                        updated_at = EXCLUDED.updated_at
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setString(1, pipelineId)
+                    statement.setBoolean(2, override.enabled)
+                    setNullableString(statement, 3, override.reason)
+                    val expiresAt = override.expiresAt
+                    if (expiresAt == null) statement.setNull(4, java.sql.Types.TIMESTAMP_WITH_TIMEZONE)
+                    else statement.setTimestamp(4, timestamp(expiresAt))
+                    statement.setTimestamp(5, timestamp(clock.now()))
+                    statement.executeUpdate()
+                }
+            }
+        }
+    }
+
+    override suspend fun loadPipelineHealth(pipelineId: String): PipelineHealthSnapshot? =
+        database { connection ->
+            requireIdentifier(pipelineId, "pipeline ID")
+            connection.prepare(
+                """
+                SELECT revision, consecutive_failures, total_successes, total_failures,
+                       last_observed_at, circuit_open_until
+                FROM ${table("pipeline_health")} WHERE pipeline_id = ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, pipelineId)
+                statement.executeQuery().use { result ->
+                    if (!result.next()) null else PipelineHealthSnapshot(
+                        revision = result.getLong("revision"),
+                        consecutiveFailures = result.getInt("consecutive_failures"),
+                        totalSuccesses = result.getLong("total_successes"),
+                        totalFailures = result.getLong("total_failures"),
+                        lastObservedAt = result.instant("last_observed_at"),
+                        circuitOpenUntil = result.instant("circuit_open_until"),
+                    )
+                }
+            }
+        }
+
+    override suspend fun compareAndSetPipelineHealth(
+        pipelineId: String,
+        expectedRevision: Long?,
+        next: PipelineHealthSnapshot,
+    ): Boolean = transaction { connection ->
+        requireIdentifier(pipelineId, "pipeline ID")
+        require(next.revision == (expectedRevision ?: -1L) + 1L) {
+            "Next pipeline-health revision must immediately follow the expected revision"
+        }
+        val current = connection.prepare(
+            "SELECT revision FROM ${table("pipeline_health")} WHERE pipeline_id = ? FOR UPDATE",
+        ).use { statement ->
+            statement.setString(1, pipelineId)
+            statement.executeQuery().use { result -> if (result.next()) result.getLong(1) else null }
+        }
+        if (current != expectedRevision) return@transaction false
+        if (current == null) {
+            connection.prepare(
+                """
+                INSERT INTO ${table("pipeline_health")} (
+                    pipeline_id, revision, consecutive_failures, total_successes,
+                    total_failures, last_observed_at, circuit_open_until, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (pipeline_id) DO NOTHING
+                """.trimIndent(),
+            ).use { statement ->
+                bindHealth(statement, pipelineId, next)
+                if (statement.executeUpdate() != 1) return@transaction false
+            }
+        } else {
+            connection.prepare(
+                """
+                UPDATE ${table("pipeline_health")}
+                SET revision = ?, consecutive_failures = ?, total_successes = ?,
+                    total_failures = ?, last_observed_at = ?, circuit_open_until = ?, updated_at = ?
+                WHERE pipeline_id = ? AND revision = ?
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setLong(1, next.revision)
+                statement.setInt(2, next.consecutiveFailures)
+                statement.setLong(3, next.totalSuccesses)
+                statement.setLong(4, next.totalFailures)
+                setNullableTimestamp(statement, 5, next.lastObservedAt)
+                setNullableTimestamp(statement, 6, next.circuitOpenUntil)
+                statement.setTimestamp(7, timestamp(clock.now()))
+                statement.setString(8, pipelineId)
+                statement.setLong(9, expectedRevision!!)
+                if (statement.executeUpdate() != 1) return@transaction false
+            }
+        }
+        true
+    }
+
+    private fun bindHealth(
+        statement: PreparedStatement,
+        pipelineId: String,
+        health: PipelineHealthSnapshot,
+    ) {
+        statement.setString(1, pipelineId)
+        statement.setLong(2, health.revision)
+        statement.setInt(3, health.consecutiveFailures)
+        statement.setLong(4, health.totalSuccesses)
+        statement.setLong(5, health.totalFailures)
+        setNullableTimestamp(statement, 6, health.lastObservedAt)
+        setNullableTimestamp(statement, 7, health.circuitOpenUntil)
+        statement.setTimestamp(8, timestamp(clock.now()))
     }
 
     override suspend fun claim(limit: Int, ownerId: String, now: Instant): List<LeasedWork> =
@@ -674,6 +1259,25 @@ public class PostgresCrawlStateStore(
                 val count = result.getLong(1)
                 require(count <= Int.MAX_VALUE) { "PostgreSQL active-work count exceeds the core bound" }
                 count.toInt()
+            }
+        }
+    }
+
+    override suspend fun metrics(pipelineId: String): WorkQueueMetrics = database { connection ->
+        requireIdentifier(pipelineId, "pipeline ID")
+        connection.prepare(
+            """
+            SELECT COUNT(*) AS open_count, MIN(enqueued_at) AS oldest_open
+            FROM ${table("jobs")}
+            WHERE pipeline_id = ? AND status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setString(1, pipelineId)
+            statement.executeQuery().use { result ->
+                require(result.next()) { "PostgreSQL queue metrics returned no row" }
+                val count = result.getLong("open_count")
+                require(count <= Int.MAX_VALUE) { "PostgreSQL open-work count exceeds the core bound" }
+                WorkQueueMetrics(count.toInt(), result.instant("oldest_open"))
             }
         }
     }
@@ -1209,3 +1813,18 @@ private fun requireUtf8Bound(value: String, maximumBytes: Int, label: String) {
         "PostgreSQL $label exceeds its configured UTF-8 bound"
     }
 }
+
+private fun setNullableString(statement: PreparedStatement, index: Int, value: String?) {
+    if (value == null) statement.setNull(index, java.sql.Types.VARCHAR) else statement.setString(index, value)
+}
+
+private fun setNullableTimestamp(statement: PreparedStatement, index: Int, value: Instant?) {
+    if (value == null) statement.setNull(index, java.sql.Types.TIMESTAMP_WITH_TIMEZONE)
+    else statement.setTimestamp(index, Timestamp.from(value))
+}
+
+private class AtomicCheckpointConflict : RuntimeException()
+
+private class AtomicAdmissionRejected(
+    val reason: String,
+) : RuntimeException(reason)
