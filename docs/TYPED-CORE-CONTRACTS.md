@@ -28,7 +28,8 @@ The Phase 1 contract layer deliberately did not implement:
 - HTTP/Ktor, PostgreSQL, file, browser, anti-bot, parser, or web behavior;
 - response retention, replay, serialization, or output destinations;
 - type-changing mappers, domain models, schemas, record keys, or entity tables;
-- automated tests or test dependencies.
+- feature tests; repository-wide test infrastructure is documented separately
+  in [`TESTING.md`](TESTING.md).
 
 Durable persistence, technology-specific transports, web policy, parsers, and
 domain models remain later phases or adapter responsibilities. The Phase 2
@@ -237,10 +238,12 @@ The implementation was checked with:
   contract shortcuts, `GlobalScope`, `Thread.sleep`, and TODO/FIXME markers;
 - Markdown target checks for the changed documentation links.
 
-Automated tests were not authorized, added, or run. Later runtime phases must
-add tests only after explicit authorization, with typed heterogeneity,
-configuration conflicts, cancellation, lease fencing, checkpoint ordering,
-replay isolation, and output duplicate windows as high-risk scenarios.
+No feature tests are included in this infrastructure phase. The repository
+test lifecycle and the planned contract owners are recorded in
+[`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md); typed
+heterogeneity, configuration conflicts, cancellation, lease fencing,
+checkpoint ordering, replay isolation, and output duplicate windows remain
+high-risk untested scenarios until their owning tests are added.
 
 ## Limitations
 

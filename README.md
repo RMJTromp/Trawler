@@ -304,14 +304,18 @@ The `trawler-core` runtime dependency set is deliberately minimal:
 | Kotlin standard library | Compile/runtime | Kotlin language runtime. |
 | Kotlin coroutines core | Compile/runtime | Structured concurrency, suspending lifecycle, `Flow`, channels, and cancellation. |
 
-Core has no logging, JSON, SQL, HTTP, HTML parsing, anti-bot, or test
-dependencies. The optional `trawler-web` artifact adds only the Ktor CIO
-transport and its adapter-scoped transitive graph. The optional
+Core has no logging, JSON, SQL, HTTP, HTML parsing, or anti-bot runtime
+dependencies. Its test-only JUnit/Kotlin/coroutines support is not present on
+the published runtime classpath. The optional `trawler-web` artifact adds only
+the Ktor CIO transport and its adapter-scoped transitive graph; MockEngine is
+owned by that module's tests. The optional
 `trawler-postgres` artifact owns the PostgreSQL driver, HikariCP, Flyway, and
-their adapter-scoped transitive graph; none of those dependencies enter core.
+their adapter-scoped transitive graph; Testcontainers is owned by that
+module's tests and none of those dependencies enter core.
 See
 [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for the complete direct and
-resolved inventory.
+resolved inventory and [docs/TESTING.md](docs/TESTING.md) for test commands and
+ownership.
 
 Every future dependency requires:
 

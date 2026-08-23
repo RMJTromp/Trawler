@@ -79,15 +79,37 @@ requests, `T`, responses, or state payloads by Trawler. Replacing Flyway would
 remove that transitive graph only if another migration implementation supplied
 the same validated lifecycle.
 
-Phases 2, 5, and 6 added no dependency or Maven-module change. The in-memory state
-and response stores, callback/flow outputs, generic policies, coroutine
-scheduler, checkpoint/harvest codecs, and pipeline health/admission policies
-use only the already-approved Kotlin standard library, coroutines, and JDK
-APIs. Phase 5 XML discovery likewise uses JDK StAX and gzip inside
+Phases 2, 5, and 6 added no runtime dependency or Maven-module change. The
+in-memory state and response stores, callback/flow outputs, generic policies,
+coroutine scheduler, checkpoint/harvest codecs, and pipeline health/admission
+policies use only the already-approved Kotlin standard library, coroutines, and
+JDK APIs. Phase 5 XML discovery likewise uses JDK StAX and gzip inside
 `trawler-web`; Phase 6 file response/output uses JDK NIO and caller codecs; no
 parser, compression, serializer, or output dependency was added. No
 serializer, database, HTTP, logging, telemetry, browser, or anti-bot type
 enters core.
+
+## Test-only dependencies
+
+Test libraries are never placed on a production dependency path. The parent
+POM manages one pinned version for each test responsibility; module POMs opt in
+with Maven `test` scope only where the test runtime owns the dependency.
+
+| Coordinate | Version source | Scope | Owner | Purpose | Boundary and removal plan |
+|---|---|---|---|---|---|
+| `org.jetbrains.kotlin:kotlin-test-junit5` | `kotlin.version` (`2.3.0`) | Test | All implementation modules | Kotlin assertions and JUnit 5 test integration. | Test source support only; remove with the repository test suite. Apache-2.0, maintained with Kotlin, no production API leakage. |
+| `org.junit.jupiter:junit-jupiter` | `junit.jupiter.version` (`5.11.4`) | Test | All implementation modules | JUnit 5 API, engine, and parameterized-test support. | Test runner only; remove with JUnit tests. EPL-2.0, pinned and isolated from runtime artifacts. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-test` | `coroutines.version` (`1.10.2`) | Test | All implementation modules | Virtual coroutine time, deterministic dispatchers, and structured test scopes. | Test-only coroutine scheduler; it does not replace production coroutines. Apache-2.0, removed if coroutine tests are removed. |
+| `io.ktor:ktor-client-mock-jvm` | `ktor.version` (`3.5.1`) | Test | `trawler-web` tests only | Ktor `MockEngine` for controlled, in-process transport tests. | Web test dependency; it cannot be used by core or PostgreSQL tests and is removed with the Ktor adapter tests. Apache-2.0; Ktor transitives remain test-scoped. |
+| `org.testcontainers:postgresql` | `testcontainers.version` (`1.20.6`) | Test | `trawler-postgres` tests only | Isolated PostgreSQL containers for database integration tests. | PostgreSQL test infrastructure only; Docker/Testcontainers transitives never enter production. MIT; remove with PostgreSQL integration tests. |
+| `org.testcontainers:junit-jupiter` | `testcontainers.version` (`1.20.6`) | Test | `trawler-postgres` tests only | JUnit 5 lifecycle integration for PostgreSQL containers. | PostgreSQL IT support only; remove with container-based tests. MIT; no core or web exposure. |
+
+Kotlin and kotlinx libraries use Apache-2.0 licensing. JUnit Jupiter uses the
+EPL-2.0 license, Ktor uses Apache-2.0, and Testcontainers uses MIT. Testcontainers
+adds Docker client/container-management transitives, while MockEngine adds the
+Ktor test engine graph; both are deliberately test-only. Security advisories,
+license changes, and container-image updates must be reviewed before release.
+No mocking framework is selected; tests should use small handwritten fakes.
 
 ## Resolved transitive runtime dependencies
 
@@ -156,12 +178,19 @@ The resolved tree was verified with `mvn dependency:tree`. Maven plugin implemen
 
 | Coordinate | Version | Purpose |
 |---|---|---|
-| `org.jetbrains.kotlin:kotlin-maven-plugin` | `${kotlin.version}` | Managed by `trawler-parent` and activated by the Kotlin modules; compiles Kotlin main and, if later authorized, test sources. |
-| `org.apache.maven.plugins:maven-compiler-plugin` | `${maven.compiler.version}` | Managed by `trawler-parent` and activated by `trawler-core`; enforces JVM release 17 for Java or mixed Kotlin/Java builds. |
+| `org.jetbrains.kotlin:kotlin-maven-plugin` | `${kotlin.version}` | Managed by `trawler-parent` and activated by the Kotlin modules; compiles Kotlin main and test sources. |
+| `org.apache.maven.plugins:maven-compiler-plugin` | `${maven.compiler.version}` | Managed by `trawler-parent` and activated by the Kotlin modules; enforces JVM release 17 for Java or mixed Kotlin/Java builds. |
+| `org.apache.maven.plugins:maven-surefire-plugin` | `${maven.surefire.version}` (`3.5.4`) | Runs unit classes matching `*Test` during `test`; JUnit Platform is explicit and empty test phases remain valid while feature tests are being added. |
+| `org.apache.maven.plugins:maven-failsafe-plugin` | `${maven.surefire.version}` (`3.5.4`) | Runs classes matching `*IT` during `integration-test` and verifies them during `verify`; `skipITs` is explicit and defaults to false. |
+| `org.jacoco:jacoco-maven-plugin` | `${jacoco.version}` (`0.8.13`) | Attaches the test agent, writes per-module HTML/XML reports at `verify`, and configures the reactor aggregate report. No coverage check gate is enabled yet. |
 
 Maven Central is used through Maven's default repository configuration; the project does not declare a redundant repository entry.
 
-Maven may still invoke lifecycle-default plugins (for example resources, Surefire, JAR, and clean plugins) even when they are not explicitly declared in this POM. With no authorized test sources or test dependencies, the default test phase discovers no project tests. Pin a lifecycle plugin explicitly only when the project needs configuration or reproducibility beyond Maven's effective defaults, and document that decision here.
+The test plugins are explicitly pinned because test discovery, the `test` versus
+`verify` split, and report generation are repository contracts. The current
+infrastructure phase has no feature test sources; the configured empty phases
+therefore pass, while a discovered failing test still fails the build. JaCoCo
+is report-only until the final audit phase enables hard thresholds.
 
 ## Removed from the unexplained baseline
 
@@ -173,15 +202,14 @@ The following were removed because no implemented component owns them:
 | `logback-classic` | Application logging backend must not be a mandatory library runtime dependency. |
 | `jackson-module-kotlin` | Core must not mandate JSON or serialize `T`. |
 | `jackson-datatype-jsr310` | Same ownership violation; no current adapter requires it. |
-| `kotlin-test-junit5` | Automated tests have not been authorized. |
-| `junit-jupiter` | Automated tests have not been authorized. |
-| `kotlinx-coroutines-test` | Automated tests have not been authorized. |
-| `mockk` | Automated tests have not been authorized. |
-| Explicit `maven-surefire-plugin` declaration | No authorized unit-test suite exists; Maven's lifecycle default may still execute an empty test phase. |
-| Explicit `maven-failsafe-plugin` declaration | No authorized integration-test suite exists. |
+| `mockk` | No mocking framework is selected; the authorized suite uses small handwritten fakes. |
+| `io.ktor:ktor-client-mock-jvm` in core or PostgreSQL | MockEngine belongs only to `trawler-web` tests. |
+| `org.testcontainers:postgresql` or `org.testcontainers:junit-jupiter` in core or web | PostgreSQL containers belong only to `trawler-postgres` tests. |
 | `exec-maven-plugin` | It referenced a non-existent example main class. Trawler is a library and currently has no runnable application. |
 
-Removal does not forbid a future adapter or authorized test suite from adding the narrow dependencies it genuinely needs.
+The test dependencies and lifecycle plugins above are now authorized and
+owned. Removal still requires deleting the corresponding test sources and
+updating [`docs/TESTING.md`](TESTING.md) and [`docs/TEST-MATRIX.md`](TEST-MATRIX.md).
 
 ## Dependency admission checklist
 

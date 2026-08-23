@@ -58,9 +58,11 @@ The root POM is the reactor/build parent. Production implementation is in
 `trawler-core`, the optional `trawler-web` adapter, and the optional
 `trawler-postgres` state adapter. Future modules are added only with their
 real implementation according to `docs/MODULES.md`. There is no runnable main
-class and no authorized automated test suite, but the Phase 2 core library has
-a bounded `runOnce` runtime and opt-in scheduler, Phase 3/5 have a bounded
-Ktor transport and XML discovery, and Phase 4/5 have a bounded PostgreSQL
+class. Repository-wide test infrastructure is configured, but this phase adds
+no feature test sources; see [`TESTING.md`](TESTING.md) and the baseline
+[`TEST-MATRIX.md`](TEST-MATRIX.md). The Phase 2 core library has a bounded
+`runOnce` runtime and opt-in scheduler, Phase 3/5 have a bounded Ktor
+transport and XML discovery, and Phase 4/5 have a bounded PostgreSQL
 state dispatcher/pool with recurring state.
 
 Phase 1 contracts, the Phase 2 database-free runtime, the Phase 3/5 web

@@ -10,6 +10,8 @@ This directory contains focused, normative project documentation.
 | [Modules and artifacts](MODULES.md) | Concrete Maven packaging, bundled built-ins, and split criteria. | A capability moves between artifacts or a module is added/removed. |
 | [Dependencies](DEPENDENCIES.md) | Complete approved dependency and build-plugin inventory. | Any dependency, plugin, repository, scope, version, or owning module changes. |
 | [Development](DEVELOPMENT.md) | Workflow, quality gates, test policy, and verification. | Tooling, build commands, or completion requirements change. |
+| [Testing](TESTING.md) | Repository test lifecycle, deterministic test rules, fixtures, Docker requirements, and coverage policy. | Test infrastructure, naming, lifecycle, or coverage policy changes. |
+| [Test matrix](TEST-MATRIX.md) | Contract-by-contract coverage plan and untested-risk register. | A public contract, documented invariant, or owning test changes. |
 | [Documentation](DOCUMENTATION.md) | Feature documentation requirements and templates. | Documentation standards or required records change. |
 | [Decisions](decisions/README.md) | Architecture Decision Record index and process. | A cross-cutting or difficult-to-reverse decision is made. |
 | [Typed core contracts](TYPED-CORE-CONTRACTS.md) | Implemented Phase 1 public contracts, composition, validation, and registration safety. | Typed core contracts or their composition semantics change. |

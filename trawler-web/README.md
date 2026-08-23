@@ -30,5 +30,7 @@ ownership, and verification.
 mvn -pl trawler-web -am clean verify
 ```
 
-No automated tests or test dependencies are included; tests require explicit
-project-owner authorization.
+No feature tests are included in this infrastructure phase. Web tests own
+Ktor MockEngine through a test-scoped dependency; commands and the coverage
+baseline are documented in [`docs/TESTING.md`](../docs/TESTING.md) and
+[`docs/TEST-MATRIX.md`](../docs/TEST-MATRIX.md).

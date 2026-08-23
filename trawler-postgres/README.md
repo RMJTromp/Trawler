@@ -44,8 +44,10 @@ try {
 ```
 
 The database must be authorized by the host. Startup applies only the
-adapter-owned migrations. No automated tests or test dependencies are
-included; tests require explicit project-owner authorization.
+adapter-owned migrations. No feature tests are included in this
+infrastructure phase. PostgreSQL integration tests own their Testcontainers
+dependencies and require Docker; see [`docs/TESTING.md`](../docs/TESTING.md)
+and [`docs/TEST-MATRIX.md`](../docs/TEST-MATRIX.md).
 
 See [`docs/RESPONSE-OUTPUT.md`](../docs/RESPONSE-OUTPUT.md) for response
 codec ownership, replay isolation, PostgreSQL response/output/outbox schemas, typed output

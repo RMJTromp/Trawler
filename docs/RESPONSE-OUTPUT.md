@@ -272,9 +272,11 @@ Kotlin, and coroutines graph. See [`docs/DEPENDENCIES.md`](DEPENDENCIES.md).
 ## Verification
 
 The implementation is verified with the repository compile/verify commands
-recorded in the final handoff. No automated tests, test fixtures, test
-plugins, or test dependencies were added or run; PostgreSQL behavioral checks
-requiring a live database remain an environment-dependent limitation.
+recorded in the final handoff. No feature tests are included in this
+infrastructure phase; response, replay, output, outbox, and retention coverage
+is planned in [`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md).
+PostgreSQL behavioral checks requiring a Docker-compatible runtime remain an
+environment-dependent limitation.
 
 ## Limitations
 

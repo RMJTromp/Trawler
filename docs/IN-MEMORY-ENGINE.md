@@ -29,7 +29,8 @@ This phase does not implement:
 - response files, WARC, serialization, parsers, or domain models;
 - durable audit history, durable scheduling, or process recovery;
 - a universal queue, storage, plugin, or produced-record abstraction;
-- automated tests or test dependencies.
+- feature tests; repository-wide test infrastructure is documented separately
+  in [`TESTING.md`](TESTING.md).
 
 ## Public type ownership
 
@@ -282,9 +283,9 @@ The Phase 2 implementation was verified with:
   `GlobalScope`, `Thread.sleep`, and TODO/FIXME markers;
 - final diff, status, and documentation-link inspection.
 
-Automated tests were not authorized, added, or run. Manual smoke sources were
-temporary verification inputs outside the repository and are not test
-fixtures. The plain `mvn clean compile` invocation was also attempted, but the
+No feature tests are included in this infrastructure phase. Manual smoke
+sources were temporary verification inputs outside the repository and are not
+test fixtures. The plain `mvn clean compile` invocation was also attempted, but the
 container denied the Kotlin daemon's user-level temporary directory; disabling
 that daemon allowed the same reactor build to complete successfully.
 

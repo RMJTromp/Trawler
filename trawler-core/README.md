@@ -95,4 +95,7 @@ From the repository root:
 mvn -pl trawler-core -am clean compile
 ```
 
-No automated tests may be added unless explicitly requested by the project owner.
+Feature tests are not included in this infrastructure phase. The shared
+test-scoped dependencies and lifecycle are documented in
+[`docs/TESTING.md`](../docs/TESTING.md); the contract coverage baseline is in
+[`docs/TEST-MATRIX.md`](../docs/TEST-MATRIX.md).
