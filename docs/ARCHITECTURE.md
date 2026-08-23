@@ -60,6 +60,16 @@ TrawlerEngine                         non-generic coordinator
 
 `A` and `B` must never be converted to a universal JSON or entity representation for engine convenience. The heterogeneous registration boundary is isolated internally and constructed through typed registration.
 
+Phase 1 names this boundary `Pipeline<T>`, `PipelineBuilder<T>`,
+`EngineConfigurationBuilder`, `EngineConfiguration`, and the non-generic
+`TrawlerEngine`. The builder resolves engine defaults and pipeline-local
+overrides into immutable pipelines before registration. Its internal
+heterogeneous registry stores typed registration owners and exposes only
+star-projected definitions for inspection; it has no value-processing cast.
+The current phase stops at configuration and contracts, so these types do not
+start a worker or imply that a state, transport, response, or output adapter is
+implemented.
+
 ## Ownership matrix
 
 | Concern | Owner |

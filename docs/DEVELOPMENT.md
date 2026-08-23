@@ -42,7 +42,9 @@ mvn dependency:tree
 
 The root POM is the reactor/build parent. Production implementation starts in `trawler-core`; future modules are added only with their real implementation according to `docs/MODULES.md`. There is currently no runnable main class and no authorized automated test suite.
 
-Before Phase 1 adds real sources, the package lifecycle warns that the core JAR is empty. This is expected repository state. Do not add placeholder content or suppress the warning merely to make the setup appear implemented.
+Phase 1 now provides real core sources. Later phases must not add placeholder
+content or suppress build warnings merely to make an unimplemented runtime
+appear available.
 
 ## Change workflow
 

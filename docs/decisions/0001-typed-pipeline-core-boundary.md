@@ -53,8 +53,10 @@ Core must not convert `T` to JSON, `Any`, maps, a universal entity envelope, or 
 
 ### Follow-up work
 
-- Define the typed registration proof and extension cardinality during Phase 1.
-- Document any internal unchecked cast and why construction makes it safe.
+- Phase 1 implemented the typed registration proof and extension cardinality in
+  [`docs/TYPED-CORE-CONTRACTS.md`](../TYPED-CORE-CONTRACTS.md).
+- Preserve the no-erasure/no-cast boundary when a later runtime adds typed
+  execution operations.
 
 ## Validation
 

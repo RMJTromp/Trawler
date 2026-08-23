@@ -12,6 +12,7 @@ This directory contains focused, normative project documentation.
 | [Development](DEVELOPMENT.md) | Workflow, quality gates, test policy, and verification. | Tooling, build commands, or completion requirements change. |
 | [Documentation](DOCUMENTATION.md) | Feature documentation requirements and templates. | Documentation standards or required records change. |
 | [Decisions](decisions/README.md) | Architecture Decision Record index and process. | A cross-cutting or difficult-to-reverse decision is made. |
+| [Typed core contracts](TYPED-CORE-CONTRACTS.md) | Implemented Phase 1 public contracts, composition, validation, and registration safety. | Typed core contracts or their composition semantics change. |
 
 The full architecture plan remains [FINAL-PLAN.md](../plans/FINAL-PLAN.md). Root repository rules remain [AGENTS.md](../AGENTS.md).
 

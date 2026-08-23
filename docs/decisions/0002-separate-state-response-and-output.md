@@ -58,7 +58,8 @@ An in-memory state store is valid. No response store is valid. Output may be abs
 
 ### Follow-up work
 
-- Define focused capability interfaces during Phase 1.
+- Phase 1 defined focused state and response capability interfaces; their
+  implementations remain later-phase/adaptor work.
 - Validate feature requirements at engine startup.
 - Introduce physical modules before adapter dependencies can leak into core.
 

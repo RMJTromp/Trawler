@@ -2,7 +2,7 @@
 
 Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-> **Project status: Phase 1 implementation-ready.** The parent/core Maven boundary and project rules are established; no production crawler implementation exists yet. APIs shown in planning documents are design targets, not released code.
+> **Project status: Phase 1 implemented.** `trawler-core` now contains the typed contracts, immutable composition configuration, deterministic validation, and heterogeneous pipeline registration boundary. The Phase 2 worker runtime and built-in state implementation have not started; the current artifact is unreleased.
 
 The governing product rule is:
 
@@ -196,7 +196,8 @@ A separate artifact is used when a capability introduces an external technology 
 
 ## Current repository state
 
-The repository intentionally contains project setup and architecture documentation only.
+The repository contains the Phase 1 core contracts and composition boundary;
+the later runtime and adapter phases remain unimplemented.
 
 ```text
 Trawler/
@@ -205,7 +206,8 @@ Trawler/
 ├── README.md                  project overview and status
 ├── pom.xml                    Maven parent and reactor
 ├── trawler-core/
-│   ├── pom.xml                implementation-ready core artifact
+│   ├── pom.xml                core artifact
+│   ├── src/main/kotlin/       Phase 1 typed contracts and composition
 │   └── README.md              core-specific scope and starting point
 ├── docs/
 │   ├── ARCHITECTURE.md        concise architecture contract
@@ -240,9 +242,12 @@ Package and run all configured Maven lifecycle checks:
 mvn clean verify
 ```
 
-Until the first production source is implemented, Maven reports that the `trawler-core` JAR is empty. This is expected and must not be hidden with placeholder classes or resources; it disappears when Phase 1 adds real contracts.
+The Phase 1 core JAR contains real typed contracts and configuration code. Do
+not add placeholder classes or resources to represent later runtime phases.
 
-There is currently no runnable main class and no production implementation. Do not document a run command until one exists.
+There is currently no runnable main class and no worker runtime. Do not
+document a run command until one exists. See the [typed core contracts feature
+record](docs/TYPED-CORE-CONTRACTS.md) for the implemented Phase 1 boundary.
 
 ## Dependencies
 

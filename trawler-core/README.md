@@ -1,8 +1,11 @@
 # Trawler Core
 
-> **Status:** Ready for Phase 1 implementation; no production sources exist yet.
+> **Status:** Phase 1 implemented; Phase 2 runtime not started.
 
-`trawler-core` is the primary planned published artifact. It is currently an implementation-ready, source-free module; when implemented, it will contain the generic engine, typed extension contracts, and lightweight official implementations that require only Kotlin, coroutines, and the JDK.
+`trawler-core` is the primary planned published artifact. It now contains the
+Phase 1 generic models, typed extension contracts, immutable composition
+configuration, deterministic validation, and non-generic engine registration
+boundary. It remains unreleased and does not execute crawl work.
 
 Read the root [`AGENTS.md`](../AGENTS.md), [`FINAL-PLAN.md`](../plans/FINAL-PLAN.md), and [`MODULES.md`](../docs/MODULES.md) before implementing here.
 
@@ -16,7 +19,7 @@ com.rmjtromp.trawler
 
 Create packages only when their first real type is implemented. Do not scaffold the complete planned tree with empty files or placeholders.
 
-## Phase 1 scope
+## Implemented Phase 1 scope
 
 The first implementation phase is limited to typed contracts and composition:
 
@@ -29,11 +32,14 @@ The first implementation phase is limited to typed contracts and composition:
 - immutable configuration and validation;
 - explicit extension cardinality, replacement, inheritance, and ordering.
 
+See the focused [typed core contracts feature record](../docs/TYPED-CORE-CONTRACTS.md)
+for ownership, capability, lifecycle, and registration-safety details.
+
 Phase 1 does not implement the runtime worker loop, database adapters, Ktor, web policies, persistence, response archives, site parsing, or domain models.
 
 ## Later bundled implementations
 
-Subsequent core phases add:
+Subsequent core phases are planned to add:
 
 - structured engine lifecycle and `runOnce`;
 - in-memory state;
