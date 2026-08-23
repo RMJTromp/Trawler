@@ -2,7 +2,7 @@
 
 > **Status:** Ready for Phase 1 implementation; no production sources exist yet.
 
-`trawler-core` is the primary published artifact. It contains the generic engine, typed extension contracts, and lightweight official implementations that require only Kotlin, coroutines, and the JDK.
+`trawler-core` is the primary planned published artifact. It is currently an implementation-ready, source-free module; when implemented, it will contain the generic engine, typed extension contracts, and lightweight official implementations that require only Kotlin, coroutines, and the JDK.
 
 Read the root [`AGENTS.md`](../AGENTS.md), [`FINAL-PLAN.md`](../plans/FINAL-PLAN.md), and [`MODULES.md`](../docs/MODULES.md) before implementing here.
 

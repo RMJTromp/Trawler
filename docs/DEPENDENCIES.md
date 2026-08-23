@@ -13,6 +13,8 @@
 
 Future module ownership is defined in [`MODULES.md`](MODULES.md). Modules are not created before their implementation begins.
 
+The ownership and purpose descriptions below include approved future core capabilities. As of Phase 0, no production source is present, so those descriptions do not imply that the capabilities are already implemented.
+
 All project modules use the group ID `com.rmjtromp.trawler` and inherit the coordinated version from `trawler-parent`.
 
 ## Current direct runtime dependencies

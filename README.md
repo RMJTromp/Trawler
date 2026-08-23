@@ -128,7 +128,7 @@ The initial core must be usable with:
 - no JSON library;
 - no web-specific policy.
 
-`trawler-core` also ships lightweight official implementations that require no additional technology dependency. They are opt-in and replaceable:
+Later core phases are planned to ship lightweight official implementations that require no additional technology dependency. They will be opt-in and replaceable when implemented:
 
 - in-memory state;
 - seed and caller-provided `Flow` discovery;
@@ -157,7 +157,7 @@ Trawler uses logical extension boundaries everywhere, but only a few cohesive ph
 
 ```text
 trawler-parent                 build/version management only
-└── trawler-core               engine + lightweight dependency-free built-ins
+└── trawler-core               engine + planned lightweight dependency-free built-ins
 
 planned when implemented:
 ├── trawler-web                Ktor + cohesive public-web behavior
@@ -165,7 +165,7 @@ planned when implemented:
 └── specialized artifacts      browser, FlareSolverr, OpenTelemetry, WARC
 ```
 
-A small extension does not receive its own Maven artifact merely because it is replaceable. The built-in scheduler, in-memory state, seed discovery, callback output, and generic policies are bundled in `trawler-core`.
+A small extension does not receive its own Maven artifact merely because it is replaceable. When implemented, the built-in scheduler, in-memory state, seed discovery, callback output, and generic policies will be bundled in `trawler-core`.
 
 A separate artifact is used when a capability introduces an external technology stack, heavy operational/security footprint, or meaningful independent compatibility boundary. See [docs/MODULES.md](docs/MODULES.md) for the complete decision matrix.
 

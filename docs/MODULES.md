@@ -16,6 +16,8 @@ Three ideas must remain distinct:
 
 Physical modules exist to isolate dependencies, technology stacks, heavy operational footprints, or meaningful independent replacement—not to mirror every interface.
 
+> **Current repository status:** The reactor currently contains only the build-only `trawler-parent` and the source-free, implementation-ready `trawler-core` module. The implementation lists below describe approved ownership when those capabilities are implemented; they are not a claim that those capabilities are available in Phase 0.
+
 ## Module admission test
 
 A separate published artifact is justified when at least one of these is materially true:
