@@ -4,6 +4,7 @@ import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.model.CrawlerContext
 import com.rmjtromp.trawler.policy.RequestIdentity
 import com.rmjtromp.trawler.policy.WorkOrderingPolicy
+import java.time.Duration
 import java.time.Instant
 
 /**
@@ -37,6 +38,12 @@ public enum class CrawlStateCapability {
 
     /** Historical operational state can be queried by the selected adapter. */
     QUERYABLE_HISTORY,
+
+    /** Durable engine and pipeline run summaries can be recorded. */
+    RUN_HISTORY,
+
+    /** Stale running engine and pipeline summaries can be recovered. */
+    RUN_RECOVERY,
 
     /** Stable resource visit history is available to recrawl policies. */
     RESOURCE_HISTORY,
@@ -163,6 +170,14 @@ public interface PipelineScopedWorkQueueStore : WorkQueueStore {
  * inspects produced values.
  */
 public interface WorkOrderingStore {
+    /**
+     * Returns whether this adapter can apply [policy] without silently
+     * substituting another ordering. This check is non-suspending so core can
+     * reject unsupported configuration before runtime work; adapters must
+     * keep it independent of database or network I/O.
+     */
+    public fun supports(policy: WorkOrderingPolicy): Boolean = true
+
     /** Installs the effective ordering for one pipeline before work is claimed. */
     public suspend fun setOrdering(pipelineId: String, policy: WorkOrderingPolicy)
 }
@@ -171,6 +186,65 @@ public interface WorkOrderingStore {
 public interface WorkQueueStatus {
     /** Returns active queued, leased, or retry-wait work for [pipelineId]. */
     public suspend fun activeWorkCount(pipelineId: String): Int
+}
+
+/** Durable lifecycle status stored by a run-history adapter. */
+public enum class DurableRunStatus {
+    RUNNING,
+    COMPLETED,
+    ABANDONED,
+    FAILED,
+    CANCELLED,
+}
+
+/**
+ * Focused durable engine/pipeline run-history capability.
+ *
+ * The capability stores only operational lifecycle metadata and bounded
+ * failure counts. It never receives produced values, response bodies, or
+ * application records. Core calls the methods from its structured run scope;
+ * implementations must honor cancellation, define their transaction
+ * boundaries, and preserve the original failure by propagating adapter
+ * failures. [recoverStaleRuns] may mark only stale RUNNING summaries and must
+ * not rewrite or release job leases as a shortcut for recovery.
+ */
+public interface RunHistoryStore {
+    /** Recovers stale RUNNING summaries before a new engine run begins. */
+    public suspend fun recoverStaleRuns(
+        now: Instant,
+        staleAfter: Duration,
+    ): Int
+
+    /** Persists one engine run's RUNNING summary before pipeline work starts. */
+    public suspend fun startEngineRun(
+        engineRunId: String,
+        startedAt: Instant,
+        reason: String?,
+    )
+
+    /** Persists one pipeline run's RUNNING summary before its typed work starts. */
+    public suspend fun startPipelineRun(
+        engineRunId: String,
+        pipelineRunId: String,
+        pipelineId: String,
+        startedAt: Instant,
+    )
+
+    /** Completes one pipeline summary without changing any job lease. */
+    public suspend fun completePipelineRun(
+        pipelineRunId: String,
+        status: DurableRunStatus,
+        completedAt: Instant,
+        failureCount: Long,
+    )
+
+    /** Completes one engine summary without changing any job lease. */
+    public suspend fun completeEngineRun(
+        engineRunId: String,
+        status: DurableRunStatus,
+        completedAt: Instant,
+        failureCount: Long,
+    )
 }
 
 /** Result of a lease-owned mutation. */

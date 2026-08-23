@@ -11,14 +11,17 @@
 | `trawler-parent` | `pom` | No | Reactor, version, dependency, and plugin management. It has no runtime dependencies. |
 | `trawler-core` | `jar` | Yes, once releases begin | Generic contracts/engine and lightweight official implementations. |
 | `trawler-web` | `jar` | Yes, once releases begin | Optional Ktor/CIO HTTP transport and replaceable web policies. |
+| `trawler-postgres` | `jar` | Yes, once releases begin | Optional PostgreSQL operational state, leases, attempts, run history, and request codecs. |
 
 Future module ownership is defined in [`MODULES.md`](MODULES.md). Modules are not created before their implementation begins.
 
 The ownership and purpose descriptions below include approved future core
 capabilities. Phase 1 contracts and the Phase 2 database-free runtime are
 implemented in `trawler-core`; Phase 3 adds the implemented optional
-`trawler-web` adapter. Durable persistence and later specialized adapters
-remain planned and do not justify additional dependencies.
+`trawler-web` adapter; Phase 4 adds the implemented optional
+`trawler-postgres` operational-state adapter. Response archival, produced-data
+output, checkpoints, and later specialized adapters remain planned and do not
+justify additional dependencies.
 
 All project modules use the group ID `com.rmjtromp.trawler` and inherit the coordinated version from `trawler-parent`.
 
@@ -41,7 +44,7 @@ core consumers do not inherit Ktor.
 | `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `ktor.coroutines.version` in parent `pom.xml` (`1.11.0`) | Compile | `trawler-web` | Suspending bounded DNS dispatch, policy synchronization, pacing, and cancellation. | Ktor 3.5.1 is compiled against coroutines 1.11.0; the adapter keeps that binary-compatible runtime isolated from core's 1.10.2 dependency tree. |
 | `io.ktor:ktor-client-cio-jvm` | `ktor.version` in parent `pom.xml` (`3.5.1`) | Compile | `trawler-web` | One owned CIO HTTP client, request/response adaptation, timeout plugins, and byte-channel access. | A real HTTP transport is the current Phase 3 implementation need; JDK URL APIs do not provide the required replaceable Ktor client boundary and timeout/body behavior. |
 
-The only new direct external technology dependency is Ktor CIO. Ktor is Apache
+The Phase 3 direct external technology dependency is Ktor CIO. Ktor is Apache
 License 2.0, is pinned through one parent property, and is maintained in its
 upstream repository. The web adapter's direct coroutines version is an explicit
 compatibility alignment with Ktor; `trawler-core` continues to resolve its
@@ -50,6 +53,34 @@ reviewed with the dependency-tree command below; no retry,
 content-negotiation, Jackson, parser, database, browser, telemetry, or test
 artifact is declared directly. Removing `trawler-web` removes the Ktor graph
 without changing the core dependency tree.
+
+## `trawler-postgres` direct runtime dependencies
+
+| Coordinate | Version source | Scope | Owner | Purpose | Why retained |
+|---|---|---|---|---|---|
+| `com.rmjtromp.trawler:trawler-core` | `${project.version}` in parent `pom.xml` | Compile | `trawler-postgres` | Core state capabilities, request models, lifecycle, clocks, and coroutine contracts. | The adapter implements the existing focused core boundary. |
+| `org.jetbrains.kotlin:kotlin-stdlib` | `kotlin.version` in parent `pom.xml` | Compile | `trawler-postgres` | Kotlin runtime and standard APIs for adapter implementation. | Required by the Kotlin production source. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `coroutines.version` in parent `pom.xml` | Compile | `trawler-postgres` | Bounded adapter dispatcher, lifecycle synchronization, cancellation, and suspending JDBC ownership. | The adapter owns blocking work under structured coroutine calls. |
+| `org.postgresql:postgresql` | `postgresql.version` in parent `pom.xml` (`42.7.10`) | Compile | `trawler-postgres` | PostgreSQL JDBC driver used by the state adapter. | Current implemented database target; no generic JDBC abstraction is added. |
+| `com.zaxxer:HikariCP` | `hikari.version` in parent `pom.xml` (`6.3.3`) | Compile | `trawler-postgres` | Adapter-owned bounded connection pool and connection acquisition timeout. | The adapter must align blocking dispatcher capacity with a bounded pool. |
+| `org.flywaydb:flyway-core` | `flyway.version` in parent `pom.xml` (`13.2.0`) | Compile | `trawler-postgres` | Adapter-owned migration lifecycle and schema history. | Durable schema changes require versioned migrations owned by this artifact. |
+| `org.flywaydb:flyway-database-postgresql` | `flyway.version` in parent `pom.xml` (`13.2.0`) | Compile | `trawler-postgres` | Flyway's PostgreSQL database support separated from the core migration API. | Required by the current Flyway API for PostgreSQL database support. |
+
+PostgreSQL JDBC is BSD-2-Clause, HikariCP is Apache License 2.0, and Flyway
+Community artifacts are distributed under their published upstream terms. The
+versions are pinned, the upstream projects are maintained, and the adapter's
+release process must review current security advisories and Flyway licensing
+terms before publication. None of these types appears in core. Removing the
+PostgreSQL state feature removes this whole direct graph and its migration
+resource.
+
+The adapter deliberately does not declare Jackson, a request serializer, or a
+JSON codec. Its default request codec uses JDK binary streams and callers may
+register a versioned codec. Flyway 13.2.0 itself brings the Jackson runtime
+listed below as a required migration-tool transitive; it is not used to encode
+requests, `T`, responses, or state payloads by Trawler. Replacing Flyway would
+remove that transitive graph only if another migration implementation supplied
+the same validated lifecycle.
 
 Phase 2 added no dependency or Maven-module change. The in-memory state and
 response stores, callback/flow outputs, generic policies, and coroutine
@@ -92,10 +123,30 @@ not down-selected by the core dependency path:
 | `io.ktor:ktor-websockets-jvm:3.5.1` | Ktor websocket serialization | Ktor websocket primitives. | Not used by Phase 3; do not add a websocket feature or direct dependency. |
 | `io.ktor:ktor-network-tls-jvm:3.5.1` | Ktor network | Ktor TLS support for HTTPS. | Keep transitive; no TLS type leaks into core. |
 
+The implemented `trawler-postgres` graph additionally resolves these unique
+runtime coordinates:
+
+| Coordinate | Introduced by | Purpose | Policy |
+|---|---|---|---|
+| `org.checkerframework:checker-qual:3.52.0` | PostgreSQL JDBC | Nullness/type-use annotations consumed by the driver. | Keep transitive; do not expose it from core. |
+| `org.slf4j:slf4j-api:2.0.17` | HikariCP | Logging API used by the pool. | Adapter transitive only; no logging backend is selected. |
+| `tools.jackson.core:jackson-databind:3.1.5` | Flyway Core | Flyway's migration-tool configuration/runtime dependency. | Not a Trawler request/data codec; do not declare directly or expose it from core. |
+| `com.fasterxml.jackson.core:jackson-annotations:2.21` | Flyway's Jackson databind | Jackson annotation metadata required by that Flyway graph. | Keep only as Flyway transitive; no core API or produced-value use. |
+| `tools.jackson.core:jackson-core:3.1.5` | Flyway's Jackson databind | Flyway's Jackson runtime support. | Keep only as Flyway transitive; remove with Flyway if the migration owner changes. |
+| `org.flywaydb:flyway-database-cockroachdb:13.2.0` | Flyway PostgreSQL database support | Flyway's shared database-support graph. | Transitive Flyway implementation artifact; Trawler does not expose or configure CockroachDB. |
+
+The PostgreSQL module also receives the core transitive
+`org.jetbrains:annotations:13.0` and
+`org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2` entries listed
+above. The resolved dependency tree is intentionally retained in this file
+so the unavoidable Flyway Jackson transitive is visible rather than mistaken
+for an adapter-owned request serializer.
+
 The exact resolved versions and mediation are checked with:
 
 ```bash
 mvn -pl trawler-web -am dependency:tree -Dscope=runtime -Dverbose
+mvn -pl trawler-postgres -am dependency:tree -Dscope=runtime -Dverbose
 ```
 
 The resolved tree was verified with `mvn dependency:tree`. Maven plugin implementation dependencies are build-tool internals and are not placed on Trawler's application runtime classpath; they are reviewed when an explicitly configured plugin is added or upgraded.
@@ -104,7 +155,7 @@ The resolved tree was verified with `mvn dependency:tree`. Maven plugin implemen
 
 | Coordinate | Version | Purpose |
 |---|---|---|
-| `org.jetbrains.kotlin:kotlin-maven-plugin` | `${kotlin.version}` | Managed by `trawler-parent` and activated by `trawler-core`; compiles Kotlin main and, if later authorized, test sources. |
+| `org.jetbrains.kotlin:kotlin-maven-plugin` | `${kotlin.version}` | Managed by `trawler-parent` and activated by the Kotlin modules; compiles Kotlin main and, if later authorized, test sources. |
 | `org.apache.maven.plugins:maven-compiler-plugin` | `${maven.compiler.version}` | Managed by `trawler-parent` and activated by `trawler-core`; enforces JVM release 17 for Java or mixed Kotlin/Java builds. |
 
 Maven Central is used through Maven's default repository configuration; the project does not declare a redundant repository entry.

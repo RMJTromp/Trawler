@@ -36,6 +36,12 @@ Compile the implemented web adapter and its core dependency:
 mvn -pl trawler-web -am clean compile
 ```
 
+Compile the implemented PostgreSQL state adapter and its core dependency:
+
+```bash
+mvn -pl trawler-postgres -am clean compile
+```
+
 Run the configured verification lifecycle:
 
 ```bash
@@ -49,15 +55,17 @@ mvn dependency:tree
 ```
 
 The root POM is the reactor/build parent. Production implementation is in
-`trawler-core` and the optional `trawler-web` adapter; future modules are
-added only with their real implementation according to `docs/MODULES.md`.
-There is no runnable main class and no authorized automated test suite, but
-the Phase 2 core library has a bounded `runOnce` runtime and opt-in scheduler,
-and Phase 3 has a bounded Ktor transport.
+`trawler-core`, the optional `trawler-web` adapter, and the optional
+`trawler-postgres` state adapter. Future modules are added only with their
+real implementation according to `docs/MODULES.md`. There is no runnable main
+class and no authorized automated test suite, but the Phase 2 core library has
+a bounded `runOnce` runtime and opt-in scheduler, Phase 3 has a bounded Ktor
+transport, and Phase 4 has a bounded PostgreSQL state dispatcher/pool.
 
-Phase 1 contracts and the Phase 2 database-free runtime provide real core
-sources. Later phases must not add placeholder content or suppress build
-warnings merely to make an unimplemented adapter appear available.
+Phase 1 contracts, the Phase 2 database-free runtime, the Phase 3 web adapter,
+and the Phase 4 PostgreSQL state adapter provide real production sources.
+Later phases must not add placeholder content or suppress build warnings merely
+to make an unimplemented adapter appear available.
 
 ## Change workflow
 

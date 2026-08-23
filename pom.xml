@@ -22,12 +22,16 @@
         <coroutines.version>1.10.2</coroutines.version>
         <ktor.version>3.5.1</ktor.version>
         <ktor.coroutines.version>1.11.0</ktor.coroutines.version>
+        <postgresql.version>42.7.10</postgresql.version>
+        <hikari.version>6.3.3</hikari.version>
+        <flyway.version>13.2.0</flyway.version>
         <maven.compiler.version>3.11.0</maven.compiler.version>
     </properties>
 
     <modules>
         <module>trawler-core</module>
         <module>trawler-web</module>
+        <module>trawler-postgres</module>
     </modules>
 
     <dependencyManagement>
@@ -51,6 +55,26 @@
                 <groupId>io.ktor</groupId>
                 <artifactId>ktor-client-cio-jvm</artifactId>
                 <version>${ktor.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.postgresql</groupId>
+                <artifactId>postgresql</artifactId>
+                <version>${postgresql.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.zaxxer</groupId>
+                <artifactId>HikariCP</artifactId>
+                <version>${hikari.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.flywaydb</groupId>
+                <artifactId>flyway-core</artifactId>
+                <version>${flyway.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.flywaydb</groupId>
+                <artifactId>flyway-database-postgresql</artifactId>
+                <version>${flyway.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

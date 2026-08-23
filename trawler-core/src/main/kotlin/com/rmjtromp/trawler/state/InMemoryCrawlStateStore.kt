@@ -191,6 +191,7 @@ public class InMemoryCrawlStateStore(
         val resource = resources[ResourceKey(pipelineId, identity)]
         ResourceHistory(
             lastCompletedAt = resource?.lastCompletedAt,
+            nextEligibleAt = resource?.nextEligibleAt,
             activeWorkCount = resource?.activeJobs?.count { jobs[it]?.isActive() == true } ?: 0,
             visitCount = resource?.visitCount ?: 0,
         )
@@ -315,6 +316,10 @@ public class InMemoryCrawlStateStore(
             is WorkTransition.Retry -> {
                 job.status = JobStatus.RETRY_WAIT
                 job.nextEligibleAt = transition.notBefore
+                val resource = resources[ResourceKey(job.pipelineId, job.identity)]
+                resource?.nextEligibleAt = resource.nextEligibleAt?.let {
+                    maxOf(it, transition.notBefore)
+                } ?: transition.notBefore
                 clearLease(job)
             }
 
@@ -360,6 +365,7 @@ public class InMemoryCrawlStateStore(
     private fun completeResourceVisit(job: MutableJob) {
         val resource = resources[ResourceKey(job.pipelineId, job.identity)] ?: return
         resource.lastCompletedAt = clock.now()
+        resource.nextEligibleAt = null
         resource.visitCount++
     }
 
@@ -402,6 +408,7 @@ public class InMemoryCrawlStateStore(
         val key: ResourceKey,
         val activeJobs: MutableSet<WorkItemId> = linkedSetOf(),
         var lastCompletedAt: Instant? = null,
+        var nextEligibleAt: Instant? = null,
         var visitCount: Long = 0,
     )
 

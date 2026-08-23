@@ -80,7 +80,7 @@ model.
 | What requests mean and how identity is computed | Pipeline policy |
 | Network or other I/O execution | Transport adapter |
 | HTTP execution, redirect policy, robots, and public-network safety | `trawler-web`; replaceable web policies |
-| Crawl operational state | State-store adapter; `trawler-core` supplies a bounded in-memory implementation |
+| Crawl operational state | State-store adapter; `trawler-core` supplies a bounded in-memory implementation and `trawler-postgres` supplies durable state |
 | Raw response retention/cache | Response-store adapter; `trawler-core` supplies no-response and bounded in-memory implementations |
 | Produced value `T` | Host application |
 | Encoding or persistence of `T` | Output adapter/host |
@@ -104,6 +104,14 @@ Logical ownership does not require one artifact per extension. Lightweight depen
 ### Crawl state store
 
 Owns engine-operational state such as work, claims, retries, optional checkpoints, and optional run history. The in-memory implementation is valid for one process. Durable or multi-process features require declared capabilities.
+
+The implemented `trawler-postgres` adapter supplies durable resources, visit
+jobs, row-lock claims, sequence-backed fencing tokens, meaningful attempts,
+cooldown/next-eligibility state, and engine/pipeline run summaries. Its
+`RunHistoryStore` hook remains lifecycle metadata only; stale summary recovery
+does not release job leases or bypass the lease predicates. The adapter does
+not add response, output, checkpoint, or user-data tables. See
+[`POSTGRES-STATE.md`](POSTGRES-STATE.md).
 
 ### Response store
 
@@ -209,6 +217,26 @@ PostgreSQL state adapter
 ```
 
 Both profiles use the same core contracts.
+
+## Phase 4 PostgreSQL state adapter
+
+`trawler-postgres` is an optional adapter profile that can replace the
+in-memory state store without changing a typed pipeline. Startup runs the
+adapter-owned Flyway migration and bounded stale run-summary recovery; runtime
+claims use PostgreSQL `FOR UPDATE SKIP LOCKED`, active work uses a partial
+unique index, and every lease-owned mutation checks the current owner and
+fencing token. Lease expiry is reclaimed at the beginning of a bounded claim
+transaction. A lease is not an attempt: `attempt_count` changes only when a
+worker successfully begins meaningful execution.
+
+The adapter owns a Hikari pool and a fixed dispatcher whose parallelism cannot
+exceed the pool size. Its queue, claim/cancellation/recovery batches, request
+payloads, identifiers, and JDBC waits are bounded. Terminal jobs do not block
+later jobs for the same stable resource, and resource cooldown is separate
+from active deduplication. Request payloads carry explicit codec IDs and
+versions; no produced `T`, universal JSON record, response archive, or output
+payload enters the state schema. PostgreSQL is optional, and the core
+dependency tree remains Kotlin stdlib plus coroutines.
 
 ## Phase 3 web adapter
 

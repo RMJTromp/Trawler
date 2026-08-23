@@ -46,7 +46,7 @@ The public types are grouped by ownership:
 | Output | `Output<T>`, `OutputBinding<T>`, `OutputResult` | The selected output owns encoding, persistence, acknowledgement, retention, and idempotency. |
 | Discovery | `Discovery`, `DiscoveryContext`, `DiscoveryEmission` | The discovery extension owns admission semantics and uses the engine-provided `RequestExecutor` for I/O. |
 | Transport | `Transport`, `TransportRouter`, request/response middleware | The transport adapter owns clients and I/O; core owns the controlled boundary. |
-| Operational state | `CrawlStateStore` and focused `WorkQueueStore`, `LeaseStore`, `DiscoveryCheckpointStore` capabilities | The state adapter owns operational state only, never `T` or response bodies. |
+| Operational state | `CrawlStateStore` and focused `WorkQueueStore`, `LeaseStore`, `AttemptStore`, `ResourceHistoryStore`, `RunHistoryStore`, `DiscoveryCheckpointStore` capabilities | The state adapter owns operational state only, never `T` or response bodies. |
 | Response retention | `ResponseStore`, `ResponseLookup`, response capabilities | The response adapter owns optional retention, replay, and privacy policy. |
 | Observation/lifecycle | `CrawlerEvent`, `Observer`, `ExtensionLifecycle` | Observers receive bounded metadata; lifecycle resources remain under the engine scope. |
 | Time/policy | `Clock`, `RandomSource`, and the focused policy interfaces | The host or extension selects policy; core does not hardcode web, retry, or scheduling algorithms. |
@@ -89,6 +89,13 @@ default, and a caller can explicitly replace it with a capable adapter.
 `RandomSource` have replaceable JDK-backed defaults. Required state and response capabilities
 are declared with `requireStateCapability` and `requireResponseCapability` and
 are checked before configuration construction completes.
+
+Phase 4 adds adapter-neutral `RunHistoryStore` and `DurableRunStatus` hooks for
+operational engine/pipeline summaries, plus `ResourceHistory.nextEligibleAt`
+for adapter-owned cooldown state. Core does not define their persistence
+format; `trawler-postgres` implements them without changing the typed value
+path. The in-memory store intentionally does not advertise durable run history
+or recovery.
 
 Configuration failures are reported as a sorted
 `InvalidConfigurationException.issues` list. Diagnostics include a stable
@@ -201,8 +208,9 @@ Outputs declare required versus best-effort delivery, but no output or engine
 configuration claims exactly-once delivery. Non-transactional output adapters
 must document their duplicate/loss window and idempotency requirements. The
 Phase 2 in-memory runtime reports worker completion and supports optional
-in-memory response replay; durable checkpointing and durable recovery remain
-unimplemented.
+in-memory response replay. Durable checkpointing remains unimplemented; the
+optional Phase 4 PostgreSQL adapter adds durable run-summary recovery and
+fenced operational state without changing these core contracts.
 
 ## Security, privacy, and retention
 
@@ -218,20 +226,17 @@ authorization, privacy, terms, and retention.
 
 The implementation was checked with:
 
-- `mvn -Dkotlin.compiler.daemon=false clean compile`;
-- `mvn -Dkotlin.compiler.daemon=false clean verify`;
-- `mvn -Dkotlin.compiler.daemon=false -pl trawler-core -am clean verify`;
-- `mvn -Dkotlin.compiler.daemon=false -pl trawler-core dependency:tree`, confirming only Kotlin stdlib,
+- `mvn clean compile`;
+- `mvn clean verify`;
+- `mvn -pl trawler-core -am clean verify`;
+- `mvn -pl trawler-core -am dependency:tree -Dscope=runtime -Dverbose`, confirming only Kotlin stdlib,
   coroutines, and their expected transitives;
 - `javap` inspection of the compiled engine and typed-stage signatures;
 - source inspection for adapter/serializer imports, unchecked casts, `Any?`
   contract shortcuts, `GlobalScope`, `Thread.sleep`, and TODO/FIXME markers;
 - Markdown target checks for the changed documentation links.
 
-Automated tests were not authorized, added, or run. The plain `mvn clean
-compile` invocation was attempted, but the container denied the Kotlin daemon's
-user-level temporary directory; disabling that daemon allowed the same reactor
-build to complete successfully. A later runtime phase must
+Automated tests were not authorized, added, or run. Later runtime phases must
 add tests only after explicit authorization, with typed heterogeneity,
 configuration conflicts, cancellation, lease fencing, checkpoint ordering,
 replay isolation, and output duplicate windows as high-risk scenarios.

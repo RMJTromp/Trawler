@@ -16,7 +16,7 @@ Three ideas must remain distinct:
 
 Physical modules exist to isolate dependencies, technology stacks, heavy operational footprints, or meaningful independent replacement—not to mirror every interface.
 
-> **Current repository status:** The reactor contains the build-only `trawler-parent`, `trawler-core`, and the implemented optional `trawler-web` adapter. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, and the Ktor/web implementation are implemented. Durable PostgreSQL and specialized modules remain planned.
+> **Current repository status:** The reactor contains the build-only `trawler-parent`, `trawler-core`, and the implemented optional `trawler-web` and `trawler-postgres` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, Ktor/web behavior, and durable PostgreSQL operational state are implemented. Response archival, produced-data output, checkpoints, and specialized modules remain planned.
 
 ## Module admission test
 
@@ -115,22 +115,26 @@ Do not add Jsoup, Jackson, or another parser/codec automatically. Add one only w
 
 ### `trawler-postgres`
 
-**Creation:** Phase 4, when durable PostgreSQL state is implemented.
+**Creation:** Phase 4; created with the real durable PostgreSQL state implementation.
 
 **Packaging:** Published optional JAR depending on `trawler-core`.
 
-Bundles PostgreSQL-backed implementations that share the same JDBC/pool/migration stack:
+Owns the implemented PostgreSQL operational-state surface that shares one
+JDBC/pool/migration stack:
 
-- durable crawl state;
-- resources, jobs, attempts, and fenced leases;
-- durable run summaries and discovery checkpoints;
-- optional harvest/health/override state;
-- optional PostgreSQL response store;
-- PostgreSQL typed output using caller-supplied mapping/codec;
-- optional PostgreSQL outbox output/decorator;
-- adapter-owned migrations and retention operations.
+- durable engine and pipeline run summaries with bounded stale recovery;
+- stable resources, visit jobs, active-work deduplication, cooldown state,
+  row-lock claims, lease fencing, and meaningful attempts;
+- adapter-owned Flyway migrations and versioned request codecs;
+- bounded Hikari pool and adapter-owned blocking dispatcher;
+- capability declarations for durability, transactions, multi-process use,
+  fencing, history, cancellation, ordering, and run recovery.
 
-These components are independently activated. Depending on `trawler-postgres` must not force response archival, user-data output, health persistence, or outbox delivery.
+These capabilities are independently activated. Depending on
+`trawler-postgres` does not force response archival, user-data output,
+checkpoints, or outbox delivery. Response storage, produced-data output,
+checkpoints, harvest state, and outbox behavior remain later implementations
+inside this cohesive artifact or another explicitly justified adapter.
 
 A generic multi-database JDBC abstraction is not part of this initial artifact. Add `trawler-jdbc` later only if real non-PostgreSQL implementations demonstrate a shared contract and implementation worth extracting.
 
@@ -167,7 +171,7 @@ Examples remain in the repository but are not published as production runtime de
 | Generic policies | `trawler-core` | Implemented reusable defaults with no technology coupling. |
 | Bounded file response/output | `trawler-core` | Planned JDK-only, codec-driven standard capability; no separate tiny artifact. WARC/object storage remains separate. |
 | Ktor + web policies and bounded discovery foundations | `trawler-web` | Cohesive HTTP semantics and shared external stack; RSS/sitemap implementations remain Phase 5. |
-| PostgreSQL state/response/output/outbox | `trawler-postgres` | Cohesive database stack; behavior remains separately activated. |
+| PostgreSQL state, run history, leases, attempts, and request codecs | `trawler-postgres` | Cohesive database stack; implemented Phase 4 capabilities remain separately activated. |
 
 ## What must not become a module
 
@@ -204,7 +208,7 @@ No sibling adapter may become a transitive requirement of another unless the rel
 
 ## Repository creation policy
 
-Add a module in the same change that begins its real implementation. The Phase 3 change created `trawler-web` with:
+Add a module in the same change that begins its real implementation. The Phase 3 change created `trawler-web` and the Phase 4 change created `trawler-postgres` with:
 
 - the module POM;
 - dependency inventory update;

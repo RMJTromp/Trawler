@@ -31,6 +31,7 @@ import com.rmjtromp.trawler.state.AttemptStore
 import com.rmjtromp.trawler.state.InMemoryCrawlStateStore
 import com.rmjtromp.trawler.state.PipelineScopedWorkQueueStore
 import com.rmjtromp.trawler.state.ResourceHistoryStore
+import com.rmjtromp.trawler.state.RunHistoryStore
 import com.rmjtromp.trawler.state.WorkCancellationStore
 import com.rmjtromp.trawler.state.WorkQueueStore
 import com.rmjtromp.trawler.state.LeaseStore
@@ -1147,6 +1148,16 @@ internal object ConfigurationValidator {
                 )
             }
         }
+        if (stateStore is WorkOrderingStore) {
+            pipelines.filterNot { stateStore.supports(it.policies.ordering) }.forEach { pipeline ->
+                issues += ConfigurationIssue(
+                    path = "pipeline[${pipeline.id}].policies.ordering",
+                    code = ConfigurationIssueCode.UNSUPPORTED_CAPABILITY,
+                    message = "State store '${stateStore.id}' does not support ordering " +
+                        "'${pipeline.policies.ordering.id}' without substitution",
+                )
+            }
+        }
         return sortedIssues(issues)
     }
 
@@ -1184,6 +1195,14 @@ internal object ConfigurationValidator {
             "WORK_STATUS" to (
                 store is WorkQueueStatus &&
                     store.capabilities.contains(CrawlStateCapability.WORK_STATUS)
+                ),
+            "RUN_HISTORY" to (
+                !store.capabilities.contains(CrawlStateCapability.RUN_HISTORY) ||
+                    store is RunHistoryStore
+                ),
+            "RUN_RECOVERY" to (
+                !store.capabilities.contains(CrawlStateCapability.RUN_RECOVERY) ||
+                    store is RunHistoryStore
                 ),
         )
         requirements.filterNot { it.second }.forEach { (capability, _) ->

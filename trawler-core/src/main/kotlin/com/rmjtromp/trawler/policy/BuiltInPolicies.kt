@@ -118,8 +118,9 @@ public class RecrawlAfter(
         history: ResourceHistory,
         context: RequestContext,
     ): RecrawlDecision {
-        val completedAt = history.lastCompletedAt ?: return RecrawlDecision.Eligible
-        val eligibleAt = completedAt.plus(duration)
+        val policyEligibleAt = history.lastCompletedAt?.plus(duration)
+        val eligibleAt = listOfNotNull(policyEligibleAt, history.nextEligibleAt).maxOrNull()
+            ?: return RecrawlDecision.Eligible
         return if (!eligibleAt.isAfter(clock.now())) {
             RecrawlDecision.Eligible
         } else {

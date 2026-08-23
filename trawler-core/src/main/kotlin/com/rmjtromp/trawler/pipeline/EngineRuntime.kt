@@ -39,11 +39,14 @@ import com.rmjtromp.trawler.schedule.SchedulerHandle
 import com.rmjtromp.trawler.state.AttemptStartResult
 import com.rmjtromp.trawler.state.AttemptOutcome
 import com.rmjtromp.trawler.state.AttemptStore
+import com.rmjtromp.trawler.state.CrawlStateCapability
 import com.rmjtromp.trawler.state.ExecutionAttempt
+import com.rmjtromp.trawler.state.DurableRunStatus
 import com.rmjtromp.trawler.state.LeaseMutationResult
 import com.rmjtromp.trawler.state.LeaseStore
 import com.rmjtromp.trawler.state.PipelineScopedWorkQueueStore
 import com.rmjtromp.trawler.state.ResourceHistoryStore
+import com.rmjtromp.trawler.state.RunHistoryStore
 import com.rmjtromp.trawler.state.WorkCancellationStore
 import com.rmjtromp.trawler.state.WorkItemId
 import com.rmjtromp.trawler.state.WorkOrderingStore
@@ -81,6 +84,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.take
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -114,7 +118,6 @@ internal class EngineRuntime(
     private val activeRuns = linkedSetOf<Job>()
     private val daemonHandles = linkedSetOf<EngineDaemonHandle>()
     private val daemonReservations = mutableListOf<Set<String>?>()
-    private val engineRunSequence = AtomicLong(0)
     private val observerFailureCount = AtomicLong(0)
     private val shutdownCompletion = CompletableDeferred<Unit>()
     private var lifecycleState: LifecycleState = LifecycleState.NEW
@@ -286,8 +289,32 @@ internal class EngineRuntime(
         require(unknown.isEmpty()) { "Unknown pipeline IDs: ${unknown.sorted().joinToString()}" }
         ensureStarted()
         val registrations = available.filter { selected == null || it.pipelineId in selected }
-        val engineRunId = "engine-run-${engineRunSequence.incrementAndGet()}"
+        val engineRunId = "engine-run-${UUID.randomUUID()}"
         val startedAt = configuration.clock.now()
+        val runHistory = (configuration.stateStore as? RunHistoryStore)?.takeIf {
+            configuration.stateStore.capabilities.any {
+                it == CrawlStateCapability.RUN_HISTORY ||
+                    it == CrawlStateCapability.RUN_RECOVERY
+            }
+        }
+        if (runHistory != null &&
+            configuration.stateStore.capabilities.contains(
+                CrawlStateCapability.RUN_RECOVERY,
+            )
+        ) {
+            runHistory.recoverStaleRuns(
+                now = startedAt,
+                staleAfter = (request.timeout ?: configuration.runtimeOptions.runTimeout)
+                    .plus(configuration.runtimeOptions.shutdownTimeout),
+            )
+        }
+        if (runHistory != null &&
+            configuration.stateStore.capabilities.contains(
+                CrawlStateCapability.RUN_HISTORY,
+            )
+        ) {
+            runHistory.startEngineRun(engineRunId, startedAt, request.reason)
+        }
         emit(
             CrawlerEventType.ENGINE_RUN_STARTED,
             EventContext(startedAt, engineRunId = engineRunId),
@@ -299,64 +326,128 @@ internal class EngineRuntime(
                 (request.timeout ?: configuration.runtimeOptions.runTimeout).toMillis().coerceAtLeast(1),
             ) {
                 val pipelineRuns = supervisorScope {
-                registrations.map { registration ->
-                    async {
-                        try {
-                            val pipelineRunId = "$engineRunId/${registration.pipelineId}"
-                            val state = configuration.stateStore
-                            val workQueue = state as? PipelineScopedWorkQueueStore
-                                ?: error("Configured state store lacks pipeline-scoped work")
-                            val leaseStore = state as? LeaseStore
-                                ?: error("Configured state store lacks lease fencing")
-                            val attemptStore = state as? AttemptStore
-                                ?: error("Configured state store lacks attempt history")
-                            val historyStore = state as? ResourceHistoryStore
-                                ?: error("Configured state store lacks resource history")
-                            val cancellationStore = state as? WorkCancellationStore
-                                ?: error("Configured state store lacks cancellation")
-                            val orderingStore = state as? WorkOrderingStore
-                                ?: error("Configured state store lacks work ordering")
-                            val workStatus = state as? WorkQueueStatus
-                                ?: error("Configured state store lacks work status")
-                            registration.execute(
-                                PipelineExecutionContext(
-                                    configuration = configuration,
+                    registrations.map { registration ->
+                        async {
+                            val pipelineRunId = "pipeline-run-${UUID.randomUUID()}"
+                            var durableStart = false
+                            try {
+                                if (runHistory != null && configuration.stateStore.capabilities.contains(
+                                        CrawlStateCapability.RUN_HISTORY,
+                                    )
+                                ) {
+                                    runHistory.startPipelineRun(
+                                        engineRunId = engineRunId,
+                                        pipelineRunId = pipelineRunId,
+                                        pipelineId = registration.pipelineId,
+                                        startedAt = startedAt,
+                                    )
+                                    durableStart = true
+                                }
+                                val pipelineResult = try {
+                                    val state = configuration.stateStore
+                                    val workQueue = state as? PipelineScopedWorkQueueStore
+                                        ?: error("Configured state store lacks pipeline-scoped work")
+                                    val leaseStore = state as? LeaseStore
+                                        ?: error("Configured state store lacks lease fencing")
+                                    val attemptStore = state as? AttemptStore
+                                        ?: error("Configured state store lacks attempt history")
+                                    val historyStore = state as? ResourceHistoryStore
+                                        ?: error("Configured state store lacks resource history")
+                                    val cancellationStore = state as? WorkCancellationStore
+                                        ?: error("Configured state store lacks cancellation")
+                                    val orderingStore = state as? WorkOrderingStore
+                                        ?: error("Configured state store lacks work ordering")
+                                    val workStatus = state as? WorkQueueStatus
+                                        ?: error("Configured state store lacks work status")
+                                    registration.execute(
+                                        PipelineExecutionContext(
+                                            configuration = configuration,
+                                            pipelineId = registration.pipelineId,
+                                            engineRunId = engineRunId,
+                                            pipelineRunId = pipelineRunId,
+                                            startedAt = startedAt,
+                                            workQueue = workQueue,
+                                            leaseStore = leaseStore,
+                                            attemptStore = attemptStore,
+                                            historyStore = historyStore,
+                                            cancellationStore = cancellationStore,
+                                            orderingStore = orderingStore,
+                                            workStatus = workStatus,
+                                            responseStore = configuration.responseStore,
+                                            emit = ::emit,
+                                        ),
+                                    )
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (error: Throwable) {
+                                    val now = configuration.clock.now()
+                                    PipelineRunResult(
+                                        pipelineId = registration.pipelineId,
+                                        pipelineRunId = pipelineRunId,
+                                        status = RunStatus.FAILED,
+                                        discoveryEmissions = 0,
+                                        acceptedWork = 0,
+                                        suppressedWork = 0,
+                                        requestsStarted = 0,
+                                        producedValues = 0,
+                                        deliveredValues = 0,
+                                        failures = listOf(RunFailure("pipeline-start", error)),
+                                        startedAt = now,
+                                        completedAt = now,
+                                    )
+                                }
+                                if (durableStart) {
+                                    runHistory?.completePipelineRun(
+                                        pipelineRunId = pipelineRunId,
+                                        status = pipelineResult.toDurableStatus(),
+                                        completedAt = pipelineResult.completedAt,
+                                        failureCount = pipelineResult.failures.size.toLong(),
+                                    )
+                                }
+                                pipelineResult
+                            } catch (cancelled: CancellationException) {
+                                if (durableStart) {
+                                    withContext(NonCancellable) {
+                                        runHistory?.completePipelineRun(
+                                            pipelineRunId = pipelineRunId,
+                                            status = DurableRunStatus.CANCELLED,
+                                            completedAt = configuration.clock.now(),
+                                            failureCount = 0,
+                                        )
+                                    }
+                                }
+                                throw cancelled
+                            } catch (error: Throwable) {
+                                val now = configuration.clock.now()
+                                if (durableStart) {
+                                    try {
+                                        runHistory?.completePipelineRun(
+                                            pipelineRunId = pipelineRunId,
+                                            status = DurableRunStatus.FAILED,
+                                            completedAt = now,
+                                            failureCount = 1,
+                                        )
+                                    } catch (completionFailure: Throwable) {
+                                        error.addSuppressed(completionFailure)
+                                    }
+                                }
+                                PipelineRunResult(
                                     pipelineId = registration.pipelineId,
-                                    engineRunId = engineRunId,
                                     pipelineRunId = pipelineRunId,
-                                    startedAt = startedAt,
-                                    workQueue = workQueue,
-                                    leaseStore = leaseStore,
-                                    attemptStore = attemptStore,
-                                    historyStore = historyStore,
-                                    cancellationStore = cancellationStore,
-                                    orderingStore = orderingStore,
-                                    workStatus = workStatus,
-                                    responseStore = configuration.responseStore,
-                                    emit = ::emit,
-                                ),
-                            )
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (error: Throwable) {
-                            val now = configuration.clock.now()
-                            PipelineRunResult(
-                                pipelineId = registration.pipelineId,
-                                pipelineRunId = "$engineRunId/${registration.pipelineId}",
-                                status = RunStatus.FAILED,
-                                discoveryEmissions = 0,
-                                acceptedWork = 0,
-                                suppressedWork = 0,
-                                requestsStarted = 0,
-                                producedValues = 0,
-                                deliveredValues = 0,
-                                failures = listOf(RunFailure("pipeline-start", error)),
-                                startedAt = now,
-                                completedAt = now,
-                            )
+                                    status = RunStatus.FAILED,
+                                    discoveryEmissions = 0,
+                                    acceptedWork = 0,
+                                    suppressedWork = 0,
+                                    requestsStarted = 0,
+                                    producedValues = 0,
+                                    deliveredValues = 0,
+                                    failures = listOf(RunFailure("pipeline-start", error)),
+                                    startedAt = now,
+                                    completedAt = now,
+                                )
+                            }
                         }
-                    }
-                }.awaitAll()
+                    }.awaitAll()
                 }
                 val status = when {
                     pipelineRuns.any { it.status == RunStatus.FAILED } -> RunStatus.FAILED
@@ -371,6 +462,17 @@ internal class EngineRuntime(
                     startedAt = startedAt,
                     completedAt = configuration.clock.now(),
                 )
+                if (runHistory != null && configuration.stateStore.capabilities.contains(
+                        CrawlStateCapability.RUN_HISTORY,
+                    )
+                ) {
+                    runHistory.completeEngineRun(
+                        engineRunId = engineRunId,
+                        status = result.toDurableStatus(),
+                        completedAt = result.completedAt,
+                        failureCount = result.failures.size.toLong(),
+                    )
+                }
                 emit(
                     when (status) {
                         RunStatus.COMPLETED -> CrawlerEventType.ENGINE_RUN_COMPLETED
@@ -386,6 +488,17 @@ internal class EngineRuntime(
             }
             timedResult ?: run {
                 val completedAt = configuration.clock.now()
+                if (runHistory != null && configuration.stateStore.capabilities.contains(
+                        CrawlStateCapability.RUN_HISTORY,
+                    )
+                ) {
+                    runHistory.completeEngineRun(
+                        engineRunId = engineRunId,
+                        status = DurableRunStatus.ABANDONED,
+                        completedAt = completedAt,
+                        failureCount = 1,
+                    )
+                }
                 emit(
                     CrawlerEventType.ENGINE_RUN_ABANDONED,
                     EventContext(completedAt, engineRunId = engineRunId),
@@ -408,6 +521,21 @@ internal class EngineRuntime(
         } catch (cancelled: CancellationException) {
             val now = configuration.clock.now()
             withContext(NonCancellable) {
+                if (runHistory != null && configuration.stateStore.capabilities.contains(
+                        CrawlStateCapability.RUN_HISTORY,
+                    )
+                ) {
+                    try {
+                        runHistory.completeEngineRun(
+                            engineRunId = engineRunId,
+                            status = DurableRunStatus.CANCELLED,
+                            completedAt = now,
+                            failureCount = 0,
+                        )
+                    } catch (completionFailure: Throwable) {
+                        cancelled.addSuppressed(completionFailure)
+                    }
+                }
                 emit(
                     CrawlerEventType.ENGINE_RUN_CANCELLED,
                     EventContext(now, engineRunId = engineRunId),
@@ -1545,5 +1673,21 @@ private fun CrawlResponse.withRuntimeAttributes(
 )
 
 private fun safeFailureName(error: Throwable): String = error::class.simpleName ?: "failure"
+
+private fun PipelineRunResult.toDurableStatus(): DurableRunStatus = when (status) {
+    RunStatus.RUNNING -> DurableRunStatus.FAILED
+    RunStatus.COMPLETED -> DurableRunStatus.COMPLETED
+    RunStatus.ABANDONED -> DurableRunStatus.ABANDONED
+    RunStatus.FAILED -> DurableRunStatus.FAILED
+    RunStatus.CANCELLED -> DurableRunStatus.CANCELLED
+}
+
+private fun RunResult.toDurableStatus(): DurableRunStatus = when (status) {
+    RunStatus.RUNNING -> DurableRunStatus.FAILED
+    RunStatus.COMPLETED -> DurableRunStatus.COMPLETED
+    RunStatus.ABANDONED -> DurableRunStatus.ABANDONED
+    RunStatus.FAILED -> DurableRunStatus.FAILED
+    RunStatus.CANCELLED -> DurableRunStatus.CANCELLED
+}
 
 private class EngineDaemonHandleMarker

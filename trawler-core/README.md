@@ -1,6 +1,6 @@
 # Trawler Core
 
-> **Status:** Phase 2 implemented; unreleased.
+> **Status:** Phase 4 core support surface implemented; unreleased.
 
 `trawler-core` is the primary planned published artifact. It contains the
 typed models and extension contracts, immutable composition configuration,
@@ -42,20 +42,24 @@ The implemented scope includes typed contracts and composition:
 - generic lifecycle events and ordered observers;
 - opt-in manual, finite, fixed-delay, fixed-rate, and daily timezone-aware
   coroutine scheduling with bounded overlap handling.
+- adapter-neutral durable run-history and resource-cooldown capabilities used
+  by the optional PostgreSQL state artifact.
 
 See the focused [typed core contracts feature record](../docs/TYPED-CORE-CONTRACTS.md)
 and [in-memory engine feature record](../docs/IN-MEMORY-ENGINE.md) for
 ownership, capability, lifecycle, registration, bound, and delivery details.
 
-Phase 2 does not implement database adapters, Ktor, web policies, durable
-persistence, site parsing, or domain models. A file response/output adapter is
-also not part of this phase.
+Core does not implement database adapters, Ktor, web policies, site parsing, or
+domain models. The Phase 4 durable hooks remain adapter-neutral; the PostgreSQL
+implementation lives in `trawler-postgres`. A file response/output adapter is
+also not implemented.
 
 ## Later bundled implementations
 
 Subsequent core work may add the bounded JDK file response/output
 implementations using caller codecs. Technology-specific transport, web, and
-durable modules remain separate planned artifacts.
+durable modules remain separate artifacts; the implemented PostgreSQL state
+adapter is documented in [`POSTGRES-STATE.md`](../docs/POSTGRES-STATE.md).
 
 Bundled does not mean automatically active. Every implementation remains explicitly selected and replaceable.
 

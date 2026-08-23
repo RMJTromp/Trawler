@@ -156,6 +156,11 @@ replaceable alternatives. A deferred recrawl is not hidden in a second queue:
 the policy reports the eligible time and the current run is marked abandoned;
 a later discovery/run can admit it when eligible.
 
+`ResourceHistory.nextEligibleAt` is the adapter-neutral cooldown hint used by
+`RecrawlAfter`. The in-memory store keeps it process-locally when a retry is
+scheduled and clears it after a successful visit; the durable PostgreSQL
+adapter persists the same operational hint in its resource row.
+
 ## Discovery, worker, and output bounds
 
 `SeedDiscovery` copies its request list. `FlowDiscovery` applies `take` to the

@@ -98,6 +98,7 @@ public data class ResourceHistory(
     public val lastCompletedAt: Instant?,
     public val activeWorkCount: Int,
     public val visitCount: Long,
+    public val nextEligibleAt: Instant? = null,
 ) {
     init {
         require(activeWorkCount >= 0) { "Active work count must not be negative" }
