@@ -1,6 +1,6 @@
 # Testing
 
-> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, Ktor transport, and PostgreSQL state/response/output/outbox tests added; PostgreSQL execution requires Docker
+> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, Ktor transport, cross-module typed composition, architecture/API guards, and PostgreSQL state/response/output/outbox tests added; PostgreSQL execution requires Docker
 >
 > **Owner:** `trawler-parent` build configuration, with test dependencies owned by each implementation module
 
@@ -29,6 +29,11 @@ file response/output adapters use per-test temporary directories and Failsafe
 paths. The contract-by-contract status is recorded in
 [`TEST-MATRIX.md`](TEST-MATRIX.md). PostgreSQL state, response, output, and
 outbox tests are owned by `trawler-postgres` and use direct SQL assertions.
+The cross-module test composes four typed pipelines with Ktor MockEngine,
+response capture, scheduled overlap, checkpoint stopping, and zero-network
+replay. `PostgresDurableE2EIT` composes fresh state, response, output, and
+outbox adapter instances across a restart and verifies fencing, checkpoint
+resume, replay, and lineage retention with direct SQL.
 
 ## Commands
 
@@ -176,10 +181,12 @@ JaCoCo is configured in the parent POM for every module:
 - `jacoco:report-aggregate` writes the reactor report under
   `target/site/jacoco-aggregate/` when reactor execution data is available.
 
-Coverage is report-only in this phase. No `jacoco:check` goal or threshold can
-fail the build yet. The final audit phase will choose and enable line and
-branch hard gates after the matrix has real feature tests. A report with no
-executed feature tests is not evidence of behavioral coverage.
+Coverage remains report-only because the final audit did not meet the required
+95% line and 90% branch thresholds: PostgreSQL integration execution is blocked
+by the unavailable Docker/Testcontainers runtime, and the generated module
+reports still contain uncovered substantive branches. No `jacoco:check` goal
+is enabled until those thresholds are honestly met. A report with no executed
+feature tests is not evidence of behavioral coverage.
 
 ## Failure handling
 
@@ -205,13 +212,17 @@ without public-network calls. The PostgreSQL module has configuration/codec
 unit coverage and real-database `*IT.kt` source coverage for independent
 state/response/output/outbox migrations, lifecycle, codecs, queue/lease
 fencing, output transactions, response ownership/retention, outbox
-retries/reclaim/cancellation, and local lineage. Its execution remains
+retries/reclaim/cancellation, local lineage, and the durable composition
+restart/replay scenario. Its execution remains
 dependent on a working Docker/Testcontainers connection in the verification
 environment.
 The actual CIO timeout behavior of the underlying socket engine is also not
 directly exercised with wall-clock timing; deterministic timeout exceptions,
 outer cancellation, and reservation cleanup are covered. Coverage is
 report-only, so the matrix and the generated JaCoCo reports must be read
-together; a report is not a substitute for a contract assertion. Feature
-phases must add tests to the owning module and update the corresponding matrix
-row in the same change.
+together; a report is not a substitute for a contract assertion. The current
+parent-bound aggregate execution runs before child modules in Maven's reactor,
+so `target/site/jacoco-aggregate/jacoco.xml` is structurally empty; the three
+module reports are the authoritative figures until aggregate wiring is moved
+to a post-child reporting project. Feature phases must add tests to the owning
+module and update the corresponding matrix row in the same change.
