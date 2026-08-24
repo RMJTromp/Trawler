@@ -134,7 +134,7 @@ public class PostgresOutput<T : Any>(
             "PostgreSQL output owns only output history retention"
         }
         return resources.transaction { connection ->
-            val limit = resources.boundLimit(request.maxEntries)
+            val limit = resources.boundRetentionLimit(request.maxEntries)
             val entries = connection.prepareBounded(
                 """
                 SELECT output_entry_id

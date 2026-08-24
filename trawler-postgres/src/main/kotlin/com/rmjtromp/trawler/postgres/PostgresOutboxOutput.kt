@@ -22,6 +22,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Summary of one bounded, explicitly requested outbox delivery pass. */
 public data class OutboxDeliverySummary(
@@ -68,6 +69,7 @@ public class PostgresOutboxOutput<T : Any>(
         "classpath:db/migration/outbox",
         "flyway_outbox_schema_history",
     )
+    private val delegateClosed = AtomicBoolean(false)
 
     override val retentionCategories: Set<RetentionCategory> = setOf(RetentionCategory.OUTBOX_HISTORY)
 
@@ -96,7 +98,9 @@ public class PostgresOutboxOutput<T : Any>(
         try {
             resources.stop()
         } finally {
-            (delegate as? OutputLifecycle)?.close()
+            if (delegateClosed.compareAndSet(false, true)) {
+                (delegate as? OutputLifecycle)?.close()
+            }
         }
     }
 
@@ -225,7 +229,7 @@ public class PostgresOutboxOutput<T : Any>(
             "PostgreSQL outbox owns only outbox history retention"
         }
         return resources.transaction { connection ->
-            val limit = resources.boundLimit(request.maxEntries)
+            val limit = resources.boundRetentionLimit(request.maxEntries)
             val entries = connection.prepareBounded(
                 """
                 SELECT outbox_id

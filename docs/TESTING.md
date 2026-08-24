@@ -1,6 +1,6 @@
 # Testing
 
-> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, Ktor transport, and PostgreSQL state tests added; PostgreSQL execution requires Docker
+> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, Ktor transport, and PostgreSQL state/response/output/outbox tests added; PostgreSQL execution requires Docker
 >
 > **Owner:** `trawler-parent` build configuration, with test dependencies owned by each implementation module
 
@@ -27,8 +27,8 @@ checkpoint admission, and deterministic enqueue/claim/CAS races. Core's JDK
 file response/output adapters use per-test temporary directories and Failsafe
 `*IT` coverage for restart, corruption, retention, and filesystem repair
 paths. The contract-by-contract status is recorded in
-[`TEST-MATRIX.md`](TEST-MATRIX.md). PostgreSQL state tests are owned by
-`trawler-postgres`; response/output/outbox database tests remain future work.
+[`TEST-MATRIX.md`](TEST-MATRIX.md). PostgreSQL state, response, output, and
+outbox tests are owned by `trawler-postgres` and use direct SQL assertions.
 
 ## Commands
 
@@ -57,7 +57,8 @@ Run one unit class or one integration class:
 
 ```bash
 mvn -pl trawler-core -am -Dtest=TypedPipelineCompositionTest test
-mvn -pl trawler-postgres -am -Dit.test=PostgresCrawlStateStoreIT verify
+mvn -pl trawler-postgres -am -Dit.test=PostgresCrawlStateStoreIT \
+  -Dfailsafe.failIfNoSpecifiedTests=false verify
 ```
 
 `-DskipITs=true` skips the Failsafe integration-test executions when the
@@ -156,6 +157,15 @@ scenarios. The full reactor's unit-only verification can be run with
 `-DskipITs=true` for local diagnosis, but the required handoff command remains
 `mvn clean verify` in an environment that provides Docker.
 
+For a focused class in the reactor, set
+`-Dfailsafe.failIfNoSpecifiedTests=false` so the parent and unrelated modules
+do not fail merely because they contain no matching class:
+
+```bash
+mvn -pl trawler-postgres -am -Dit.test=PostgresResponseStoreIT \
+  -Dfailsafe.failIfNoSpecifiedTests=false verify
+```
+
 ## Coverage policy
 
 JaCoCo is configured in the parent POM for every module:
@@ -192,10 +202,12 @@ the database-free engine runtime, scheduling, and daemon behavior, plus JDK
 file-store `*IT.kt` coverage. Web policy, session, XML-discovery, Ktor
 MockEngine, and loopback CIO tests cover the bounded web-adapter contracts
 without public-network calls. The PostgreSQL module has configuration/codec
-unit coverage and real-database `PostgresCrawlStateStoreIT.kt` source coverage
-for migrations, queue, leases, attempts, transitions, CAS state, recovery,
-and retention. Its execution remains dependent on a working
-Docker/Testcontainers connection in the verification environment.
+unit coverage and real-database `*IT.kt` source coverage for independent
+state/response/output/outbox migrations, lifecycle, codecs, queue/lease
+fencing, output transactions, response ownership/retention, outbox
+retries/reclaim/cancellation, and local lineage. Its execution remains
+dependent on a working Docker/Testcontainers connection in the verification
+environment.
 The actual CIO timeout behavior of the underlying socket engine is also not
 directly exercised with wall-clock timing; deterministic timeout exceptions,
 outer cancellation, and reservation cleanup are covered. Coverage is

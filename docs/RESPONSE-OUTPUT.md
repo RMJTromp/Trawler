@@ -210,7 +210,8 @@ releases the current claim under a bounded `NonCancellable` cleanup path.
 
 An outbox does not implicitly start a lifecycle-owning delegate. A delegate
 that implements `ExtensionLifecycle` must be registered as a preceding engine
-extension, making startup and shutdown ownership explicit.
+extension, making startup and shutdown ownership explicit. Outbox `close` is
+idempotent and closes such a delegate at most once.
 
 `Skipped` is treated as a delivery failure, not as silent loss. A failed
 delegate is requeued until `maxOutboxAttempts`, then becomes `FAILED`.
@@ -278,9 +279,13 @@ batching, retry, and idempotency decorators. `FileResponseStoreIT` and
 `FileOutputIT` cover bounded temporary-directory persistence, restart and
 ring behavior, exact codec versions, replay/retention ordering, malformed
 frames, cancellation, forced acceptance, and append repair. PostgreSQL
-response/output, outbox, and durable cross-adapter retention coverage remains
-planned; behavioral checks requiring a Docker-compatible runtime remain an
-environment-dependent limitation.
+`PostgresResponseStoreIT`, `PostgresOutputIT`, and
+`PostgresOutboxOutputIT` add direct-SQL coverage for independent migrations,
+exact codec metadata, ownership-before-limit replay, transactional writes,
+lineage-protected retention, bounded FIFO claims, cancellation release,
+fresh fencing tokens, stale completion, and the documented duplicate window.
+Their source compiles and Failsafe discovers it; execution remains dependent
+on a Docker-compatible Testcontainers runtime.
 
 ## Limitations
 

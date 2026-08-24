@@ -309,6 +309,12 @@ test, and two store instances only where a multi-process race is the contract.
 It covers state migrations, lifecycle retry/cleanup, enqueue/claim/capacity,
 leases and fencing, attempts, every work transition, resource history,
 checkpoints/harvest/health/overrides, run recovery, and state retention.
+`PostgresResponseStoreIT.kt`, `PostgresOutputIT.kt`, and
+`PostgresOutboxOutputIT.kt` cover the independent response/output/outbox
+migrations and lifecycle, exact codec persistence, bounded replay and
+retention, transactional output, lineage release, FIFO outbox claims,
+reclaim/fencing, retry exhaustion, cancellation release, and duplicate-window
+delivery semantics with direct SQL assertions.
 
 The IT source compiles and is discoverable by Failsafe, but its execution is
 environment-dependent. In the current verification environment Docker CLI
@@ -317,12 +323,13 @@ complete its Docker socket connection, so the database assertions remain
 runtime-unverified here. A focused run is:
 
 ```bash
-mvn -pl trawler-postgres -am -Dit.test=PostgresCrawlStateStoreIT verify
+mvn -pl trawler-postgres -am -Dit.test='Postgres*IT' \
+  -Dfailsafe.failIfNoSpecifiedTests=false verify
 ```
 
 The required full command is `mvn clean verify` in an environment with a
-Testcontainers-compatible Docker runtime. Core unit tests cover shared
-checkpoint/harvest contracts; response, output, and outbox PostgreSQL feature
-tests remain future work. Test ownership, Docker requirements, and the full
-contract matrix are recorded in [`TESTING.md`](TESTING.md) and
+Testcontainers-compatible Docker runtime. In this phase the three response,
+output, and outbox IT sources compile and are discoverable, but their database
+assertions are runtime-unverified for the same environment limitation. Test
+ownership, Docker requirements, and the full contract matrix are recorded in [`TESTING.md`](TESTING.md) and
 [`TEST-MATRIX.md`](TEST-MATRIX.md).

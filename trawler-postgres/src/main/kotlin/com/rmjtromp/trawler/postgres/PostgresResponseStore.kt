@@ -195,8 +195,12 @@ public class PostgresResponseStore(
                     requirePostgresUtf8Bound(query.pipelineId, configuration.maxIdentifierBytes, "response pipeline ID")
                     selectMany(
                         connection,
-                        "pipeline_id = ? ORDER BY sequence ASC LIMIT ?",
-                        listOf(SqlArgument.Text(query.pipelineId), SqlArgument.Integer(boundedLimit)),
+                        "pipeline_id = ?$ownershipPredicate ORDER BY sequence ASC LIMIT ?",
+                        buildList {
+                            add(SqlArgument.Text(query.pipelineId))
+                            pipelineId?.let { add(SqlArgument.Text(it)) }
+                            add(SqlArgument.Integer(boundedLimit))
+                        },
                     )
                 }
             }
@@ -211,7 +215,7 @@ public class PostgresResponseStore(
 
     override suspend fun prune(request: ResponseRetentionRequest): ResponseRetentionResult =
         resources.transaction { connection ->
-            val limit = resources.boundLimit(request.maxEntries)
+            val limit = resources.boundRetentionLimit(request.maxEntries)
             val protectedValues = request.protectedReferences.map { it.value }
             protectedValues.forEach {
                 requirePostgresUtf8Bound(it, configuration.maxIdentifierBytes, "protected response reference")

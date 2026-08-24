@@ -156,6 +156,11 @@ internal class PostgresAdapterResources(
         return requested.coerceAtMost(configuration.maxResponseQueryLimit)
     }
 
+    fun boundRetentionLimit(requested: Int): Int {
+        require(requested > 0) { "Retention batch must be positive" }
+        return requested.coerceAtMost(configuration.maxRetentionRows)
+    }
+
     private fun ensureStarted() {
         check(started.get() && !closed.get()) {
             "PostgreSQL adapter '$adapterId' is not started"
