@@ -302,14 +302,27 @@ rows and response rows with local lineage are not silently deleted.
 
 ## Verification and limitations
 
-Verified for these phases with focused reactor compilation/verification and
-Maven runtime dependency-tree inspection. A PostgreSQL service was not
-available in the review environment, so response, output, outbox, migration,
-row-lock, partial-uniqueness, and fencing behavior remain unverified against a
-live database here. PostgreSQL row locks, partial uniqueness, and fencing
-predicates are database-level guarantees that apply across processes using the
-same schema. No PostgreSQL integration tests are included in this phase. Core
-unit tests cover the shared checkpoint/harvest contracts; Testcontainers
-ownership, Docker requirements, and planned PostgreSQL test coverage are
-recorded in [`TESTING.md`](TESTING.md) and
+The PostgreSQL configuration and binary request-codec unit tests run without a
+database. `PostgresCrawlStateStoreIT.kt` is the Testcontainers-owned database
+suite; it uses the pinned `postgres:16.4-alpine` image, a fresh schema per
+test, and two store instances only where a multi-process race is the contract.
+It covers state migrations, lifecycle retry/cleanup, enqueue/claim/capacity,
+leases and fencing, attempts, every work transition, resource history,
+checkpoints/harvest/health/overrides, run recovery, and state retention.
+
+The IT source compiles and is discoverable by Failsafe, but its execution is
+environment-dependent. In the current verification environment Docker CLI
+access worked while the pinned docker-java/Testcontainers client could not
+complete its Docker socket connection, so the database assertions remain
+runtime-unverified here. A focused run is:
+
+```bash
+mvn -pl trawler-postgres -am -Dit.test=PostgresCrawlStateStoreIT verify
+```
+
+The required full command is `mvn clean verify` in an environment with a
+Testcontainers-compatible Docker runtime. Core unit tests cover shared
+checkpoint/harvest contracts; response, output, and outbox PostgreSQL feature
+tests remain future work. Test ownership, Docker requirements, and the full
+contract matrix are recorded in [`TESTING.md`](TESTING.md) and
 [`TEST-MATRIX.md`](TEST-MATRIX.md).

@@ -44,10 +44,11 @@ try {
 ```
 
 The database must be authorized by the host. Startup applies only the
-adapter-owned migrations. No feature tests are included in this
-infrastructure phase. PostgreSQL integration tests own their Testcontainers
-dependencies and require Docker; see [`docs/TESTING.md`](../docs/TESTING.md)
-and [`docs/TEST-MATRIX.md`](../docs/TEST-MATRIX.md).
+adapter-owned migrations. Configuration and request-codec unit tests run in
+Surefire; `PostgresCrawlStateStoreIT.kt` owns the real PostgreSQL
+Testcontainers coverage and runs in Failsafe. The IT suite requires Docker;
+see [`docs/TESTING.md`](../docs/TESTING.md) and
+[`docs/TEST-MATRIX.md`](../docs/TEST-MATRIX.md).
 
 See [`docs/RESPONSE-OUTPUT.md`](../docs/RESPONSE-OUTPUT.md) for response
 codec ownership, replay isolation, PostgreSQL response/output/outbox schemas, typed output

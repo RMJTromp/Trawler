@@ -1,6 +1,6 @@
 # Testing
 
-> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, and Ktor transport tests added; PostgreSQL feature tests remain planned
+> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, Ktor transport, and PostgreSQL state tests added; PostgreSQL execution requires Docker
 >
 > **Owner:** `trawler-parent` build configuration, with test dependencies owned by each implementation module
 
@@ -27,8 +27,8 @@ checkpoint admission, and deterministic enqueue/claim/CAS races. Core's JDK
 file response/output adapters use per-test temporary directories and Failsafe
 `*IT` coverage for restart, corruption, retention, and filesystem repair
 paths. The contract-by-contract status is recorded in
-[`TEST-MATRIX.md`](TEST-MATRIX.md); PostgreSQL and database-backed adapter
-rows remain explicit planned work until their owning tests exist.
+[`TEST-MATRIX.md`](TEST-MATRIX.md). PostgreSQL state tests are owned by
+`trawler-postgres`; response/output/outbox database tests remain future work.
 
 ## Commands
 
@@ -57,7 +57,7 @@ Run one unit class or one integration class:
 
 ```bash
 mvn -pl trawler-core -am -Dtest=TypedPipelineCompositionTest test
-mvn -pl trawler-postgres -am -Dit.test=PostgresStateIT verify
+mvn -pl trawler-postgres -am -Dit.test=PostgresCrawlStateStoreIT verify
 ```
 
 `-DskipITs=true` skips the Failsafe integration-test executions when the
@@ -149,10 +149,12 @@ installation or shared database is used.
 
 When Docker is unavailable, the focused PostgreSQL integration command fails
 as an environment failure and must be reported; tests must not silently skip,
-disable themselves, or retry until green. The full reactor's unit-only
-verification can be run with `-DskipITs=true` for local diagnosis, but the
-required handoff command remains `mvn clean verify` in an environment that
-provides Docker once PostgreSQL ITs exist.
+disable themselves, or retry until green. The suite uses the pinned
+`postgres:16.4-alpine` image and creates a fresh schema per test, while two
+store instances intentionally share a schema only in multi-process race
+scenarios. The full reactor's unit-only verification can be run with
+`-DskipITs=true` for local diagnosis, but the required handoff command remains
+`mvn clean verify` in an environment that provides Docker.
 
 ## Coverage policy
 
@@ -189,7 +191,11 @@ The core module contains deterministic `*Test.kt` coverage for contracts,
 the database-free engine runtime, scheduling, and daemon behavior, plus JDK
 file-store `*IT.kt` coverage. Web policy, session, XML-discovery, Ktor
 MockEngine, and loopback CIO tests cover the bounded web-adapter contracts
-without public-network calls. PostgreSQL/database behavior remains untested.
+without public-network calls. The PostgreSQL module has configuration/codec
+unit coverage and real-database `PostgresCrawlStateStoreIT.kt` source coverage
+for migrations, queue, leases, attempts, transitions, CAS state, recovery,
+and retention. Its execution remains dependent on a working
+Docker/Testcontainers connection in the verification environment.
 The actual CIO timeout behavior of the underlying socket engine is also not
 directly exercised with wall-clock timing; deterministic timeout exceptions,
 outer cancellation, and reservation cleanup are covered. Coverage is
