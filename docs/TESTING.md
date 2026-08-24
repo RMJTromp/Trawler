@@ -1,6 +1,6 @@
 # Testing
 
-> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, and database-free runtime tests added; web/PostgreSQL feature tests remain planned
+> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, and web policy/session/discovery tests added; Ktor transport and PostgreSQL feature tests remain planned
 >
 > **Owner:** `trawler-parent` build configuration, with test dependencies owned by each implementation module
 
@@ -27,8 +27,9 @@ checkpoint admission, and deterministic enqueue/claim/CAS races. Core's JDK
 file response/output adapters use per-test temporary directories and Failsafe
 `*IT` coverage for restart, corruption, retention, and filesystem repair
 paths. The contract-by-contract status is recorded in
-[`TEST-MATRIX.md`](TEST-MATRIX.md); web, PostgreSQL, and adapter-level
-end-to-end rows remain explicit planned work until their owning tests exist.
+[`TEST-MATRIX.md`](TEST-MATRIX.md); Ktor transport, PostgreSQL, and
+adapter-level end-to-end rows remain explicit planned work until their owning
+ tests exist.
 
 ## Commands
 
@@ -185,9 +186,11 @@ test remains failing until the smallest production correction is made.
 
 The core module contains deterministic `*Test.kt` coverage for contracts,
 the database-free engine runtime, scheduling, and daemon behavior, plus JDK
-file-store `*IT.kt` coverage. Web transport/discovery, PostgreSQL/database,
-redirect/public-network safety, robots/XML/cookies, and adapter-level
-end-to-end rows remain untested. Coverage is report-only, so the matrix and
-the generated JaCoCo reports must be read together; a report is not a
-substitute for a contract assertion. Feature phases must add tests to the
-owning module and update the corresponding matrix row in the same change.
+file-store `*IT.kt` coverage. Web policy, session, and XML-discovery tests now
+cover the bounded network-safety, robots, pacing, cookies, and engine-executor
+contracts. Ktor transport redirect-chain execution, PostgreSQL/database,
+and adapter-level end-to-end rows remain untested. Coverage is report-only,
+so the matrix and the generated JaCoCo reports must be read together; a
+report is not a substitute for a contract assertion. Feature phases must add
+tests to the owning module and update the corresponding matrix row in the
+same change.

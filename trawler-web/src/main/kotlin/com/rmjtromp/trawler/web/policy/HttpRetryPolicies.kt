@@ -32,6 +32,7 @@ public object DefaultWebFailureClassifier : FailureClassifier {
         is WebAddressResolutionException -> FailureClassification("web-dns-failure", true, error.host)
         is WebResponseTooLargeException -> FailureClassification("web-body-limit", false, error.limitKind)
         is WebResponseHeadersTooLargeException -> FailureClassification("web-header-limit", false)
+        is WebResponseHeaderNameTooLargeException -> FailureClassification("web-header-name-limit", false)
         is WebResponseHeaderValueTooLargeException -> FailureClassification("web-header-value-limit", false)
         is UnsupportedWebContentEncodingException -> FailureClassification("web-content-encoding", false, error.encoding)
         is CookieHeaderLimitException -> FailureClassification("web-cookie-header-limit", false)

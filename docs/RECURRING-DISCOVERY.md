@@ -155,7 +155,8 @@ only its selected pipeline; it never fails unrelated pipelines.
 `RssDiscovery`, `AtomDiscovery`, and `SitemapDiscovery` all fetch through the
 normal engine request path, so scope, authorization, concurrency, pacing,
 middleware, transport safety, and response limits are applied consistently.
-The implementations use JDK StAX with external entities and DTDs disabled.
+The implementations use JDK StAX with external entities and DTDs disabled and
+reject any DTD/entity events that reach the bounded parser.
 
 `XmlDiscoveryBounds` defaults are:
 
@@ -214,14 +215,15 @@ codec, or harvest failure is isolated from unrelated pipeline registrations.
 
 ## Verification and limitations
 
-Verified during this phase with focused Maven compilation of core, web, and
-PostgreSQL, plus full reactor clean compile/verify and dependency-tree review.
-The controlled manual demonstrations cover checkpoint CAS ordering, in-memory
-resume and recrawl behavior, XML bounds/gzip/relative-link handling, and
-PostgreSQL Flyway migration visibility. Core unit tests now cover recurring
+Verified during this phase with focused Maven compilation/tests of core and
+web, plus full reactor clean compile/verify and dependency-tree review. The
+controlled XML tests cover RSS/Atom/sitemap engine-executor ownership,
+relative links, gzip, malformed/DTD/entity rejection, status handling, item,
+location, document, depth, and compressed/decompressed bounds, breadth-first
+ordering, cursor resume, and cancellation. Core unit tests cover recurring
 admission, queue-watermark hysteresis, harvest completion truth tables, and
-overlap windows. XML bounds and durable recovery coverage remain planned in
-[`TEST-MATRIX.md`](TEST-MATRIX.md).
+overlap windows. Durable PostgreSQL recovery and Ktor transport integration
+remain planned in [`TEST-MATRIX.md`](TEST-MATRIX.md).
 
 The in-memory implementation is process-local and its recurring state and
 quarantine history are finite. `QueueWatermark` hysteresis is held by the

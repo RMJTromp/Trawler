@@ -39,12 +39,12 @@ public data class WebOrigin(
         public fun fromTarget(target: String): WebOrigin {
             val uri = try {
                 java.net.URI(target)
-            } catch (error: IllegalArgumentException) {
+            } catch (error: Exception) {
                 throw IllegalArgumentException("Target is not a valid URI", error)
             }
             val scheme = uri.scheme?.lowercase(Locale.ROOT)
                 ?: throw IllegalArgumentException("Target scheme is required")
-            val host = uri.host?.lowercase(Locale.ROOT)
+            val host = uri.host?.lowercase(Locale.ROOT)?.removePrefix("[")?.removeSuffix("]")
                 ?: throw IllegalArgumentException("Target host is required")
             val port = if (uri.port == -1) {
                 when (scheme) {

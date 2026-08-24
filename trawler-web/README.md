@@ -30,7 +30,9 @@ ownership, and verification.
 mvn -pl trawler-web -am clean verify
 ```
 
-No feature tests are included in this infrastructure phase. Web tests own
-Ktor MockEngine through a test-scoped dependency; commands and the coverage
-baseline are documented in [`docs/TESTING.md`](../docs/TESTING.md) and
+Deterministic policy, cookie-session, and RSS/Atom/sitemap discovery tests run
+in the unit phase using controlled fakes and virtual time. Web tests own Ktor
+MockEngine through a test-scoped dependency; full Ktor transport and
+redirect-chain integration coverage remains planned. Commands and coverage
+are documented in [`docs/TESTING.md`](../docs/TESTING.md) and
 [`docs/TEST-MATRIX.md`](../docs/TEST-MATRIX.md).

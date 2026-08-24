@@ -55,7 +55,7 @@ public class PublicWebSafetyPolicy(
         }
         val uri = try {
             URI(request.target)
-        } catch (_: IllegalArgumentException) {
+        } catch (_: Exception) {
             return DestinationDecision.Rejected("target-is-not-a-uri")
         }
         val scheme = uri.scheme?.lowercase(Locale.ROOT)
@@ -63,7 +63,7 @@ public class PublicWebSafetyPolicy(
         if (scheme !in configuration.normalizedSchemes) {
             return DestinationDecision.Rejected("scheme-not-allowed")
         }
-        val host = uri.host?.lowercase(Locale.ROOT)
+        val host = uri.host?.lowercase(Locale.ROOT)?.removePrefix("[")?.removeSuffix("]")
             ?: return DestinationDecision.Rejected("host-required")
         if (uri.userInfo != null) {
             return DestinationDecision.Rejected("userinfo-is-not-allowed")

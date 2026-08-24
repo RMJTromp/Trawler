@@ -253,6 +253,10 @@ private fun parseFeedLinks(
     try {
         while (reader.hasNext()) {
             when (reader.next()) {
+                XMLStreamConstants.DTD,
+                XMLStreamConstants.ENTITY_REFERENCE,
+                -> throw XmlDiscoveryFormatException("DTD and external entity references are not allowed")
+
                 XMLStreamConstants.START_ELEMENT -> {
                     val name = reader.localName.lowercase()
                     if ((format == FeedFormat.RSS && name == "item") ||
@@ -313,6 +317,10 @@ private fun parseSitemap(bytes: ByteArray, bounds: XmlDiscoveryBounds): ParsedSi
     try {
         while (reader.hasNext()) {
             when (reader.next()) {
+                XMLStreamConstants.DTD,
+                XMLStreamConstants.ENTITY_REFERENCE,
+                -> throw XmlDiscoveryFormatException("DTD and external entity references are not allowed")
+
                 XMLStreamConstants.START_ELEMENT -> {
                     val name = reader.localName.lowercase()
                     if (root == null && name != "urlset" && name != "sitemapindex") {

@@ -162,8 +162,9 @@ listed it. Recursion depth and document count are finite; reaching a bound
 raises a visible discovery failure rather than silently truncating historical
 coverage.
 
-The parser disables DTD and external entities. It accepts a gzip member by
-magic-byte detection and bounds both input/compressed and decompressed bytes.
+The parser disables and explicitly rejects DTD and external-entity events. It
+accepts a gzip member by magic-byte detection and bounds both input/compressed
+and decompressed bytes.
 The transport normally performs content-encoding adaptation first, so this
 additional gzip handling covers a bounded raw gzip document supplied to a
 custom transport. Locations must resolve to absolute HTTP(S) targets.
@@ -226,7 +227,8 @@ origin pacing merges the robots delay and valid `Retry-After` responses.
 
 `DefaultHttpFailureClassifier` classifies response status without changing the
 response. `DefaultWebFailureClassifier` classifies failures that prevent a
-response from reaching extraction. `DefaultHttpRetryPolicy` is an explicit
+response from reaching extraction, including distinct body, header-count,
+header-name, and header-value bound categories. `DefaultHttpRetryPolicy` is an explicit
 core `RetryPolicy` with bounded deterministic exponential backoff; callers
 must install it in the pipeline if they want it. No Ktor retry plugin or
 transport loop is installed. Retry therefore remains visible to core attempt
@@ -250,18 +252,26 @@ Direct runtime dependencies are limited to:
 
 Ktor brings its required client, HTTP, network/TLS, serialization plumbing,
 Kotlinx I/O, and SLF4J API transitives. No Ktor retry, content-negotiation,
-Jackson, Jsoup, parser, database, browser, telemetry backend, or test
-dependency is declared. The XML discovery uses JDK StAX and gzip, so Phase 5
-adds no dependency or POM change. Those transitive APIs are not exposed
-through core and are not used to serialize produced values.
+Jackson, Jsoup, parser, database, browser, or telemetry backend is declared.
+Ktor MockEngine is a test-scoped dependency owned only by this module's future
+tests. The XML discovery uses JDK StAX and gzip, so Phase 5 adds no runtime
+dependency. Those transitive APIs are not exposed through core and are not
+used to serialize produced values.
 
 ## Verification
 
 The implementation is verified with the reactor compile/verify commands, the
 module-focused build, Maven dependency-tree inspection, compiler/static source
-scans, and a controlled local HTTP smoke run covering a response, redirect,
-cookie, middleware ordering, unsafe target rejection, and body bounds. No
-automated tests were authorized, added, or run.
+scans, and deterministic `WebPolicyTest`, `CookieSessionTest`, and
+`XmlDiscoveryTest` suites. These suites use injected clocks, virtual
+coroutine time, controlled DNS/robots/executor fakes, and no live websites.
+They cover IPv4/IPv6 public-web safety, redirect-history/header policy,
+origin concurrency and pacing, HTTP classification/retry hints, cookies,
+robots rules/cache/failure modes, and RSS/Atom/sitemap bounds, gzip, resume,
+ordering, cancellation, and DTD/entity rejection. Full Ktor transport
+request/response and redirect-chain tests remain planned; MockEngine ownership
+and the remaining matrix are recorded in [`TESTING.md`](TESTING.md) and
+[`TEST-MATRIX.md`](TEST-MATRIX.md).
 
 ## Limitations
 
