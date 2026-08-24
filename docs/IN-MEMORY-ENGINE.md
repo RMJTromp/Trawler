@@ -87,6 +87,13 @@ Checkpoint and harvest payloads are also rejected when they exceed the
 configured in-memory checkpoint bound, including direct compare-and-set
 updates.
 
+The state adapter applies its configured retention bounds to terminal jobs,
+completed attempts, resources, and recurring checkpoint/harvest/health/override
+maps. It removes the oldest eligible history while retaining active work. An
+atomic discovery admission also requires every item's context pipeline to
+match the operation pipeline; that validation happens before lease reclaim,
+capacity checks, enqueue, or checkpoint mutation.
+
 Single-cardinality configuration remains explicit: `stateStore`, response
 store, transport, extractor, policy slots, and inherited defaults reject
 duplicate registration unless the corresponding `replace...` method is used.
@@ -175,6 +182,12 @@ a later discovery/run can admit it when eligible.
 `RecrawlAfter`. The in-memory store keeps it process-locally when a retry is
 scheduled and clears it after a successful visit; the durable PostgreSQL
 adapter persists the same operational hint in its resource row.
+
+The atomic discovery admission capability combines bounded active-work
+deduplication with checkpoint CAS. A capacity rejection or revision conflict
+leaves both the queue and checkpoint unchanged. Direct checkpoint CAS uses the
+same immediate-revision and payload rules and trims retained checkpoint state
+after an accepted update.
 
 ## Discovery, worker, and output bounds
 

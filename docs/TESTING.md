@@ -11,11 +11,14 @@ discovery, integration-test discovery, dependency ownership, deterministic
 concurrency, fixtures, database requirements, coverage reporting, and failure
 handling consistent across the reactor.
 
-The core contract phase adds deterministic unit tests for the value models,
+The core contract phases add deterministic unit tests for the value models,
 configuration DSL, codecs, discovery and harvest helpers, built-in policies,
-response stores, and in-memory state. The contract-by-contract status is
-recorded in [`TEST-MATRIX.md`](TEST-MATRIX.md); adapter and end-to-end rows
-remain explicit planned work until their owning tests exist.
+response stores, and in-memory state. In-memory state coverage includes
+terminal lifecycle transitions, lease fencing/reclaim, bounded retention,
+atomic checkpoint admission, and deterministic enqueue/claim/CAS races. The
+contract-by-contract status is recorded in [`TEST-MATRIX.md`](TEST-MATRIX.md);
+adapter and end-to-end rows remain explicit planned work until their owning
+tests exist.
 
 ## Commands
 

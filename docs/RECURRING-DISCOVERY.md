@@ -100,6 +100,14 @@ revision or completion flag. An adapter implementing
 deduplication, and checkpoint CAS in one transaction. The PostgreSQL adapter
 uses this path.
 
+The in-memory implementation validates that every `DiscoveryWorkItem.context`
+belongs to the supplied `pipelineId` before it reclaims leases, checks
+capacity, enqueues work, or advances the checkpoint. A mismatched item is a
+configuration error and leaves both state surfaces unchanged. Capacity
+rejection and revision conflict likewise leave the queue and checkpoint
+unchanged. Accepted direct checkpoint CAS updates apply the same immediate
+revision/payload rules and the configured retained-state bound.
+
 Without that capability, core enqueues first and then performs checkpoint
 CAS. A CAS conflict leaves accepted work in the queue and marks the run
 abandoned; the next walk may replay the emission, but active identity

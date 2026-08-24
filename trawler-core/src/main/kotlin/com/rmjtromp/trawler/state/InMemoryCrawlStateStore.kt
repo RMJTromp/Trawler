@@ -125,6 +125,9 @@ public class InMemoryCrawlStateStore(
         require(discoveryId.isNotBlank()) { "Discovery ID must not be blank" }
         require(items.isNotEmpty()) { "Atomic discovery admission requires work" }
         require(items.size <= maxQueueSize) { "Atomic discovery admission batch exceeds the queue bound" }
+        require(items.all { it.context.pipelineId == pipelineId }) {
+            "Atomic discovery admission item pipeline must match the operation pipeline"
+        }
         val key = CheckpointKey(pipelineId, discoveryId)
         if (checkpoints[key]?.revision != expectedRevision) {
             return@withLock AtomicEnqueueCheckpointResult.RevisionConflict
@@ -325,7 +328,9 @@ public class InMemoryCrawlStateStore(
         expectedRevision: Long?,
         next: DiscoveryCheckpoint,
     ): Boolean = mutex.withLock {
-        compareAndSetLocked(CheckpointKey(pipelineId, discoveryId), expectedRevision, next)
+        val accepted = compareAndSetLocked(CheckpointKey(pipelineId, discoveryId), expectedRevision, next)
+        if (accepted) trimRecurringState()
+        accepted
     }
 
     private fun compareAndSetLocked(
