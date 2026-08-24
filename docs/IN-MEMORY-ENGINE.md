@@ -29,8 +29,8 @@ This phase does not implement:
 - response files, WARC, serialization, parsers, or domain models;
 - durable audit history, durable scheduling, or process recovery;
 - a universal queue, storage, plugin, or produced-record abstraction;
-- feature tests; repository-wide test infrastructure is documented separately
-  in [`TESTING.md`](TESTING.md).
+- adapter-specific integration tests; repository-wide test infrastructure is
+  documented separately in [`TESTING.md`](TESTING.md).
 
 ## Public type ownership
 
@@ -83,6 +83,9 @@ fail during configuration construction. `RunRequest` and `DaemonConfig` copy
 selected pipeline IDs at construction. Metadata bounds are enforced again
 after canonicalization, middleware, and response adaptation so extensions
 cannot grow the in-memory request/response graph without a configured limit.
+Checkpoint and harvest payloads are also rejected when they exceed the
+configured in-memory checkpoint bound, including direct compare-and-set
+updates.
 
 Single-cardinality configuration remains explicit: `stateStore`, response
 store, transport, extractor, policy slots, and inherited defaults reject
@@ -283,11 +286,14 @@ The Phase 2 implementation was verified with:
   `GlobalScope`, `Thread.sleep`, and TODO/FIXME markers;
 - final diff, status, and documentation-link inspection.
 
-No feature tests are included in this infrastructure phase. Manual smoke
-sources were temporary verification inputs outside the repository and are not
-test fixtures. The plain `mvn clean compile` invocation was also attempted, but the
-container denied the Kotlin daemon's user-level temporary directory; disabling
-that daemon allowed the same reactor build to complete successfully.
+The core contract phase adds deterministic tests for in-memory state
+transitions, checkpoint/harvest revisions and payload bounds, response
+retention, configuration, discovery, codecs, and built-in policies. Manual
+smoke sources were temporary verification inputs outside the repository and
+are not test fixtures. The plain `mvn clean compile` invocation was also
+attempted, but the container denied the Kotlin daemon's user-level temporary
+directory; disabling that daemon allowed the same reactor build to complete
+successfully.
 
 ## Known limitations
 

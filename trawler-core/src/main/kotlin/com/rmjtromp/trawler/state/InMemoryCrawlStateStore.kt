@@ -338,6 +338,9 @@ public class InMemoryCrawlStateStore(
         require(next.revision == (expectedRevision ?: -1L) + 1L) {
             "Next checkpoint revision must immediately follow the expected revision"
         }
+        require(next.payload.size <= maxCheckpointPayloadBytes) {
+            "Checkpoint payload exceeds the in-memory state bound"
+        }
         checkpoints[key] = next
         return true
     }

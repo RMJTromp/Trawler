@@ -1,20 +1,21 @@
 # Testing
 
-> **Status:** Infrastructure implemented; feature tests not yet added
+> **Status:** Infrastructure implemented; core contract tests added; adapter feature tests remain planned
 >
 > **Owner:** `trawler-parent` build configuration, with test dependencies owned by each implementation module
 
 ## Purpose
 
-This document defines the repository-wide test lifecycle before the feature
-test suite is built. It makes unit-test discovery, integration-test discovery,
-dependency ownership, deterministic concurrency, fixtures, database
-requirements, coverage reporting, and failure handling consistent across the
-reactor.
+This document defines the repository-wide test lifecycle and makes unit-test
+discovery, integration-test discovery, dependency ownership, deterministic
+concurrency, fixtures, database requirements, coverage reporting, and failure
+handling consistent across the reactor.
 
-This phase intentionally adds no feature test source. The contract-by-contract
-coverage baseline is recorded in [`TEST-MATRIX.md`](TEST-MATRIX.md), where an
-owning test name is a planned owner until that file exists.
+The core contract phase adds deterministic unit tests for the value models,
+configuration DSL, codecs, discovery and harvest helpers, built-in policies,
+response stores, and in-memory state. The contract-by-contract status is
+recorded in [`TEST-MATRIX.md`](TEST-MATRIX.md); adapter and end-to-end rows
+remain explicit planned work until their owning tests exist.
 
 ## Commands
 
@@ -169,9 +170,9 @@ test remains failing until the smallest production correction is made.
 
 ## Current limitations
 
-The repository currently contains no feature `*Test.kt` or `*IT.kt` files, so
-there is no meaningful line or branch coverage to claim yet. The test matrix is
-therefore a coverage plan and untested-risk register, not a report of passed
-behavior. Feature phases must add tests to the owning module and update the
-corresponding matrix row in the same change.
-
+The core module currently contains deterministic `*Test.kt` coverage but no
+`*IT.kt` tests. Adapter, database, transport, scheduler, lifecycle, and
+end-to-end engine rows remain untested. Coverage is report-only, so the matrix
+and the generated JaCoCo reports must be read together; a report is not a
+substitute for a contract assertion. Feature phases must add tests to the
+owning module and update the corresponding matrix row in the same change.

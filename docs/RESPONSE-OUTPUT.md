@@ -271,11 +271,12 @@ Kotlin, and coroutines graph. See [`docs/DEPENDENCIES.md`](DEPENDENCIES.md).
 
 ## Verification
 
-The implementation is verified with the repository compile/verify commands
-recorded in the final handoff. No feature tests are included in this
-infrastructure phase; response, replay, output, outbox, and retention coverage
-is planned in [`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md).
-PostgreSQL behavioral checks requiring a Docker-compatible runtime remain an
+The core contract phase adds deterministic tests for response capture, cache
+age and ownership, in-memory/file response retention, replay selection, and
+core response/output codec registries. File output, PostgreSQL response and
+output, outbox, and durable retention coverage remains planned in
+[`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md). PostgreSQL
+behavioral checks requiring a Docker-compatible runtime remain an
 environment-dependent limitation.
 
 ## Limitations

@@ -308,7 +308,8 @@ available in the review environment, so response, output, outbox, migration,
 row-lock, partial-uniqueness, and fencing behavior remain unverified against a
 live database here. PostgreSQL row locks, partial uniqueness, and fencing
 predicates are database-level guarantees that apply across processes using the
-same schema. No feature tests are included in this infrastructure phase;
-Testcontainers ownership, Docker requirements, and planned PostgreSQL test
-coverage are recorded in [`TESTING.md`](TESTING.md) and
+same schema. No PostgreSQL integration tests are included in this phase. Core
+unit tests cover the shared checkpoint/harvest contracts; Testcontainers
+ownership, Docker requirements, and planned PostgreSQL test coverage are
+recorded in [`TESTING.md`](TESTING.md) and
 [`TEST-MATRIX.md`](TEST-MATRIX.md).

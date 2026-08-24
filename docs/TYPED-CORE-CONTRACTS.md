@@ -28,8 +28,8 @@ The Phase 1 contract layer deliberately did not implement:
 - HTTP/Ktor, PostgreSQL, file, browser, anti-bot, parser, or web behavior;
 - response retention, replay, serialization, or output destinations;
 - type-changing mappers, domain models, schemas, record keys, or entity tables;
-- feature tests; repository-wide test infrastructure is documented separately
-  in [`TESTING.md`](TESTING.md).
+- adapter-specific integration tests; repository-wide test infrastructure is
+  documented separately in [`TESTING.md`](TESTING.md).
 
 Durable persistence, technology-specific transports, web policy, parsers, and
 domain models remain later phases or adapter responsibilities. The Phase 2
@@ -238,12 +238,13 @@ The implementation was checked with:
   contract shortcuts, `GlobalScope`, `Thread.sleep`, and TODO/FIXME markers;
 - Markdown target checks for the changed documentation links.
 
-No feature tests are included in this infrastructure phase. The repository
-test lifecycle and the planned contract owners are recorded in
-[`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md); typed
-heterogeneity, configuration conflicts, cancellation, lease fencing,
-checkpoint ordering, replay isolation, and output duplicate windows remain
-high-risk untested scenarios until their owning tests are added.
+The core contract phase adds deterministic tests for typed registration and
+pipeline values, configuration conflicts, value ownership, discovery/harvest
+helpers, codecs, response retention, and built-in policies. The repository
+test lifecycle and remaining planned owners are recorded in
+[`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md); full engine
+execution, concurrent pipeline isolation, lease fencing, checkpoint ordering,
+replay network isolation, and output duplicate windows remain untested.
 
 ## Limitations
 
