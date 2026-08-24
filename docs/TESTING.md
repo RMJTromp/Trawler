@@ -2,7 +2,9 @@
 
 > **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, Ktor transport, cross-module typed composition, architecture/API guards, and PostgreSQL state/response/output/outbox tests added; PostgreSQL execution requires Docker
 >
-> **Owner:** `trawler-parent` build configuration, with test dependencies owned by each implementation module
+> **Owner:** `trawler-parent` build configuration and the non-published
+> `trawler-coverage` aggregate module, with test dependencies owned by each
+> implementation module
 
 ## Purpose
 
@@ -61,7 +63,8 @@ mvn -pl trawler-postgres -am clean verify
 Run one unit class or one integration class:
 
 ```bash
-mvn -pl trawler-core -am -Dtest=TypedPipelineCompositionTest test
+mvn -pl trawler-core -am -Dtest=EngineRuntimeTest \
+  -Dsurefire.failIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false test
 mvn -pl trawler-postgres -am -Dit.test=PostgresCrawlStateStoreIT \
   -Dfailsafe.failIfNoSpecifiedTests=false verify
 ```
@@ -162,9 +165,13 @@ scenarios. The full reactor's unit-only verification can be run with
 `-DskipITs=true` for local diagnosis, but the required handoff command remains
 `mvn clean verify` in an environment that provides Docker.
 
-For a focused class in the reactor, set
-`-Dfailsafe.failIfNoSpecifiedTests=false` so the parent and unrelated modules
-do not fail merely because they contain no matching class:
+For a focused unit class in the reactor, set both
+`-Dsurefire.failIfNoTests=false` and
+`-Dsurefire.failIfNoSpecifiedTests=false` so the parent and unrelated modules
+do not fail merely because they contain no matching class. These are explicit
+focused-run overrides; the default reactor settings remain strict. For a
+focused Failsafe class, set
+`-Dfailsafe.failIfNoSpecifiedTests=false` for the same reason:
 
 ```bash
 mvn -pl trawler-postgres -am -Dit.test=PostgresResponseStoreIT \
@@ -173,13 +180,15 @@ mvn -pl trawler-postgres -am -Dit.test=PostgresResponseStoreIT \
 
 ## Coverage policy
 
-JaCoCo is configured in the parent POM for every module:
+JaCoCo is configured in the parent POM for every implementation module, with
+the final aggregate owned by `trawler-coverage`:
 
 - `jacoco:prepare-agent` instruments unit and integration test JVMs;
 - `jacoco:report` writes per-module HTML and XML reports under
   `<module>/target/site/jacoco/`;
-- `jacoco:report-aggregate` writes the reactor report under
-  `target/site/jacoco-aggregate/` when reactor execution data is available.
+- `trawler-coverage` runs `jacoco:report-aggregate` after core, web, and
+  PostgreSQL, writing the reactor report under
+  `target/site/jacoco-aggregate/`.
 
 Coverage remains report-only because the final audit did not meet the required
 95% line and 90% branch thresholds: PostgreSQL integration execution is blocked
@@ -220,9 +229,6 @@ The actual CIO timeout behavior of the underlying socket engine is also not
 directly exercised with wall-clock timing; deterministic timeout exceptions,
 outer cancellation, and reservation cleanup are covered. Coverage is
 report-only, so the matrix and the generated JaCoCo reports must be read
-together; a report is not a substitute for a contract assertion. The current
-parent-bound aggregate execution runs before child modules in Maven's reactor,
-so `target/site/jacoco-aggregate/jacoco.xml` is structurally empty; the three
-module reports are the authoritative figures until aggregate wiring is moved
-to a post-child reporting project. Feature phases must add tests to the owning
-module and update the corresponding matrix row in the same change.
+together; a report is not a substitute for a contract assertion. Feature work
+must add tests to the owning module and update the corresponding matrix row in
+the same change.

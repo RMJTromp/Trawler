@@ -16,7 +16,7 @@ Three ideas must remain distinct:
 
 Physical modules exist to isolate dependencies, technology stacks, heavy operational footprints, or meaningful independent replacement—not to mirror every interface.
 
-> **Current repository status:** The reactor contains the build-only `trawler-parent`, `trawler-core`, and the implemented optional `trawler-web` and `trawler-postgres` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, resumable/recurring discovery coordination, Ktor/web behavior, bounded XML discovery, durable PostgreSQL operational state, optional response storage/replay, typed file output, PostgreSQL output, and fenced outbox delivery are implemented. Specialized modules remain planned.
+> **Current repository status:** The reactor contains the build-only `trawler-parent` and `trawler-coverage` projects, plus `trawler-core` and the implemented optional `trawler-web` and `trawler-postgres` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, resumable/recurring discovery coordination, Ktor/web behavior, bounded XML discovery, durable PostgreSQL operational state, optional response storage/replay, typed file output, PostgreSQL output, and fenced outbox delivery are implemented. Specialized modules remain planned.
 
 ## Module admission test
 
@@ -47,6 +47,16 @@ Owns:
 - shared build settings.
 
 It must contain no runtime code or runtime dependencies.
+
+### `trawler-coverage`
+
+**Packaging:** Non-published build-only Maven `pom` module, last in the reactor.
+
+Owns only the JaCoCo `report-aggregate` execution. It has provided-scoped
+references to each implementation module so the aggregate report is generated
+after all module tests and reports have run. It is not a runtime artifact, does
+not add an adapter dependency, and must not contain production or feature test
+sources.
 
 ### `trawler-core`
 
@@ -199,6 +209,7 @@ trawler-core                           Kotlin + coroutines
   ↑
   ├── trawler-web                      Ktor and justified web dependencies
   ├── trawler-postgres                 JDBC/PostgreSQL/pool/migrations
+  ├── trawler-coverage                 provided-scoped report aggregation only
   ├── trawler-observability-otel       OpenTelemetry stack
   └── specialized adapters             their technology dependencies
 
@@ -209,7 +220,9 @@ No sibling adapter may become a transitive requirement of another unless the rel
 
 ## Repository creation policy
 
-Add a module in the same change that begins its real implementation. The Phase 3 change created `trawler-web` and the Phase 4 change created `trawler-postgres` with:
+Add a runtime module in the same change that begins its real implementation.
+The Phase 3 change created `trawler-web` and the Phase 4 change created
+`trawler-postgres` with:
 
 - the module POM;
 - dependency inventory update;
@@ -217,6 +230,10 @@ Add a module in the same change that begins its real implementation. The Phase 3
 - its public capability and ownership description;
 - lifecycle/verification setup;
 - no empty placeholder packages.
+
+The non-published `trawler-coverage` module is the build exception: it contains
+only its aggregate-report POM and provided-scoped internal module references, so
+the report executes after all implementation modules in the reactor.
 
 ## Publication policy
 

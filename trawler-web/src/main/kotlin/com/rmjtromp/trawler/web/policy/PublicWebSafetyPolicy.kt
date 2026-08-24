@@ -7,11 +7,12 @@ import com.rmjtromp.trawler.web.transport.NetworkAddressResolver
 import com.rmjtromp.trawler.web.transport.WebDestinationPolicy
 import java.net.InetAddress
 import java.net.URI
+import java.util.Collections
 import java.util.Locale
 
 /** Configuration for the opt-in public-web destination safety preset. */
-public data class PublicWebSafetyConfig(
-    public val allowedSchemes: Set<String> = setOf("http", "https"),
+public class PublicWebSafetyConfig(
+    allowedSchemes: Set<String> = setOf("http", "https"),
     public val blockPrivateAddresses: Boolean = true,
     public val blockLoopbackAddresses: Boolean = true,
     public val blockLinkLocalAddresses: Boolean = true,
@@ -21,14 +22,17 @@ public data class PublicWebSafetyConfig(
     public val blockBenchmarkAddresses: Boolean = true,
     public val maxTargetLength: Int = 16_384,
 ) {
+    public val allowedSchemes: Set<String> =
+        Collections.unmodifiableSet(allowedSchemes.toSet())
+
     init {
-        require(allowedSchemes.isNotEmpty()) { "At least one web scheme must be allowed" }
-        require(allowedSchemes.all { it.isNotBlank() }) { "Allowed schemes must not be blank" }
+        require(this.allowedSchemes.isNotEmpty()) { "At least one web scheme must be allowed" }
+        require(this.allowedSchemes.all { it.isNotBlank() }) { "Allowed schemes must not be blank" }
         require(maxTargetLength > 0) { "Web target length bound must be positive" }
     }
 
     internal val normalizedSchemes: Set<String> =
-        allowedSchemes.map { it.lowercase(Locale.ROOT) }.toSet()
+        this.allowedSchemes.map { it.lowercase(Locale.ROOT) }.toSet()
 }
 
 /**

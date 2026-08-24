@@ -218,6 +218,10 @@ public class InMemoryCrawlStateStore(
         LeaseMutationResult.Accepted
     }
 
+    override suspend fun checkCurrent(work: LeasedWork): LeaseMutationResult = mutex.withLock {
+        if (currentLease(work) == null) LeaseMutationResult.Stale else LeaseMutationResult.Accepted
+    }
+
     override suspend fun transition(
         work: LeasedWork,
         transition: WorkTransition,

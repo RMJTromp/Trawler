@@ -12,6 +12,7 @@ import java.time.Instant
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
@@ -87,12 +88,11 @@ class ResponsePolicyTest {
         val second = response("second", "pipeline", now.plusSeconds(1), body = byteArrayOf(2))
         val third = response("third", "pipeline", now.plusSeconds(2), body = byteArrayOf(3))
 
-        val firstReference = store.put(first)
-        assertTrue(firstReference != null)
+        val firstReference = assertNotNull(store.put(first))
         assertNull(store.put(response("too-large", "pipeline", now, body = byteArrayOf(1, 2, 3))))
         store.put(second)
         store.put(third)
-        assertNull(store.find(ResponseLookup.ByReference(firstReference!!)))
+        assertNull(store.find(ResponseLookup.ByReference(firstReference)))
 
         assertEquals(1L, store.evictBefore(now.plusSeconds(2)))
         assertEquals(1L, store.evictBefore(now.plusSeconds(3)))

@@ -9,6 +9,7 @@
 | Module | Packaging | Published runtime artifact | Purpose |
 |---|---|---|---|
 | `trawler-parent` | `pom` | No | Reactor, version, dependency, and plugin management. It has no runtime dependencies. |
+| `trawler-coverage` | `pom` | No | Last-in-reactor JaCoCo aggregate reporting. It has only provided-scoped build references to implementation modules. |
 | `trawler-core` | `jar` | Yes, once releases begin | Generic contracts/engine and lightweight official implementations. |
 | `trawler-web` | `jar` | Yes, once releases begin | Optional Ktor/CIO HTTP transport, replaceable web policies, and bounded XML discovery. |
 | `trawler-postgres` | `jar` | Yes, once releases begin | Optional PostgreSQL operational state, response history, typed output, fenced outbox, leases, attempts, run history, request codecs, checkpoints, and recurring state. |
@@ -79,7 +80,9 @@ requests, `T`, responses, or state payloads by Trawler. Replacing Flyway would
 remove that transitive graph only if another migration implementation supplied
 the same validated lifecycle.
 
-Phases 2, 5, and 6 added no runtime dependency or Maven-module change. The
+Phases 2, 5, and 6 added no runtime dependency or published-adapter module.
+The non-published `trawler-coverage` build module exists only to run the
+reactor aggregate report after implementation modules complete. The
 in-memory state and response stores, callback/flow outputs, generic policies,
 coroutine scheduler, checkpoint/harvest codecs, and pipeline health/admission
 policies use only the already-approved Kotlin standard library, coroutines, and
@@ -94,9 +97,13 @@ enters core.
 Test libraries are never placed on a production dependency path. The parent
 POM manages one pinned version for each test responsibility; module POMs opt in
 with Maven `test` scope only where the test runtime owns the dependency.
+The parent imports the exact JUnit BOM selected by `junit.jupiter.version`, so
+the JUnit API/engine/platform artifacts transitively named by
+`kotlin-test-junit5` cannot reintroduce its older embedded JUnit versions.
 
 | Coordinate | Version source | Scope | Owner | Purpose | Boundary and removal plan |
 |---|---|---|---|---|---|
+| `org.junit:junit-bom` | `junit.jupiter.version` (`5.11.4`) | Import management | `trawler-parent` test configuration | Keeps JUnit Jupiter and Platform transitive artifacts on one exact version, including the Kotlin JUnit 5 bridge. | Build/test dependency management only; remove with JUnit support. EPL-2.0 and pinned. |
 | `org.jetbrains.kotlin:kotlin-test-junit5` | `kotlin.version` (`2.3.0`) | Test | All implementation modules | Kotlin assertions and JUnit 5 test integration. | Test source support only; remove with the repository test suite. Apache-2.0, maintained with Kotlin, no production API leakage. |
 | `org.junit.jupiter:junit-jupiter` | `junit.jupiter.version` (`5.11.4`) | Test | All implementation modules | JUnit 5 API, engine, and parameterized-test support. | Test runner only; remove with JUnit tests. EPL-2.0, pinned and isolated from runtime artifacts. |
 | `org.jetbrains.kotlinx:kotlinx-coroutines-test` | `coroutines.version` (`1.10.2`) | Test | All implementation modules | Virtual coroutine time, deterministic dispatchers, and structured test scopes. | Test-only coroutine scheduler; it does not replace production coroutines. Apache-2.0, removed if coroutine tests are removed. |
@@ -180,17 +187,17 @@ The resolved tree was verified with `mvn dependency:tree`. Maven plugin implemen
 |---|---|---|
 | `org.jetbrains.kotlin:kotlin-maven-plugin` | `${kotlin.version}` | Managed by `trawler-parent` and activated by the Kotlin modules; compiles Kotlin main and test sources. |
 | `org.apache.maven.plugins:maven-compiler-plugin` | `${maven.compiler.version}` | Managed by `trawler-parent` and activated by the Kotlin modules; enforces JVM release 17 for Java or mixed Kotlin/Java builds. |
-| `org.apache.maven.plugins:maven-surefire-plugin` | `${maven.surefire.version}` (`3.5.4`) | Runs unit classes matching `*Test` during `test`; JUnit Platform is explicit and empty test phases remain valid while feature tests are being added. |
+| `org.apache.maven.plugins:maven-surefire-plugin` | `${maven.surefire.version}` (`3.5.4`) | Runs unit classes matching `*Test` during `test` on the JUnit Platform; strict no-test and no-specified-test defaults are property-backed and can only be relaxed explicitly for focused reactor commands. |
 | `org.apache.maven.plugins:maven-failsafe-plugin` | `${maven.surefire.version}` (`3.5.4`) | Runs classes matching `*IT` during `integration-test` and verifies them during `verify`; `skipITs` is explicit and defaults to false. |
-| `org.jacoco:jacoco-maven-plugin` | `${jacoco.version}` (`0.8.13`) | Attaches the test agent, writes per-module HTML/XML reports at `verify`, and configures the reactor aggregate report. No coverage check gate is enabled yet. |
+| `org.jacoco:jacoco-maven-plugin` | `${jacoco.version}` (`0.8.15`) | Attaches the test agent, writes per-module HTML/XML reports at `verify`, and the last-in-reactor `trawler-coverage` module writes the reactor aggregate report. The pinned release supports the JDK 26 class files used by the host. No coverage check gate is enabled yet. |
 
 Maven Central is used through Maven's default repository configuration; the project does not declare a redundant repository entry.
 
 The test plugins are explicitly pinned because test discovery, the `test` versus
-`verify` split, and report generation are repository contracts. The core module
-now owns deterministic contract, scheduler/daemon, and JDK file-store `*IT` sources; the
-configured empty phases in web and PostgreSQL therefore pass, while a
-discovered failing test still fails the build. JaCoCo is report-only until the
+`verify` split, and report generation are repository contracts. Core owns
+deterministic contract, scheduler/daemon, and JDK file-store tests; web owns
+MockEngine and loopback CIO tests; PostgreSQL owns its Testcontainers suites.
+A discovered failing test fails the build. JaCoCo is report-only until the
 final audit phase enables hard thresholds.
 
 ## Removed from the unexplained baseline

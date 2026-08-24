@@ -158,7 +158,9 @@ without erasing the value type. This preserves the proof during execution.
 Phase 1 defines the contracts that Phase 2 executes:
 
 - `WorkQueueStore` bounds claim batches and returns lease-owned work;
-- `LeaseStore` requires the current fencing token on renewal and transitions;
+- `LeaseStore` requires the current fencing token on validation, renewal, and
+  transitions; validation does not extend the lease and is used before a
+  response reference can be attached to produced data;
 - `DiscoveryCheckpointStore` uses opaque codec/version metadata and
   compare-and-set revisions;
 - response storage is independent of operational state;

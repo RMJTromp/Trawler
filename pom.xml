@@ -28,7 +28,9 @@
         <junit.jupiter.version>5.11.4</junit.jupiter.version>
         <testcontainers.version>1.20.6</testcontainers.version>
         <maven.surefire.version>3.5.4</maven.surefire.version>
-        <jacoco.version>0.8.13</jacoco.version>
+        <surefire.failIfNoTests>true</surefire.failIfNoTests>
+        <surefire.failIfNoSpecifiedTests>true</surefire.failIfNoSpecifiedTests>
+        <jacoco.version>0.8.15</jacoco.version>
         <maven.compiler.version>3.11.0</maven.compiler.version>
         <skipITs>false</skipITs>
     </properties>
@@ -37,10 +39,18 @@
         <module>trawler-core</module>
         <module>trawler-web</module>
         <module>trawler-postgres</module>
+        <module>trawler-coverage</module>
     </modules>
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>org.junit</groupId>
+                <artifactId>junit-bom</artifactId>
+                <version>${junit.jupiter.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>com.rmjtromp.trawler</groupId>
                 <artifactId>trawler-core</artifactId>
@@ -155,7 +165,8 @@
                 <version>${maven.surefire.version}</version>
                 <configuration>
                     <argLine>@{argLine}</argLine>
-                    <failIfNoTests>false</failIfNoTests>
+                    <failIfNoTests>${surefire.failIfNoTests}</failIfNoTests>
+                    <failIfNoSpecifiedTests>${surefire.failIfNoSpecifiedTests}</failIfNoSpecifiedTests>
                     <useModulePath>false</useModulePath>
                     <includes>
                         <include>**/*Test.class</include>
@@ -210,21 +221,6 @@
                             <goal>report</goal>
                         </goals>
                         <configuration>
-                            <formats>
-                                <format>HTML</format>
-                                <format>XML</format>
-                            </formats>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>jacoco-report-aggregate</id>
-                        <phase>verify</phase>
-                        <inherited>false</inherited>
-                        <goals>
-                            <goal>report-aggregate</goal>
-                        </goals>
-                        <configuration>
-                            <outputDirectory>${project.build.directory}/site/jacoco-aggregate</outputDirectory>
                             <formats>
                                 <format>HTML</format>
                                 <format>XML</format>

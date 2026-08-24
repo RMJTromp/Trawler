@@ -2362,7 +2362,15 @@ private suspend fun <T : Any> processLeasedWork(
             ?: executeWorkRequest(pipeline, context, work.request, crawler)
         val currentResponse = executed.response
         pipeline.policies.pacing.observe(currentResponse, RequestContext(crawler, work.request))
-        val storedReference = executed.storedReference ?: storeResponse(context, currentResponse, crawler, work)
+        val storedReference = executed.storedReference ?: if (context.responseStore != null) {
+            ensureLeaseCurrent(context, work, leaseLost)
+            storeResponse(context, currentResponse, crawler, work).also {
+                ensureLeaseCurrent(context, work, leaseLost)
+            }
+        } else {
+            null
+        }
+        ensureLeaseCurrent(context, work, leaseLost)
         processTypedResponse(
             pipeline = pipeline,
             context = context,
@@ -2371,6 +2379,7 @@ private suspend fun <T : Any> processLeasedWork(
             crawler = crawler,
             work = work,
             storedReference = storedReference,
+            beforeResponseAttachment = { ensureLeaseCurrent(context, work, leaseLost) },
             accept = accept,
         )
         if (recordLeaseMutationFailure(
@@ -2502,6 +2511,7 @@ private suspend fun <T : Any> processTypedResponse(
     crawler: CrawlerContext,
     work: LeasedWork?,
     storedReference: com.rmjtromp.trawler.model.ResponseReference?,
+    beforeResponseAttachment: suspend () -> Unit = {},
     accept: suspend (CrawlRequest, CrawlResponse?) -> Unit = { _, _ -> },
 ) {
     try {
@@ -2564,6 +2574,7 @@ private suspend fun <T : Any> processTypedResponse(
                     )
                 }
             } else {
+                beforeResponseAttachment()
                 extraction.followUps.forEach { followUp -> accept(followUp, null) }
             }
             context.event(CrawlerEventType.EXTRACTION_COMPLETED, crawler, work)
@@ -2607,6 +2618,7 @@ private suspend fun <T : Any> processTypedResponse(
                     if (current == null) break
                 }
                 if (current != null) {
+                    beforeResponseAttachment()
                     if (!counters.reserveProducedValue(
                             context.configuration.runtimeOptions.maxProducedValuesPerRun,
                         )
@@ -2637,7 +2649,14 @@ private suspend fun <T : Any> processTypedResponse(
                     context.event(CrawlerEventType.VALUE_PRODUCED, crawler, work)
                 }
             }
-            deliverOutputs(pipeline, context, counters, produced, crawler)
+            deliverOutputs(
+                pipeline = pipeline,
+                context = context,
+                counters = counters,
+                produced = produced,
+                crawler = crawler,
+                beforeDelivery = beforeResponseAttachment,
+            )
         }
     }
 }
@@ -2651,12 +2670,32 @@ private class LeaseLostCancellationException(
     }
 }
 
+private suspend fun ensureLeaseCurrent(
+    context: PipelineExecutionContext,
+    work: LeasedWork,
+    leaseLost: AtomicBoolean,
+) {
+    when (val result = context.leaseStore.checkCurrent(work)) {
+        LeaseMutationResult.Accepted -> Unit
+        LeaseMutationResult.Stale -> {
+            leaseLost.set(true)
+            throw LeaseLostCancellationException("Lease was reclaimed before response attachment")
+        }
+
+        is LeaseMutationResult.Rejected -> {
+            leaseLost.set(true)
+            throw LeaseLostCancellationException("Lease validation was rejected: ${result.reason}")
+        }
+    }
+}
+
 private suspend fun <T : Any> deliverOutputs(
     pipeline: Pipeline<T>,
     context: TypedPipelineExecutionContext,
     counters: PipelineCounters,
     produced: List<Produced<T>>,
     crawler: CrawlerContext,
+    beforeDelivery: suspend () -> Unit = {},
 ) {
     if (produced.isEmpty()) return
     if (pipeline.outputs.isEmpty()) {
@@ -2665,6 +2704,7 @@ private suspend fun <T : Any> deliverOutputs(
     }
     pipeline.outputs.forEach { binding ->
         produced.chunked(context.configuration.runtimeOptions.maxOutputBatchSize).forEach { batch ->
+            beforeDelivery()
             val result = try {
                 binding.output.write(batch, OutputContext(crawler))
             } catch (cancellation: CancellationException) {

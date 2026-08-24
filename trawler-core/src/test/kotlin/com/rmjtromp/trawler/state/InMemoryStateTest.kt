@@ -108,12 +108,14 @@ class InMemoryStateTest {
         store.enqueue(CrawlRequest("resource"), RequestIdentity("resource"), context)
         val lease = store.claim("pipeline", 1, "owner", now).single()
 
+        assertEquals(LeaseMutationResult.Accepted, store.checkCurrent(lease))
         assertEquals(
             LeaseMutationResult.Rejected("Lease expiry must be in the future"),
             store.renew(lease, now),
         )
         assertEquals(LeaseMutationResult.Accepted, store.renew(lease, now.plusSeconds(2)))
         val stale = lease.copy(leaseToken = LeaseToken("stale-token"))
+        assertEquals(LeaseMutationResult.Stale, store.checkCurrent(stale))
         assertEquals(LeaseMutationResult.Stale, store.transition(stale, WorkTransition.Succeeded))
         assertEquals(LeaseMutationResult.Accepted, store.transition(lease, WorkTransition.Succeeded))
     }

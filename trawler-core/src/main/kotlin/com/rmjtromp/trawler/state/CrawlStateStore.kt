@@ -295,6 +295,9 @@ public sealed interface LeaseMutationResult {
  * according to the adapter's documented lease semantics.
  */
 public interface LeaseStore {
+    /** Checks the current fencing token without extending the lease. */
+    public suspend fun checkCurrent(work: LeasedWork): LeaseMutationResult
+
     /** Renews a lease only when the supplied token still owns the work item. */
     public suspend fun renew(work: LeasedWork, expiresAt: Instant): LeaseMutationResult
 

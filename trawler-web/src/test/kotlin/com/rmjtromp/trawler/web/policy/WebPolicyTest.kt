@@ -208,6 +208,18 @@ class WebPolicyTest {
     }
 
     @Test
+    fun `public safety configuration snapshots and protects allowed schemes`() {
+        val supplied = mutableSetOf("http")
+        val configuration = PublicWebSafetyConfig(allowedSchemes = supplied)
+        supplied += "ftp"
+
+        assertEquals(setOf("http"), configuration.allowedSchemes)
+        @Suppress("UNCHECKED_CAST")
+        val mutableView = configuration.allowedSchemes as MutableSet<String>
+        assertFailsWith<UnsupportedOperationException> { mutableView += "https" }
+    }
+
+    @Test
     fun `HTTP status and retry-after policies classify boundaries without retrying`() {
         val statuses = mapOf(
             null to "transport-unknown",

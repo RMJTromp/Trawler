@@ -347,7 +347,7 @@ public class PostgresCrawlStateStore(
     }
 
     private fun hasActiveResourceJob(connection: Connection, pipelineId: String, identity: String): Boolean =
-        connection.prepare(
+        connection.prepareBounded(
             """
             SELECT 1
             FROM ${table("resources")} r
@@ -356,6 +356,7 @@ public class PostgresCrawlStateStore(
               AND j.status IN ('QUEUED', 'LEASED', 'RETRY_WAIT')
             LIMIT 1
             """.trimIndent(),
+            configuration,
         ).use { statement ->
             statement.setString(1, pipelineId)
             statement.setString(2, identity)
@@ -872,9 +873,10 @@ public class PostgresCrawlStateStore(
                         )
                         val request = requestCodecs.decode(descriptor, requestPayload)
                         validateRequest(request)
+                        val jobPipelineId = result.getString("pipeline_id")
                         val token = nextLeaseToken(connection)
                         val expiresAt = now.plus(configuration.leaseDuration)
-                        updateLease(connection, jobId, token, ownerId, expiresAt, now)
+                        updateLease(connection, jobId, jobPipelineId, token, ownerId, expiresAt, now)
                         claimed += LeasedWork(
                             workItemId = jobId,
                             request = request,
@@ -882,7 +884,7 @@ public class PostgresCrawlStateStore(
                             leaseToken = token,
                             ownerId = ownerId,
                             expiresAt = expiresAt,
-                            pipelineId = result.getString("pipeline_id"),
+                            pipelineId = jobPipelineId,
                         )
                     }
                     claimed
@@ -919,6 +921,7 @@ public class PostgresCrawlStateStore(
     private fun updateLease(
         connection: Connection,
         jobId: WorkItemId,
+        pipelineId: String,
         token: com.rmjtromp.trawler.state.LeaseToken,
         ownerId: String,
         expiresAt: Instant,
@@ -929,7 +932,7 @@ public class PostgresCrawlStateStore(
             UPDATE ${table("jobs")}
             SET status = 'LEASED', lease_token = ?, lease_owner = ?,
                 lease_expires_at = ?, updated_at = ?
-            WHERE job_id = ? AND status IN ('QUEUED', 'RETRY_WAIT')
+            WHERE job_id = ? AND pipeline_id = ? AND status IN ('QUEUED', 'RETRY_WAIT')
             """.trimIndent(),
         ).use { statement ->
             statement.setString(1, token.value)
@@ -937,6 +940,7 @@ public class PostgresCrawlStateStore(
             statement.setTimestamp(3, timestamp(expiresAt))
             statement.setTimestamp(4, timestamp(now))
             statement.setString(5, jobId.value)
+            statement.setString(6, pipelineId)
             require(statement.executeUpdate() == 1) { "PostgreSQL claim lost a locked job row" }
         }
     }
@@ -964,7 +968,7 @@ public class PostgresCrawlStateStore(
                 SET lease_expires_at = ?, updated_at = ?
                 WHERE job_id = ? AND status = 'LEASED'
                   AND lease_token = ? AND lease_owner = ?
-                  AND lease_expires_at > ?
+                  AND lease_expires_at > ? AND pipeline_id = ?
                 """.trimIndent(),
             ).use { statement ->
                 statement.setTimestamp(1, timestamp(expiresAt))
@@ -973,9 +977,32 @@ public class PostgresCrawlStateStore(
                 statement.setString(4, work.leaseToken.value)
                 statement.setString(5, work.ownerId)
                 statement.setTimestamp(6, timestamp(now))
+                statement.setString(7, work.pipelineId)
                 statement.executeUpdate()
             }
             if (updated == 1) LeaseMutationResult.Accepted else LeaseMutationResult.Stale
+        }
+    }
+
+    override suspend fun checkCurrent(work: LeasedWork): LeaseMutationResult = resources.database { connection ->
+        val now = clock.now()
+        connection.prepareBounded(
+            """
+            SELECT 1
+            FROM ${table("jobs")}
+            WHERE job_id = ? AND pipeline_id = ? AND status = 'LEASED'
+            AND lease_token = ? AND lease_owner = ? AND lease_expires_at > ?
+            """.trimIndent(),
+            configuration,
+        ).use { statement ->
+            statement.setString(1, work.workItemId.value)
+            statement.setString(2, work.pipelineId)
+            statement.setString(3, work.leaseToken.value)
+            statement.setString(4, work.ownerId)
+            statement.setTimestamp(5, timestamp(now))
+            statement.executeQuery().use { result ->
+                if (result.next()) LeaseMutationResult.Accepted else LeaseMutationResult.Stale
+            }
         }
     }
 
@@ -991,7 +1018,7 @@ public class PostgresCrawlStateStore(
             FROM ${table("jobs")}
             WHERE job_id = ? AND status = 'LEASED'
               AND lease_token = ? AND lease_owner = ?
-              AND lease_expires_at > ?
+              AND lease_expires_at > ? AND pipeline_id = ?
             FOR UPDATE
             """.trimIndent(),
         ).use { statement ->
@@ -999,6 +1026,7 @@ public class PostgresCrawlStateStore(
             statement.setString(2, work.leaseToken.value)
             statement.setString(3, work.ownerId)
             statement.setTimestamp(4, timestamp(now))
+            statement.setString(5, work.pipelineId)
             statement.executeQuery().use { result ->
                 if (result.next()) {
                     TransitionRow(
@@ -1019,7 +1047,7 @@ public class PostgresCrawlStateStore(
                 finished_at = ?, reason = ?, updated_at = ?
             WHERE job_id = ? AND status = 'LEASED'
               AND lease_token = ? AND lease_owner = ?
-              AND lease_expires_at > ?
+              AND lease_expires_at > ? AND pipeline_id = ?
             """.trimIndent(),
         ).use { statement ->
             statement.setString(1, transitionData.status)
@@ -1043,6 +1071,7 @@ public class PostgresCrawlStateStore(
             statement.setString(7, work.leaseToken.value)
             statement.setString(8, work.ownerId)
             statement.setTimestamp(9, timestamp(now))
+            statement.setString(10, work.pipelineId)
             statement.executeUpdate()
         }
         if (updated != 1) return@transaction LeaseMutationResult.Stale
@@ -1052,13 +1081,15 @@ public class PostgresCrawlStateStore(
                 """
                 UPDATE ${table("attempts")}
                 SET outcome = ?, finished_at = ?, reason = ?
-                WHERE attempt_id = ? AND outcome IS NULL
+                WHERE attempt_id = ? AND job_id = ? AND pipeline_id = ? AND outcome IS NULL
                 """.trimIndent(),
             ).use { statement ->
                 statement.setString(1, transitionData.attemptOutcome.name)
                 statement.setTimestamp(2, timestamp(now))
                 statement.setString(3, transitionData.reason)
                 statement.setString(4, attemptId)
+                statement.setString(5, work.workItemId.value)
+                statement.setString(6, work.pipelineId)
                 statement.executeUpdate()
             }
         }
@@ -1117,6 +1148,7 @@ public class PostgresCrawlStateStore(
             WHERE job_id = ? AND status = 'LEASED'
               AND lease_token = ? AND lease_owner = ?
               AND lease_expires_at > ? AND active_attempt_id IS NULL
+              AND pipeline_id = ?
             RETURNING attempt_count
             """.trimIndent(),
         ).use { statement ->
@@ -1127,6 +1159,7 @@ public class PostgresCrawlStateStore(
             statement.setString(4, work.leaseToken.value)
             statement.setString(5, work.ownerId)
             statement.setTimestamp(6, timestamp(now))
+            statement.setString(7, work.pipelineId)
             statement.executeQuery().use { result ->
                 if (result.next()) result.getInt("attempt_count") else null
             }
@@ -1170,6 +1203,7 @@ public class PostgresCrawlStateStore(
             WHERE job_id = ? AND status = 'LEASED'
               AND lease_token = ? AND lease_owner = ?
               AND lease_expires_at > ? AND active_attempt_id = ?
+              AND pipeline_id = ?
             RETURNING job_id
             """.trimIndent(),
         ).use { statement ->
@@ -1179,6 +1213,7 @@ public class PostgresCrawlStateStore(
             statement.setString(4, work.ownerId)
             statement.setTimestamp(5, timestamp(now))
             statement.setString(6, attempt.id.value)
+            statement.setString(7, work.pipelineId)
             statement.executeQuery().use { result -> result.next() }
         }
         if (!updated) return@transaction LeaseMutationResult.Stale
@@ -1186,13 +1221,14 @@ public class PostgresCrawlStateStore(
             """
             UPDATE ${table("attempts")}
             SET outcome = ?, finished_at = ?
-            WHERE attempt_id = ? AND job_id = ? AND outcome IS NULL
+            WHERE attempt_id = ? AND job_id = ? AND pipeline_id = ? AND outcome IS NULL
             """.trimIndent(),
         ).use { statement ->
             statement.setString(1, outcome.name)
             statement.setTimestamp(2, timestamp(now))
             statement.setString(3, attempt.id.value)
             statement.setString(4, work.workItemId.value)
+            statement.setString(5, work.pipelineId)
             require(statement.executeUpdate() == 1) { "PostgreSQL attempt completion found no open attempt" }
         }
         LeaseMutationResult.Accepted
@@ -1354,6 +1390,8 @@ public class PostgresCrawlStateStore(
             statement.setInt(2, limit)
             statement.executeUpdate()
         }
+        val remaining = (limit - pipelineRows).coerceAtLeast(0)
+        if (remaining == 0) return pipelineRows
         val engineRows = connection.prepare(
             """
             WITH candidates AS (
@@ -1372,7 +1410,7 @@ public class PostgresCrawlStateStore(
             """.trimIndent(),
         ).use { statement ->
             statement.setTimestamp(1, timestamp(cutoff))
-            statement.setInt(2, limit)
+            statement.setInt(2, remaining)
             statement.executeUpdate()
         }
         return pipelineRows + engineRows
@@ -1618,7 +1656,7 @@ public class PostgresCrawlStateStore(
         val sql = buildString {
             append(
                 """
-                SELECT job_id, active_attempt_id
+                SELECT job_id, pipeline_id, active_attempt_id
                 FROM ${table("jobs")}
                 WHERE status = 'LEASED' AND lease_expires_at <= ?
                 """.trimIndent(),
@@ -1636,6 +1674,7 @@ public class PostgresCrawlStateStore(
                 while (result.next()) {
                     rows += ExpiredLease(
                         jobId = result.getString("job_id"),
+                        pipelineId = result.getString("pipeline_id"),
                         activeAttemptId = result.getString("active_attempt_id"),
                     )
                 }
@@ -1648,11 +1687,13 @@ public class PostgresCrawlStateStore(
                     """
                     UPDATE ${table("attempts")}
                     SET outcome = 'ABANDONED', finished_at = ?, reason = 'lease expired'
-                    WHERE attempt_id = ? AND outcome IS NULL
+                    WHERE attempt_id = ? AND job_id = ? AND pipeline_id = ? AND outcome IS NULL
                     """.trimIndent(),
                 ).use { statement ->
                     statement.setTimestamp(1, timestamp(now))
                     statement.setString(2, attemptId)
+                    statement.setString(3, lease.jobId)
+                    statement.setString(4, lease.pipelineId)
                     statement.executeUpdate()
                 }
             }
@@ -1661,12 +1702,13 @@ public class PostgresCrawlStateStore(
                 UPDATE ${table("jobs")}
                 SET status = 'QUEUED', lease_token = NULL, lease_owner = NULL,
                     lease_expires_at = NULL, active_attempt_id = NULL, updated_at = ?
-                WHERE job_id = ? AND status = 'LEASED' AND lease_expires_at <= ?
+                WHERE job_id = ? AND pipeline_id = ? AND status = 'LEASED' AND lease_expires_at <= ?
                 """.trimIndent(),
             ).use { statement ->
                 statement.setTimestamp(1, timestamp(now))
                 statement.setString(2, lease.jobId)
-                statement.setTimestamp(3, timestamp(now))
+                statement.setString(3, lease.pipelineId)
+                statement.setTimestamp(4, timestamp(now))
                 require(statement.executeUpdate() == 1) {
                     "PostgreSQL lease reclaim lost a locked job row"
                 }
@@ -1808,6 +1850,7 @@ public class PostgresCrawlStateStore(
 
     private data class ExpiredLease(
         val jobId: String,
+        val pipelineId: String,
         val activeAttemptId: String?,
     )
 

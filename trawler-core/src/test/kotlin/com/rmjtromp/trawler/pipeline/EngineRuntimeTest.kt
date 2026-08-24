@@ -477,6 +477,89 @@ class EngineRuntimeTest {
     }
 
     @Test
+    fun `response capture stops before storing when the lease is no longer current`() = runTest {
+        val clock = MutableClock(Instant.EPOCH)
+        val state = RecordingStateStore(clock)
+        state.checkCurrentBehavior = { work ->
+            state.delegate.transition(work, WorkTransition.Abandoned("lease reclaimed"))
+            LeaseMutationResult.Stale
+        }
+        val store = RecordingResponseStore { ResponseReference("must-not-attach") }
+        val output = RecordingOutput<String>("stale-output")
+        val pipeline = pipeline(
+            id = "stale-capture",
+            router = RecordingRouter("stale-router", RecordingTransport("stale-transport") { request -> response(request) }),
+            extractor = FunctionExtractor("stale-extractor") { _, _ -> ExtractionResult.Success(listOf("value")) },
+            clock = clock,
+            discoveries = listOf(SeedDiscovery(listOf(CrawlRequest("stale-capture")))),
+            outputs = listOf(output to OutputRequirement.REQUIRED),
+        )
+        val engine = engine(
+            listOf(pipeline),
+            state = state,
+            responseStore = store,
+            capturePolicy = CaptureResponsesWhenConfigured,
+            clock = clock,
+        )
+        try {
+            val result = engine.runOnce().pipelineRuns.single()
+            assertEquals(RunStatus.ABANDONED, result.status)
+            assertTrue(store.putResponses.isEmpty())
+            assertTrue(output.calls.isEmpty())
+            assertTrue(state.checkCurrentCalls >= 1)
+        } finally {
+            engine.shutdown()
+        }
+    }
+
+    @Test
+    fun `response capture does not attach a reference after a concurrent lease loss`() = runTest {
+        val clock = MutableClock(Instant.EPOCH)
+        val state = RecordingStateStore(clock)
+        var checks = 0
+        state.checkCurrentBehavior = { work ->
+            checks++
+            if (checks == 2) {
+                state.delegate.transition(work, WorkTransition.Abandoned("lease reclaimed"))
+                LeaseMutationResult.Stale
+            } else {
+                state.delegate.checkCurrent(work)
+            }
+        }
+        val store = RecordingResponseStore { ResponseReference("orphaned-response") }
+        val output = RecordingOutput<String>("post-capture-stale-output")
+        val pipeline = pipeline(
+            id = "post-capture-stale",
+            router = RecordingRouter(
+                "post-capture-stale-router",
+                RecordingTransport("post-capture-stale-transport") { request -> response(request) },
+            ),
+            extractor = FunctionExtractor("post-capture-stale-extractor") { _, _ ->
+                ExtractionResult.Success(listOf("value"))
+            },
+            clock = clock,
+            discoveries = listOf(SeedDiscovery(listOf(CrawlRequest("post-capture-stale")))),
+            outputs = listOf(output to OutputRequirement.REQUIRED),
+        )
+        val engine = engine(
+            listOf(pipeline),
+            state = state,
+            responseStore = store,
+            capturePolicy = CaptureResponsesWhenConfigured,
+            clock = clock,
+        )
+        try {
+            val result = engine.runOnce().pipelineRuns.single()
+            assertEquals(RunStatus.ABANDONED, result.status)
+            assertEquals(1, store.putResponses.size)
+            assertTrue(output.calls.isEmpty())
+            assertEquals(2, checks)
+        } finally {
+            engine.shutdown()
+        }
+    }
+
+    @Test
     fun `discovery uses the controlled executor, handles existing responses and follow-ups, deduplicates active work, and allows recrawl`() = runTest {
         val clock = MutableClock(Instant.EPOCH)
         val transport = RecordingTransport("discovery-transport") { request -> response(request, request.target) }
@@ -1820,7 +1903,9 @@ class EngineRuntimeTest {
         val transitions: MutableList<Pair<LeasedWork, WorkTransition>> = mutableListOf()
         val claimLimits: MutableList<Int> = mutableListOf()
         var renewCalls: Int = 0
+        var checkCurrentCalls: Int = 0
         var cancelQueuedCalls: Int = 0
+        var checkCurrentBehavior: (suspend (LeasedWork) -> LeaseMutationResult)? = null
         var renewBehavior: (suspend (LeasedWork, Instant) -> LeaseMutationResult)? = null
 
         override suspend fun enqueue(request: CrawlRequest, identity: RequestIdentity, context: CrawlerContext): EnqueueResult =
@@ -1839,6 +1924,11 @@ class EngineRuntimeTest {
         override suspend fun renew(work: LeasedWork, expiresAt: Instant): LeaseMutationResult {
             renewCalls++
             return renewBehavior?.invoke(work, expiresAt) ?: delegate.renew(work, expiresAt)
+        }
+
+        override suspend fun checkCurrent(work: LeasedWork): LeaseMutationResult {
+            checkCurrentCalls++
+            return checkCurrentBehavior?.invoke(work) ?: delegate.checkCurrent(work)
         }
 
         override suspend fun transition(work: LeasedWork, transition: WorkTransition): LeaseMutationResult {

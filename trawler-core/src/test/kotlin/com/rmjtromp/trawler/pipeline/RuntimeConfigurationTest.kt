@@ -4,6 +4,7 @@ import java.time.Duration
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -161,8 +162,9 @@ class RuntimeConfigurationTest {
         daemonIds.clear()
 
         assertEquals(setOf("one"), daemon.selectedPipelineIds)
-        assertTrue(daemon.selectedPipelineIds!!.contains("one"))
-        assertFalse(daemon.selectedPipelineIds!!.isEmpty())
+        val selectedPipelineIds = assertNotNull(daemon.selectedPipelineIds)
+        assertTrue(selectedPipelineIds.contains("one"))
+        assertFalse(selectedPipelineIds.isEmpty())
     }
 
     @Test

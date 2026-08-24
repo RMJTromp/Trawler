@@ -179,7 +179,8 @@ Trawler uses logical extension boundaries everywhere, but only a few cohesive ph
 trawler-parent                 build/version management only
 ├── trawler-core               engine + lightweight dependency-free built-ins
 ├── trawler-web                Ktor + cohesive public-web behavior
-└── trawler-postgres           PostgreSQL durable operational state
+├── trawler-postgres            PostgreSQL durable operational state
+└── trawler-coverage            non-published JaCoCo reactor aggregate
 
 planned when implemented:
 └── specialized artifacts      browser, FlareSolverr, OpenTelemetry, WARC
@@ -239,6 +240,8 @@ Trawler/
 │   ├── src/main/kotlin/       PostgreSQL state, response/output history, leases, attempts, codecs, and recurring state
 │   ├── src/main/resources/    adapter-owned Flyway migrations
 │   └── README.md              PostgreSQL-specific scope and build entry point
+├── trawler-coverage/
+│   └── pom.xml                non-published JaCoCo aggregate module
 ├── docs/
 │   ├── ARCHITECTURE.md        concise architecture contract
 │   ├── MODULES.md             Maven artifact ownership and split rules
@@ -277,8 +280,9 @@ Package and run all configured Maven lifecycle checks:
 mvn clean verify
 ```
 
-The Phase 6 reactor contains the core JAR, optional `trawler-web` JAR, and
-optional `trawler-postgres` JAR. Core contains typed contracts, immutable
+The Phase 6 reactor contains the core JAR, optional `trawler-web` JAR, optional
+`trawler-postgres` JAR, and the non-published `trawler-coverage` reporting
+module. Core contains typed contracts, immutable
 configuration, bounded runtime/scheduling, generic resumable-discovery
 coordination, optional response stores/replay, and typed file output; the web
 artifact owns Ktor/HTTP and bounded XML discovery; the PostgreSQL artifact owns

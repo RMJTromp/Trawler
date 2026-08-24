@@ -171,6 +171,14 @@ Response and output writes are separate transactions. PostgreSQL output
 acknowledgement means the adapter transaction committed. It does not mean an
 external consumer accepted the value.
 
+During ordinary leased work, core validates the fencing token immediately
+before response capture and again before response processing. A stale worker
+cannot attach the captured response reference to produced data or complete
+the work item. Response storage remains an independent adapter transaction,
+so a store write that races lease reclamation can leave an unreferenced raw
+response for the adapter's retention policy; core does not claim an atomic
+state/response transaction.
+
 The relevant acknowledgement/duplicate windows are explicit:
 
 | Output path | `Accepted` means | Uncertain or duplicate window |

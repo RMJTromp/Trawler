@@ -52,10 +52,13 @@ class ArchitectureGuardTest {
         val root = repositoryRoot()
         val webPom = Files.readString(root.resolve("trawler-web/pom.xml")).lowercase()
         val postgresPom = Files.readString(root.resolve("trawler-postgres/pom.xml")).lowercase()
+        val coveragePom = Files.readString(root.resolve("trawler-coverage/pom.xml")).lowercase()
         assertTrue(webPom.contains("trawler-core"))
         assertTrue(postgresPom.contains("trawler-core"))
         assertFalse(webPom.contains("trawler-postgres"), "web must not depend on PostgreSQL")
         assertFalse(postgresPom.contains("trawler-web"), "PostgreSQL must not depend on web")
+        assertTrue(coveragePom.contains("jacoco-maven-plugin"))
+        assertFalse(coveragePom.contains("<scope>compile</scope>"))
     }
 
     private fun repositoryRoot(): Path {

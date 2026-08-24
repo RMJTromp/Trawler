@@ -160,6 +160,14 @@ allowing a late state transition. All state mutations are fenced by the
 leased work token. Expiry requeues work and marks an active attempt abandoned;
 expiry itself is not a failed attempt.
 
+Before response capture and again before response processing, the runtime
+validates the lease token without extending the lease. A stale worker therefore
+cannot attach the captured response reference to produced data or emit its
+normal success transition. The raw-response store is a separate capability;
+if a caller-supplied store commits a bounded write concurrently with lease
+reclamation, that orphaned response remains subject to the store's retention
+policy because the core cannot roll back an independent adapter transaction.
+
 `SUCCEEDED`, `RETRY_WAIT`, `FAILED`, `SKIPPED`, `CANCELLED`, and `ABANDONED`
 remain distinct operational transitions. Cooperative cancellation transitions
 queued work to `CANCELLED` and asks active owners to perform their own fenced

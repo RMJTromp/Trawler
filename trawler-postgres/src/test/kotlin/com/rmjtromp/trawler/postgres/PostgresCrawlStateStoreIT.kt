@@ -236,6 +236,19 @@ class PostgresCrawlStateStoreIT {
             val id = accepted(firstStore.enqueue(request("lease"), RequestIdentity("lease"), context("p")))
             val first = firstStore.claim(1, "owner-a", NOW).single()
             assertEquals(0, jobAttemptCount(schema, id))
+            assertEquals(LeaseMutationResult.Accepted, firstStore.checkCurrent(first))
+            val foreignPipeline = first.copy(pipelineId = "other-pipeline")
+            assertEquals(
+                LeaseMutationResult.Stale,
+                firstStore.renew(foreignPipeline, first.expiresAt.plusSeconds(1)),
+            )
+            assertEquals(LeaseMutationResult.Stale, firstStore.checkCurrent(foreignPipeline))
+            assertEquals(AttemptStartResult.Stale, firstStore.beginAttempt(foreignPipeline, NOW))
+            assertEquals(
+                LeaseMutationResult.Stale,
+                firstStore.transition(foreignPipeline, WorkTransition.Succeeded),
+            )
+            assertEquals(0, jobAttemptCount(schema, id))
             assertEquals(LeaseMutationResult.Accepted, firstStore.renew(first, first.expiresAt.plusSeconds(1)))
             assertEquals(LeaseMutationResult.Rejected("Lease expiry must be in the future"), firstStore.renew(first, NOW))
 
@@ -677,7 +690,12 @@ class PostgresCrawlStateStoreIT {
             val secondRunPrune = store.prune(
                 CrawlStateRetentionRequest(RetentionCategory.RUN_HISTORY, old, 1),
             )
-            assertEquals(2, secondRunPrune.deleted)
+            assertEquals(1, secondRunPrune.deleted)
+            assertEquals("COMPLETED", runStatus(schema, "engine_runs", "retention-engine", "engine_run_id"))
+            val thirdRunPrune = store.prune(
+                CrawlStateRetentionRequest(RetentionCategory.RUN_HISTORY, old, 1),
+            )
+            assertEquals(1, thirdRunPrune.deleted)
             assertNull(runStatusOrNull(schema, "engine_runs", "retention-engine", "engine_run_id"))
         } finally {
             store.stop(stopContext())

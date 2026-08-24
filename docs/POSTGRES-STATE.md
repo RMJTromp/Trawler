@@ -229,7 +229,7 @@ recovered worker cannot overwrite an already terminal summary.
 |---|---|
 | Enqueue | Resource upsert, active-capacity check, and job insert commit together. The partial unique index is the final active-deduplication authority. |
 | Claim | Expired-lease reclaim and selected job claims commit together. `FOR UPDATE SKIP LOCKED` prevents two claimers from selecting the same row. |
-| Renew | One fenced update requires job ID, `LEASED` status, token, owner, and an unexpired lease. |
+| Lease validation / renew | A non-extending check and each renewal require job ID, pipeline ID, `LEASED` status, token, owner, and an unexpired lease. |
 | Begin attempt | One fenced job update increments `attempt_count` and sets `active_attempt_id`; the attempt row insert is in the same transaction. |
 | Finish attempt | One fenced job update clears the active attempt, followed by its outcome update in the same transaction. |
 | Transition | A fenced row lock captures the current attempt, then the status/lease transition, attempt cleanup, and resource cooldown/completion update commit together. |
@@ -239,7 +239,10 @@ recovered worker cannot overwrite an already terminal summary.
 | Checkpoint fallback | Core's non-atomic adapter fallback enqueues before checkpoint CAS and documents its replay window. |
 | Harvest/health/override state | Each revisioned mutation uses a row lock and compare-and-set; incompatible payloads are quarantined before reset. |
 
-All lease-owned mutations reject stale tokens with `LeaseMutationResult.Stale`.
+All lease-owned mutations and non-extending lease checks reject stale tokens
+with `LeaseMutationResult.Stale`. Run-history retention shares one deletion
+budget across pipeline and engine summaries, deleting eligible pipeline
+children before an unreferenced engine parent.
 The database sequence makes each newly issued token distinct within the
 configured state schema. A worker that loses its lease cannot finish an
 attempt, renew, or transition the reclaimed job.

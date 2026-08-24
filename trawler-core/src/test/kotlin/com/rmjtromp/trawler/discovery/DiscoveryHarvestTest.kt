@@ -16,6 +16,7 @@ import java.time.Instant
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
@@ -119,7 +120,7 @@ class DiscoveryHarvestTest {
         assertIs<CheckpointResolution.Quarantine>(wrongVersion)
         val wrongStrategy = codec.resolve(compatible.copy(strategyId = "other"))
         assertIs<CheckpointResolution.Quarantine>(wrongStrategy)
-        assertTrue((wrongVersion as CheckpointResolution.Quarantine).reason.contains("feed@2"))
+        assertTrue(assertIs<CheckpointResolution.Quarantine>(wrongVersion).reason.contains("feed@2"))
     }
 
     @Test
@@ -159,17 +160,16 @@ class DiscoveryHarvestTest {
         val now = Instant.parse("2026-01-01T00:00:00Z")
         val stateless = StatelessHarvestStrategy.complete(completionContext(now, HarvestRunOutcome.FAILED))
         assertIs<HarvestCompletion.Commit>(stateless)
-        assertEquals(null, (stateless as HarvestCompletion.Commit).state)
+        assertEquals(null, assertIs<HarvestCompletion.Commit>(stateless).state)
 
         val cursor = CursorHarvestStrategy().complete(completionContext(now))
-        assertIs<HarvestCompletion.Commit>(cursor)
-        assertEquals(null, (cursor as HarvestCompletion.Commit).state)
+        assertEquals(null, assertIs<HarvestCompletion.Commit>(cursor).state)
 
         val watermark = WatermarkHarvestStrategy(FixedOverlapBoundaryPolicy(Duration.ZERO))
         val watermarkCompletion = watermark.complete(completionContext(now))
         assertIs<HarvestCompletion.Commit>(watermarkCompletion)
-        val watermarkState = (watermarkCompletion as HarvestCompletion.Commit).state
-        assertEquals(false, watermarkState!!.historicalComplete)
+        val watermarkState = assertNotNull(assertIs<HarvestCompletion.Commit>(watermarkCompletion).state)
+        assertEquals(false, watermarkState.historicalComplete)
         assertEquals(watermark.id, watermarkState.strategyId)
         assertEquals(now, Instant.ofEpochMilli(ByteBuffer.wrap(watermarkState.payload.toByteArray()).long))
 
@@ -178,7 +178,7 @@ class DiscoveryHarvestTest {
         assertIs<HarvestCompletion.Commit>(historicalCompletion)
         assertEquals(
             true,
-            (historicalCompletion as HarvestCompletion.Commit).state!!.historicalComplete,
+            assertNotNull(assertIs<HarvestCompletion.Commit>(historicalCompletion).state).historicalComplete,
         )
     }
 
@@ -188,11 +188,12 @@ class DiscoveryHarvestTest {
         val previous = Instant.parse("2026-01-01T00:00:10Z")
         val overlap = FixedOverlapBoundaryPolicy(Duration.ofSeconds(3))
         val watermark = WatermarkHarvestStrategy(overlap)
+        val watermarkCodec = assertNotNull(watermark.stateCodec)
         val watermarkState = HarvestState(
             revision = 0,
             strategyId = watermark.id,
-            codecId = watermark.stateCodec!!.descriptor.id,
-            codecVersion = watermark.stateCodec!!.descriptor.version,
+            codecId = watermarkCodec.descriptor.id,
+            codecVersion = watermarkCodec.descriptor.version,
             payload = timestampPayload(previous),
             historicalComplete = false,
         )
@@ -206,11 +207,12 @@ class DiscoveryHarvestTest {
         assertEquals(now, watermarkWindow.endExclusive)
 
         val historical = HistoricalThenIncrementalHarvestStrategy(overlap)
+        val historicalCodec = assertNotNull(historical.stateCodec)
         val historicalIncomplete = HarvestState(
             revision = 0,
             strategyId = historical.id,
-            codecId = historical.stateCodec!!.descriptor.id,
-            codecVersion = historical.stateCodec!!.descriptor.version,
+            codecId = historicalCodec.descriptor.id,
+            codecVersion = historicalCodec.descriptor.version,
             payload = timestampPayload(previous),
             historicalComplete = false,
         )
@@ -225,7 +227,7 @@ class DiscoveryHarvestTest {
     @Test
     fun `harvest codecs require exact strategy and descriptor compatibility`() {
         val strategy = WatermarkHarvestStrategy(FixedOverlapBoundaryPolicy(Duration.ZERO))
-        val codec = strategy.stateCodec!!
+        val codec = assertNotNull(strategy.stateCodec)
         val compatible = HarvestState(
             revision = 0,
             strategyId = strategy.id,
