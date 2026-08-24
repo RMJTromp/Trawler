@@ -253,25 +253,27 @@ Direct runtime dependencies are limited to:
 Ktor brings its required client, HTTP, network/TLS, serialization plumbing,
 Kotlinx I/O, and SLF4J API transitives. No Ktor retry, content-negotiation,
 Jackson, Jsoup, parser, database, browser, or telemetry backend is declared.
-Ktor MockEngine is a test-scoped dependency owned only by this module's future
-tests. The XML discovery uses JDK StAX and gzip, so Phase 5 adds no runtime
-dependency. Those transitive APIs are not exposed through core and are not
-used to serialize produced values.
+Ktor MockEngine is a test-scoped dependency owned only by this module. CIO
+integration tests use a small JDK `ServerSocket` fixture bound to loopback and
+add no runtime dependency. The XML discovery uses JDK StAX and gzip, so Phase
+5 adds no runtime dependency. Those transitive APIs are not exposed through
+core and are not used to serialize produced values.
 
 ## Verification
 
 The implementation is verified with the reactor compile/verify commands, the
 module-focused build, Maven dependency-tree inspection, compiler/static source
-scans, and deterministic `WebPolicyTest`, `CookieSessionTest`, and
-`XmlDiscoveryTest` suites. These suites use injected clocks, virtual
-coroutine time, controlled DNS/robots/executor fakes, and no live websites.
-They cover IPv4/IPv6 public-web safety, redirect-history/header policy,
-origin concurrency and pacing, HTTP classification/retry hints, cookies,
-robots rules/cache/failure modes, and RSS/Atom/sitemap bounds, gzip, resume,
-ordering, cancellation, and DTD/entity rejection. Full Ktor transport
-request/response and redirect-chain tests remain planned; MockEngine ownership
-and the remaining matrix are recorded in [`TESTING.md`](TESTING.md) and
-[`TEST-MATRIX.md`](TEST-MATRIX.md).
+scans, deterministic `WebPolicyTest`, `CookieSessionTest`, `XmlDiscoveryTest`,
+`KtorTransportTest`, and `KtorTransportIT` suites. The transport unit tests use
+Ktor MockEngine; the CIO integration tests use only process-local loopback
+servers and no public website. Together they cover request/response metadata,
+body and header bounds, identity/gzip/deflate decoding, redirect method and
+credential rules, policy re-entry, permit cleanup, client ownership,
+non-2xx inspection, and deterministic cancellation/failure paths. Underlying
+CIO socket timeout enforcement is not tested with wall-clock timing; the
+deterministic timeout exception and outer cancellation paths are covered.
+MockEngine ownership and the remaining matrix are recorded in
+[`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md).
 
 ## Limitations
 

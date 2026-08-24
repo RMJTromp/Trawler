@@ -231,10 +231,10 @@ public class KtorTransport private constructor(
                 }
             }
             if (requestBody != null) {
+                setBody(requestBody.toByteArray())
                 if (request.headers[HttpHeaders.ContentType].isEmpty()) {
                     contentType(ContentType.Application.OctetStream)
                 }
-                setBody(requestBody.toByteArray())
             }
             timeout {
                 requestTimeoutMillis = configuration.requestTimeout.toMillis()

@@ -1,6 +1,6 @@
 # Testing
 
-> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, and web policy/session/discovery tests added; Ktor transport and PostgreSQL feature tests remain planned
+> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, and Ktor transport tests added; PostgreSQL feature tests remain planned
 >
 > **Owner:** `trawler-parent` build configuration, with test dependencies owned by each implementation module
 
@@ -27,9 +27,8 @@ checkpoint admission, and deterministic enqueue/claim/CAS races. Core's JDK
 file response/output adapters use per-test temporary directories and Failsafe
 `*IT` coverage for restart, corruption, retention, and filesystem repair
 paths. The contract-by-contract status is recorded in
-[`TEST-MATRIX.md`](TEST-MATRIX.md); Ktor transport, PostgreSQL, and
-adapter-level end-to-end rows remain explicit planned work until their owning
- tests exist.
+[`TEST-MATRIX.md`](TEST-MATRIX.md); PostgreSQL and database-backed adapter
+rows remain explicit planned work until their owning tests exist.
 
 ## Commands
 
@@ -90,7 +89,8 @@ classpath. Each module declares its test dependencies with Maven `test` scope:
 - `trawler-core`: JUnit 5, Kotlin test/JUnit integration, and
   `kotlinx-coroutines-test`.
 - `trawler-web`: the shared test support plus Ktor `MockEngine`; MockEngine is
-  not a core or PostgreSQL dependency.
+  not a core or PostgreSQL dependency. CIO integration tests use a small
+  process-local loopback `ServerSocket` fixture and add no runtime dependency.
 - `trawler-postgres`: the shared test support plus Testcontainers PostgreSQL
   and its JUnit 5 integration; Testcontainers is not a core or web dependency.
 
@@ -141,8 +141,9 @@ PostgreSQL container owned by `trawler-postgres` tests.
 
 ## Docker and PostgreSQL integration tests
 
-Unit tests and Ktor MockEngine tests do not require Docker. PostgreSQL `*IT`
-tests require a reachable Docker-compatible runtime supported by Testcontainers
+Unit tests, Ktor MockEngine tests, and the web module's loopback CIO `*IT`
+tests do not require Docker. PostgreSQL `*IT` tests require a reachable
+Docker-compatible runtime supported by Testcontainers
 and permission to start the pinned PostgreSQL image. No host PostgreSQL
 installation or shared database is used.
 
@@ -186,11 +187,13 @@ test remains failing until the smallest production correction is made.
 
 The core module contains deterministic `*Test.kt` coverage for contracts,
 the database-free engine runtime, scheduling, and daemon behavior, plus JDK
-file-store `*IT.kt` coverage. Web policy, session, and XML-discovery tests now
-cover the bounded network-safety, robots, pacing, cookies, and engine-executor
-contracts. Ktor transport redirect-chain execution, PostgreSQL/database,
-and adapter-level end-to-end rows remain untested. Coverage is report-only,
-so the matrix and the generated JaCoCo reports must be read together; a
-report is not a substitute for a contract assertion. Feature phases must add
-tests to the owning module and update the corresponding matrix row in the
-same change.
+file-store `*IT.kt` coverage. Web policy, session, XML-discovery, Ktor
+MockEngine, and loopback CIO tests cover the bounded web-adapter contracts
+without public-network calls. PostgreSQL/database behavior remains untested.
+The actual CIO timeout behavior of the underlying socket engine is also not
+directly exercised with wall-clock timing; deterministic timeout exceptions,
+outer cancellation, and reservation cleanup are covered. Coverage is
+report-only, so the matrix and the generated JaCoCo reports must be read
+together; a report is not a substitute for a contract assertion. Feature
+phases must add tests to the owning module and update the corresponding matrix
+row in the same change.
