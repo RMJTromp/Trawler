@@ -240,11 +240,14 @@ The implementation was checked with:
 
 The core contract phase adds deterministic tests for typed registration and
 pipeline values, configuration conflicts, value ownership, discovery/harvest
-helpers, codecs, response retention, and built-in policies. The repository
-test lifecycle and remaining planned owners are recorded in
-[`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md); full engine
-execution, concurrent pipeline isolation, lease fencing, checkpoint ordering,
-replay network isolation, and output duplicate windows remain untested.
+helpers, codecs, response retention, and built-in policies. The database-free
+runtime phase adds controlled-transport tests for full typed engine execution,
+concurrent pipeline isolation, lease loss, bounded admission,
+replay network isolation, output delivery, and lifecycle cleanup. The
+repository test lifecycle and remaining planned owners are recorded in
+[`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md); adapter
+transport behavior, durable persistence, and the explicitly listed
+cancellation gaps remain untested.
 
 ## Limitations
 

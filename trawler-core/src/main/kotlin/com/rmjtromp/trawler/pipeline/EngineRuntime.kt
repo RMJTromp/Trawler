@@ -2978,6 +2978,8 @@ private suspend fun storeResponse(
         reference
     } catch (cancelled: CancellationException) {
         throw cancelled
+    } catch (failure: StageFailure) {
+        throw failure
     } catch (error: Throwable) {
         context.event(CrawlerEventType.RESPONSE_STORE_FAILED, crawler, work, safeFailureName(error))
         throw StageFailure("response-store", error)

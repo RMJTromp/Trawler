@@ -261,7 +261,9 @@ durable audit log and has no implicit replay buffer.
 ## Failure, retry, and cancellation
 
 Thrown stage failures preserve their original cause in bounded run results.
-The failure classifier and retry policy decide whether work is failed,
+When required response capture declines, the runtime reports the existing
+capture stage failure without wrapping it again; policy and store causes are
+also preserved. The failure classifier and retry policy decide whether work is failed,
 retried immediately, retried at a later instant, or abandoned. Retries stay
 visible to attempt accounting; the transport and middleware layers do not
 hide retry loops. The ordinary built-in policy does not retry.
@@ -302,9 +304,13 @@ The Phase 2 implementation was verified with:
 The core contract phase adds deterministic tests for in-memory state
 transitions, checkpoint/harvest revisions and payload bounds, response
 retention, configuration, discovery, codecs, built-in policies, coroutine
-scheduling, and daemon selection/cancellation. Manual smoke sources were
-temporary verification inputs outside the repository and are not test
-fixtures. The plain `mvn clean compile` invocation was also attempted, but
+scheduling, daemon selection/cancellation, and controlled database-free
+engine execution. `EngineRuntimeTest.kt` covers typed pipeline isolation,
+middleware/routing/cache/capture, discovery and stage decisions, retries,
+lease loss, cancellation and timeout cleanup, runtime bounds and budgets,
+event privacy, lifecycle rollback, and network-free replay. Manual smoke
+sources were temporary verification inputs outside the repository and are
+not test fixtures. The plain `mvn clean compile` invocation was also attempted, but
 the container denied the Kotlin daemon's user-level temporary directory;
 disabling that daemon allowed the same reactor build to complete
 successfully.
