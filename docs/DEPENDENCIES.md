@@ -187,10 +187,11 @@ The resolved tree was verified with `mvn dependency:tree`. Maven plugin implemen
 Maven Central is used through Maven's default repository configuration; the project does not declare a redundant repository entry.
 
 The test plugins are explicitly pinned because test discovery, the `test` versus
-`verify` split, and report generation are repository contracts. The current
-infrastructure phase has no feature test sources; the configured empty phases
-therefore pass, while a discovered failing test still fails the build. JaCoCo
-is report-only until the final audit phase enables hard thresholds.
+`verify` split, and report generation are repository contracts. The core module
+now owns deterministic contract tests and JDK file-store `*IT` sources; the
+configured empty phases in web and PostgreSQL therefore pass, while a
+discovered failing test still fails the build. JaCoCo is report-only until the
+final audit phase enables hard thresholds.
 
 ## Removed from the unexplained baseline
 

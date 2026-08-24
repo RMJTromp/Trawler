@@ -1,6 +1,6 @@
 # Testing
 
-> **Status:** Infrastructure implemented; core contract tests added; adapter feature tests remain planned
+> **Status:** Infrastructure implemented; core contract and JDK file-adapter tests added; web/PostgreSQL feature tests remain planned
 >
 > **Owner:** `trawler-parent` build configuration, with test dependencies owned by each implementation module
 
@@ -13,12 +13,14 @@ handling consistent across the reactor.
 
 The core contract phases add deterministic unit tests for the value models,
 configuration DSL, codecs, discovery and harvest helpers, built-in policies,
-response stores, and in-memory state. In-memory state coverage includes
-terminal lifecycle transitions, lease fencing/reclaim, bounded retention,
-atomic checkpoint admission, and deterministic enqueue/claim/CAS races. The
-contract-by-contract status is recorded in [`TEST-MATRIX.md`](TEST-MATRIX.md);
-adapter and end-to-end rows remain explicit planned work until their owning
-tests exist.
+response stores, outputs, and in-memory state. In-memory state coverage
+includes terminal lifecycle transitions, lease fencing/reclaim, bounded
+retention, atomic checkpoint admission, and deterministic enqueue/claim/CAS
+races. Core's JDK file response/output adapters use per-test temporary
+directories and Failsafe `*IT` coverage for restart, corruption, retention,
+and filesystem repair paths. The contract-by-contract status is recorded in
+[`TEST-MATRIX.md`](TEST-MATRIX.md); web, PostgreSQL, and end-to-end rows remain
+explicit planned work until their owning tests exist.
 
 ## Commands
 
@@ -173,9 +175,10 @@ test remains failing until the smallest production correction is made.
 
 ## Current limitations
 
-The core module currently contains deterministic `*Test.kt` coverage but no
-`*IT.kt` tests. Adapter, database, transport, scheduler, lifecycle, and
-end-to-end engine rows remain untested. Coverage is report-only, so the matrix
-and the generated JaCoCo reports must be read together; a report is not a
-substitute for a contract assertion. Feature phases must add tests to the
-owning module and update the corresponding matrix row in the same change.
+The core module contains deterministic `*Test.kt` coverage and JDK file-store
+`*IT.kt` coverage. Web transport/discovery, PostgreSQL/database, scheduler,
+broader lifecycle, and end-to-end engine rows remain untested. Coverage is
+report-only, so the matrix and the generated JaCoCo reports must be read
+together; a report is not a substitute for a contract assertion. Feature
+phases must add tests to the owning module and update the corresponding matrix
+row in the same change.

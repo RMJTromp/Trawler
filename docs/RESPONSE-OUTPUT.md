@@ -273,10 +273,13 @@ Kotlin, and coroutines graph. See [`docs/DEPENDENCIES.md`](DEPENDENCIES.md).
 
 The core contract phase adds deterministic tests for response capture, cache
 age and ownership, in-memory/file response retention, replay selection, and
-core response/output codec registries. File output, PostgreSQL response and
-output, outbox, and durable retention coverage remains planned in
-[`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md). PostgreSQL
-behavioral checks requiring a Docker-compatible runtime remain an
+core response/output codec registries. `OutputsTest` covers callback, flow,
+batching, retry, and idempotency decorators. `FileResponseStoreIT` and
+`FileOutputIT` cover bounded temporary-directory persistence, restart and
+ring behavior, exact codec versions, replay/retention ordering, malformed
+frames, cancellation, forced acceptance, and append repair. PostgreSQL
+response/output, outbox, and durable cross-adapter retention coverage remains
+planned; behavioral checks requiring a Docker-compatible runtime remain an
 environment-dependent limitation.
 
 ## Limitations
