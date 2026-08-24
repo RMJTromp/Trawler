@@ -301,11 +301,12 @@ The Phase 2 implementation was verified with:
 
 The core contract phase adds deterministic tests for in-memory state
 transitions, checkpoint/harvest revisions and payload bounds, response
-retention, configuration, discovery, codecs, and built-in policies. Manual
-smoke sources were temporary verification inputs outside the repository and
-are not test fixtures. The plain `mvn clean compile` invocation was also
-attempted, but the container denied the Kotlin daemon's user-level temporary
-directory; disabling that daemon allowed the same reactor build to complete
+retention, configuration, discovery, codecs, built-in policies, coroutine
+scheduling, and daemon selection/cancellation. Manual smoke sources were
+temporary verification inputs outside the repository and are not test
+fixtures. The plain `mvn clean compile` invocation was also attempted, but
+the container denied the Kotlin daemon's user-level temporary directory;
+disabling that daemon allowed the same reactor build to complete
 successfully.
 
 ## Known limitations
