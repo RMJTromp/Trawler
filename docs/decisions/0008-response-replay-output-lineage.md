@@ -84,4 +84,4 @@ Costs and limitations:
 
 - [`docs/RESPONSE-OUTPUT.md`](../RESPONSE-OUTPUT.md)
 - [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)
-- [`plans/FINAL-PLAN.md`](../../plans/FINAL-PLAN.md), Phase 6
+- [`plans/FINAL-PLAN.md`](../../PLAN.md), Phase 6

@@ -15,7 +15,7 @@ This rule is not aspirational wording. It is the boundary against which every im
 Read these documents before changing the project:
 
 1. [AGENTS.md](AGENTS.md) — mandatory repository rules for humans and coding agents.
-2. [FINAL-PLAN.md](plans/FINAL-PLAN.md) — authoritative architecture and phased implementation plan.
+2. [FINAL-PLAN.md](PLAN.md) — authoritative architecture and phased implementation plan.
 3. [Architecture](docs/ARCHITECTURE.md) — concise architectural invariants and dependency boundaries.
 4. [Modules and artifacts](docs/MODULES.md) — concrete Maven packaging and bundling decisions.
 5. [Dependencies](docs/DEPENDENCIES.md) — approved dependencies, ownership, and admission rules.

@@ -2,7 +2,7 @@
 
 > **Status:** Normative summary
 >
-> **Full plan:** [`plans/FINAL-PLAN.md`](../plans/FINAL-PLAN.md)
+> **Full plan:** [`plans/FINAL-PLAN.md`](../PLAN.md)
 
 ## Governing rule
 

@@ -70,5 +70,5 @@ Costs and limitations:
 ## References
 
 - [`docs/RECURRING-DISCOVERY.md`](../RECURRING-DISCOVERY.md)
-- [`plans/FINAL-PLAN.md`](../../plans/FINAL-PLAN.md), Phase 5
+- [`plans/FINAL-PLAN.md`](../../PLAN.md), Phase 5
 - [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)

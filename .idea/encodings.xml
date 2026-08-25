@@ -6,6 +6,8 @@
     <file url="file://$PROJECT_DIR$/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/trawler-core/src/main/kotlin" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/trawler-core/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/trawler-coverage/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/trawler-coverage/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/trawler-postgres/src/main/kotlin" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/trawler-postgres/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/trawler-web/src/main/kotlin" charset="UTF-8" />

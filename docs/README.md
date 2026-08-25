@@ -21,7 +21,7 @@ This directory contains focused, normative project documentation.
 | [Resumable and recurring discovery](RECURRING-DISCOVERY.md) | Implemented Phase 5 checkpoints, harvest strategies, admission, XML discovery, and recurring state. | Discovery checkpoints, harvest completion, backlog admission, XML bounds, or recurring state changes. |
 | [Response storage, replay, outputs, and retention](RESPONSE-OUTPUT.md) | Implemented Phase 6 optional response stores, typed outputs, replay, PostgreSQL outbox, and independent retention. | Response storage, replay, output acknowledgement, outbox, lineage, or retention behavior changes. |
 
-The full architecture plan remains [FINAL-PLAN.md](../plans/FINAL-PLAN.md). Root repository rules remain [AGENTS.md](../AGENTS.md).
+The full architecture plan remains [FINAL-PLAN.md](../PLAN.md). Root repository rules remain [AGENTS.md](../AGENTS.md).
 
 ## Documentation status labels
 
