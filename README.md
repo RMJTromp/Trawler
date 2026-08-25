@@ -310,14 +310,7 @@ repository to your project:
 <repositories>
     <repository>
         <id>rmjtromp</id>
-        <name>RMJTromp Maven Snapshots</name>
         <url>https://repo.rmjtromp.com/snapshots</url>
-        <releases>
-            <enabled>false</enabled>
-        </releases>
-        <snapshots>
-            <enabled>true</enabled>
-        </snapshots>
     </repository>
 </repositories>
 ```
