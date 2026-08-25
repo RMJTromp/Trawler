@@ -320,7 +320,14 @@ mvn clean deploy
 
 The parent POM already pins and configures Surefire for unit tests and Failsafe
 for integration tests, so no additional Surefire plugin declaration is needed
-for publishing.
+for publishing. The PostgreSQL integration tests use Testcontainers and require
+a working Docker environment. When Docker is unavailable, the reactor can be
+published with the explicit fallback below, but that leaves the PostgreSQL
+integration tests unverified:
+
+```bash
+mvn clean deploy -DskipITs=true
+```
 
 ## Dependencies
 
