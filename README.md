@@ -2,7 +2,7 @@
 
 Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-> **Project status: Phase 6 implemented.** `trawler-core` provides the typed composition boundary, bounded database-free engine, opt-in scheduling, resumable checkpoint contracts, recurring harvest policies, backlog admission, optional pipeline health state, bounded in-memory/file response stores, replay, typed file output, and output decorators. The optional `trawler-web` artifact provides the Ktor/CIO transport, replaceable web policies, and bounded RSS/Atom/sitemap discovery. The optional `trawler-postgres` artifact provides durable operational state, fenced leases, versioned request codecs, durable checkpoints, harvest state, health, eligibility overrides, response history, typed output history, fenced outbox delivery, and independent retention. Later specialized adapters remain planned. Artifacts are unreleased.
+> **Project status:** The current `0.1.0-SNAPSHOT` build includes the `trawler-core`, `trawler-web`, and `trawler-postgres` artifacts. Core provides typed pipeline composition, bounded execution, scheduling, discovery coordination, response storage and replay, typed outputs, and replaceable policies. The optional web artifact provides Ktor/CIO transport, web policies, and bounded XML discovery. The optional PostgreSQL artifact provides durable operational state, fenced leases, recurring discovery state, response/output history, outbox delivery, and retention. The artifacts are implemented but unreleased; specialized integrations such as browser, FlareSolverr, telemetry, WARC/object storage, and external delivery/scheduling are not included in the current distribution.
 
 The governing product rule is:
 
@@ -15,7 +15,7 @@ This rule is not aspirational wording. It is the boundary against which every im
 Read these documents before changing the project:
 
 1. [AGENTS.md](AGENTS.md) — mandatory repository rules for humans and coding agents.
-2. [FINAL-PLAN.md](PLAN.md) — authoritative architecture and phased implementation plan.
+2. [PLAN.md](PLAN.md) — authoritative architecture and implementation plan.
 3. [Architecture](docs/ARCHITECTURE.md) — concise architectural invariants and dependency boundaries.
 4. [Modules and artifacts](docs/MODULES.md) — concrete Maven packaging and bundling decisions.
 5. [Dependencies](docs/DEPENDENCIES.md) — approved dependencies, ownership, and admission rules.
@@ -27,13 +27,14 @@ If documentation conflicts, use this precedence:
 ```text
 explicit user instruction
   > AGENTS.md
-  > plans/FINAL-PLAN.md
+  > PLAN.md
   > focused documents under docs/
   > README.md
   > historical discussion or examples
 ```
 
-The old design drafts were consolidated into `plans/FINAL-PLAN.md` and are not implementation authority.
+`PLAN.md` is the current architecture plan. Older design drafts are historical
+context and are not implementation authority.
 
 ## Product definition
 
@@ -160,7 +161,7 @@ The implemented optional `trawler-postgres` adapter provides:
   delivery, and independent retention; these are not part of operational state
   and do not define a universal extracted-record table.
 
-Future adapters may provide:
+Not included in the current distribution:
 
 - object-store or WARC response storage;
 - queue-backed outputs and external delivery integrations;
@@ -182,7 +183,7 @@ trawler-parent                 build/version management only
 ├── trawler-postgres            PostgreSQL durable operational state
 └── trawler-coverage            non-published JaCoCo reactor aggregate
 
-planned when implemented:
+not in the current reactor:
 └── specialized artifacts      browser, FlareSolverr, OpenTelemetry, WARC
 ```
 
@@ -217,9 +218,9 @@ A separate artifact is used when a capability introduces an external technology 
 
 ## Current repository state
 
-The repository contains the Phase 6 core contracts/runtime, optional Ktor web
-adapter, and optional durable PostgreSQL state/response/output adapter. Later
-specialized adapter phases remain unimplemented.
+The repository contains the implemented core contracts/runtime, optional Ktor
+web adapter, and optional durable PostgreSQL state/response/output adapter.
+Specialized integrations are intentionally outside the current reactor.
 
 ```text
 Trawler/
@@ -248,17 +249,18 @@ Trawler/
 │   ├── DEPENDENCIES.md        dependency inventory and admission policy
 │   ├── DEVELOPMENT.md         workflow and quality gates
 │   ├── DOCUMENTATION.md       documentation requirements
-│   ├── IN-MEMORY-ENGINE.md    Phase 2 runtime feature record
-│   ├── WEB-ADAPTER.md         Phase 3 web adapter feature record
-│   ├── POSTGRES-STATE.md      Phase 4 durable state feature record
-│   ├── RECURRING-DISCOVERY.md Phase 5 resumable/recurring discovery record
-│   ├── RESPONSE-OUTPUT.md     Phase 6 response/output/replay/retention record
+│   ├── IN-MEMORY-ENGINE.md    database-free runtime feature record
+│   ├── WEB-ADAPTER.md         web adapter feature record
+│   ├── POSTGRES-STATE.md      durable state feature record
+│   ├── RECURRING-DISCOVERY.md resumable/recurring discovery record
+│   ├── RESPONSE-OUTPUT.md     response/output/replay/retention record
 │   └── decisions/             architecture decision records
-└── plans/
-    └── FINAL-PLAN.md          authoritative implementation plan
+└── PLAN.md                    authoritative architecture plan
 ```
 
-Do not add empty production packages or placeholder classes merely to resemble the future layout. Structure should appear when a phase genuinely implements it.
+Do not add empty production packages or placeholder classes merely to resemble
+a future layout. Structure should appear when a capability has a real
+implementation.
 
 ## Build baseline
 
@@ -280,7 +282,7 @@ Package and run all configured Maven lifecycle checks:
 mvn clean verify
 ```
 
-The Phase 6 reactor contains the core JAR, optional `trawler-web` JAR, optional
+The reactor contains the core JAR, optional `trawler-web` JAR, optional
 `trawler-postgres` JAR, and the non-published `trawler-coverage` reporting
 module. Core contains typed contracts, immutable
 configuration, bounded runtime/scheduling, generic resumable-discovery
@@ -289,7 +291,7 @@ artifact owns Ktor/HTTP and bounded XML discovery; the PostgreSQL artifact owns
 JDBC, Hikari, Flyway, durable operational state, response/output history,
 fenced outbox delivery, leases, attempts, request codecs, checkpoints, harvest
 state, eligibility state, and independent retention. Do not add placeholder
-classes or resources to represent later phases.
+classes or resources for capabilities that are not implemented.
 
 There is currently no runnable main class; the engine and adapters are library
 APIs. See the [typed core contracts feature record](docs/TYPED-CORE-CONTRACTS.md),
@@ -297,7 +299,28 @@ the [in-memory engine feature record](docs/IN-MEMORY-ENGINE.md), the [web
 adapter feature record](docs/WEB-ADAPTER.md), the [PostgreSQL state feature
 record](docs/POSTGRES-STATE.md), the [recurring discovery feature record](docs/RECURRING-DISCOVERY.md),
 and the [response/output feature record](docs/RESPONSE-OUTPUT.md) for the
-implemented Phase 1 through Phase 6 boundaries.
+current module boundaries and implemented capabilities.
+
+## Publishing
+
+The parent POM configures Maven deployment for the published artifacts:
+
+- versions ending in `-SNAPSHOT` deploy to `https://repo.rmjtromp.com/snapshots`;
+- release versions deploy to `https://repo.rmjtromp.com/releases`.
+
+The current project version is `0.1.0-SNAPSHOT`, so the first deployment is a
+snapshot. Maven credentials must be configured for server ID `rmjtromp` in the
+user's Maven settings; credentials do not belong in the repository POM.
+
+Deploy the reactor with:
+
+```bash
+mvn clean deploy
+```
+
+The parent POM already pins and configures Surefire for unit tests and Failsafe
+for integration tests, so no additional Surefire plugin declaration is needed
+for publishing.
 
 ## Dependencies
 
@@ -392,7 +415,8 @@ Before changing anything:
 2. Inspect the current repository and preserve unrelated work.
 3. Identify the owning layer: core, policy, adapter, output, example, or documentation.
 4. State required capabilities and dependency impact.
-5. Confirm that the requested work belongs to the current delivery phase.
+5. Confirm that the requested work belongs to the current architecture and
+   repository scope.
 
 Before handing off:
 
@@ -406,7 +430,9 @@ Agents must work on the currently checked-out branch. They must not create branc
 
 ## Security and legal posture
 
-Trawler will provide optional safe public-web policies, but the host remains responsible for authorization, site terms, robots policy selection, privacy, credential handling, and data retention.
+Trawler provides optional safe public-web policies, but the host remains
+responsible for authorization, site terms, robots policy selection, privacy,
+credential handling, and data retention.
 
 Secrets must never be committed, logged, archived by default, placed in examples, or included in diagnostic events. Security behavior that appears safe but can be bypassed by redirects, DNS changes, plugin-owned clients, or middleware ordering is not acceptable.
 

@@ -42,6 +42,17 @@
         <module>trawler-coverage</module>
     </modules>
 
+    <distributionManagement>
+        <repository>
+            <id>rmjtromp</id>
+            <url>https://repo.rmjtromp.com/releases</url>
+        </repository>
+        <snapshotRepository>
+            <id>rmjtromp</id>
+            <url>https://repo.rmjtromp.com/snapshots</url>
+        </snapshotRepository>
+    </distributionManagement>
+
     <dependencyManagement>
         <dependencies>
             <dependency>
