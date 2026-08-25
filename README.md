@@ -301,33 +301,55 @@ record](docs/POSTGRES-STATE.md), the [recurring discovery feature record](docs/R
 and the [response/output feature record](docs/RESPONSE-OUTPUT.md) for the
 current module boundaries and implemented capabilities.
 
-## Publishing
+## Using Trawler with Maven
 
-The parent POM configures Maven deployment for the published artifacts:
+The current published version is `0.1.0-SNAPSHOT`. Add the RMJTromp Maven
+repository to your project:
 
-- versions ending in `-SNAPSHOT` deploy to `https://repo.rmjtromp.com/snapshots`;
-- release versions deploy to `https://repo.rmjtromp.com/releases`.
-
-The current project version is `0.1.0-SNAPSHOT`, so the first deployment is a
-snapshot. Maven credentials must be configured for server ID `rmjtromp` in the
-user's Maven settings; credentials do not belong in the repository POM.
-
-Deploy the reactor with:
-
-```bash
-mvn clean deploy
+```xml
+<repositories>
+    <repository>
+        <id>rmjtromp</id>
+        <name>RMJTromp Maven Snapshots</name>
+        <url>https://repo.rmjtromp.com/snapshots</url>
+        <releases>
+            <enabled>false</enabled>
+        </releases>
+        <snapshots>
+            <enabled>true</enabled>
+        </snapshots>
+    </repository>
+</repositories>
 ```
 
-The parent POM already pins and configures Surefire for unit tests and Failsafe
-for integration tests, so no additional Surefire plugin declaration is needed
-for publishing. The PostgreSQL integration tests use Testcontainers and require
-a working Docker environment. When Docker is unavailable, the reactor can be
-published with the explicit fallback below, but that leaves the PostgreSQL
-integration tests unverified:
+Add the core library:
 
-```bash
-mvn clean deploy -DskipITs=true
+```xml
+<dependency>
+    <groupId>com.rmjtromp.trawler</groupId>
+    <artifactId>trawler-core</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
 ```
+
+Add these optional adapters only when needed:
+
+```xml
+<dependency>
+    <groupId>com.rmjtromp.trawler</groupId>
+    <artifactId>trawler-web</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+
+<dependency>
+    <groupId>com.rmjtromp.trawler</groupId>
+    <artifactId>trawler-postgres</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+For a released version, use the same coordinates with the release version and
+`https://repo.rmjtromp.com/releases` instead of the snapshots repository.
 
 ## Dependencies
 
