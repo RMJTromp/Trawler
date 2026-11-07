@@ -9,7 +9,7 @@ in-memory execution, callback/flow outputs, optional response retention and
 replay, bounded JDK file response/output stores using caller codecs, and the
 opt-in coroutine scheduler. It remains unreleased.
 
-Read the root [`AGENTS.md`](../AGENTS.md), [`FINAL-PLAN.md`](../plans/FINAL-PLAN.md), and [`MODULES.md`](../docs/MODULES.md) before implementing here.
+Read the root [`AGENTS.md`](../AGENTS.md), [`PLAN.md`](../PLAN.md), and [`MODULES.md`](../docs/MODULES.md) before implementing here.
 
 ## Package namespace
 
@@ -95,7 +95,7 @@ From the repository root:
 mvn -pl trawler-core -am clean compile
 ```
 
-Feature tests are not included in this infrastructure phase. The shared
-test-scoped dependencies and lifecycle are documented in
+Core has 318 unit and 27 integration tests (`mvn -pl trawler-core verify`),
+gated at 95% line / 90% branch coverage. The shared test-scoped dependencies and lifecycle are documented in
 [`docs/TESTING.md`](../docs/TESTING.md); the contract coverage baseline is in
 [`docs/TEST-MATRIX.md`](../docs/TEST-MATRIX.md).

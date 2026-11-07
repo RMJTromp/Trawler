@@ -308,6 +308,218 @@ class FileResponseStoreIT {
         assertFailsWith<IllegalArgumentException> { ResponseRetentionRequest(Instant.EPOCH, 0) }
     }
 
+    @Test
+    fun `responses without engine metadata round trip through a reopened store`() = runTest {
+        val registry = ResponseCodecRegistry(listOf(BodyCodec()))
+        val writer = FileResponseStore(root = root, codecs = registry)
+        val reference = writer.put(
+            CrawlResponse(
+                request = CrawlRequest("anonymous"),
+                statusCode = 200,
+                headers = Headers.empty(),
+                body = ResponseBody.from(byteArrayOf(5)),
+                receivedAt = Instant.EPOCH,
+            ),
+        )!!
+        writer.close()
+
+        val reopened = FileResponseStore(root = root, codecs = registry)
+        try {
+            val stored = reopened.find(ResponseLookup.ByTarget("anonymous"))!!
+            assertEquals(reference, stored.reference)
+            assertNull(stored.pipelineId)
+            assertContentEquals(byteArrayOf(5), stored.response.body.toByteArray())
+            assertNull(reopened.find(ResponseLookup.ByRequestId("anonymous")))
+            assertNull(reopened.find(ResponseLookup.ByTarget("missing")))
+            assertNull(reopened.find(ResponseLookup.ByReference(com.rmjtromp.trawler.model.ResponseReference("missing"))))
+            assertTrue(reopened.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 5).isEmpty())
+            assertEquals(
+                listOf(reference),
+                reopened.replay(ResponseReplayQuery.ByReference(reference), limit = 5).map { it.reference },
+            )
+            assertTrue(reopened.replay(ResponseReplayQuery.ByReference(reference), limit = 5, pipelineId = "pipeline").isEmpty())
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    fun `query arguments and oversized targets are rejected without changing stored state`() = runTest {
+        val store = FileResponseStore(root = root, codecs = ResponseCodecRegistry(listOf(BodyCodec())))
+        try {
+            val reference = store.put(response("kept", byteArrayOf(1)))!!
+            assertEquals(
+                "Replay limit must be positive",
+                assertFailsWith<IllegalArgumentException> {
+                    store.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 0)
+                }.message,
+            )
+            assertEquals(
+                "Replay pipeline ID must not be blank",
+                assertFailsWith<IllegalArgumentException> {
+                    store.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 1, pipelineId = " ")
+                }.message,
+            )
+            assertEquals(
+                "Response request ID must not be blank",
+                assertFailsWith<IllegalArgumentException> { store.history(" ", 1) }.message,
+            )
+            assertEquals(
+                "History limit must be positive",
+                assertFailsWith<IllegalArgumentException> { store.history("request-kept", 0) }.message,
+            )
+
+            val oversizedTarget = "t".repeat(64 * 1_024 + 1)
+            val error = assertFailsWith<IllegalArgumentException> {
+                store.put(response(oversizedTarget, byteArrayOf(2), requestId = "long-target"))
+            }
+            assertEquals("File response metadata exceeds its bound", error.message)
+            assertTrue(Files.list(root).use { paths -> paths.noneMatch { it.fileName.toString().endsWith(".tmp") } })
+            assertEquals(
+                listOf(reference),
+                store.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 5).map { it.reference },
+            )
+            assertNotNull(store.put(response("t".repeat(64 * 1_024), byteArrayOf(3), requestId = "max-target")))
+            val oversizedRequestId = assertFailsWith<IllegalArgumentException> {
+                store.put(response("short", byteArrayOf(4), requestId = "r".repeat(4 * 1_024 + 1)))
+            }
+            assertEquals("File response metadata exceeds its bound", oversizedRequestId.message)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `reopened records with invalid headers slots and metadata lengths are rejected`() = runTest {
+        val registry = ResponseCodecRegistry(listOf(BodyCodec()))
+        val writer = FileResponseStore(root = root, codecs = registry, maxResponses = 2)
+        val reference = writer.put(response("target", byteArrayOf(1, 2, 3)))!!
+        writer.close()
+        val path = root.resolve("response-00000000.bin")
+        val valid = Files.readAllBytes(path)
+        val payloadSizeOffset = valid.size - 3 - 4
+
+        val cases = listOf(
+            "Unsupported file response record version" to valid.copyOf().also { ByteBuffer.wrap(it).putInt(4, 2) },
+            "File response slot header does not match its path" to
+                valid.copyOf().also { ByteBuffer.wrap(it).putInt(16, 1) },
+            "File response slot is outside the configured bound" to
+                valid.copyOf().also { ByteBuffer.wrap(it).putInt(16, 2) },
+            "File response slot is outside the configured bound" to
+                valid.copyOf().also { ByteBuffer.wrap(it).putInt(16, -1) },
+            "File response metadata exceeds its bound" to
+                valid.copyOf().also { ByteBuffer.wrap(it).putInt(20, 256) },
+            "File response metadata exceeds its bound" to
+                valid.copyOf().also { ByteBuffer.wrap(it).putInt(20, -1) },
+            "File response metadata exceeds its bound" to
+                valid.copyOf().also { ByteBuffer.wrap(it).putInt(32, -2) },
+            "File response metadata exceeds its bound" to
+                valid.copyOf().also { ByteBuffer.wrap(it).putInt(32, 4 * 1_024 + 1) },
+            "File response payload exceeds the configured bound" to
+                valid.copyOf().also { ByteBuffer.wrap(it).putInt(payloadSizeOffset, -1) },
+        )
+        for ((expected, bytes) in cases) {
+            Files.write(path, bytes, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+            val store = FileResponseStore(root = root, codecs = registry, maxResponses = 2)
+            try {
+                val error = assertFailsWith<IllegalArgumentException> {
+                    store.find(ResponseLookup.ByReference(reference))
+                }
+                assertEquals(expected, error.message)
+            } finally {
+                store.close()
+            }
+        }
+    }
+
+    @Test
+    fun `an exhausted persisted sequence fails visibly instead of wrapping references`() = runTest {
+        val registry = ResponseCodecRegistry(listOf(BodyCodec()))
+        val writer = FileResponseStore(root = root, codecs = registry)
+        writer.put(response("target", byteArrayOf(1)))
+        writer.close()
+        val path = root.resolve("response-00000000.bin")
+        Files.write(
+            path,
+            Files.readAllBytes(path).also { ByteBuffer.wrap(it).putLong(8, Long.MAX_VALUE) },
+            StandardOpenOption.WRITE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+        )
+
+        val reopened = FileResponseStore(root = root, codecs = registry)
+        try {
+            val stored = reopened.find(ResponseLookup.ByTarget("target"))!!
+            assertEquals("file-response-${Long.MAX_VALUE}", stored.reference.value)
+            val error = assertFailsWith<IllegalStateException> {
+                reopened.put(response("next", byteArrayOf(2)))
+            }
+            assertEquals("File response sequence exhausted", error.message)
+            assertNull(reopened.find(ResponseLookup.ByTarget("next")))
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    fun `slots replaced behind the store and oversized decoded bodies fail reads`() = runTest {
+        val registry = ResponseCodecRegistry(listOf(BodyCodec()))
+        val owner = FileResponseStore(root = root.resolve("owner"), codecs = registry)
+        val foreign = FileResponseStore(root = root.resolve("foreign"), codecs = registry)
+        try {
+            val reference = owner.put(response("owned", byteArrayOf(1)))!!
+            foreign.put(response("foreign", byteArrayOf(2)))
+            Files.copy(
+                foreign.root.resolve("response-00000000.bin"),
+                owner.root.resolve("response-00000000.bin"),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            )
+            val error = assertFailsWith<IllegalArgumentException> {
+                owner.find(ResponseLookup.ByReference(reference))
+            }
+            assertEquals("File response slot changed while it was being read", error.message)
+        } finally {
+            owner.close()
+            foreign.close()
+        }
+
+        val inflating = FileResponseStore(
+            root = root.resolve("inflating"),
+            codecs = ResponseCodecRegistry(listOf(InflatingCodec())),
+            maxBodyBytes = 2,
+        )
+        try {
+            val reference = inflating.put(response("inflated", byteArrayOf(1)))!!
+            val error = assertFailsWith<IllegalArgumentException> {
+                inflating.find(ResponseLookup.ByReference(reference))
+            }
+            assertEquals("Decoded file response exceeds the configured body bound", error.message)
+        } finally {
+            inflating.close()
+        }
+    }
+
+    @Test
+    fun `operations after close fail as closed-resource errors rather than cancellation`() = runTest {
+        val store = FileResponseStore(root = root, codecs = ResponseCodecRegistry(listOf(BodyCodec())))
+        val reference = store.put(response("kept", byteArrayOf(1)))!!
+        store.close()
+
+        val operations: List<suspend () -> Any?> = listOf(
+            { store.put(response("late", byteArrayOf(2))) },
+            { store.find(ResponseLookup.ByReference(reference)) },
+            { store.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 1) },
+            { store.history("request-kept", 1) },
+            { store.prune(ResponseRetentionRequest(Instant.EPOCH, 1)) },
+            { store.evictBefore(Instant.EPOCH) },
+        )
+        for (operation in operations) {
+            val error = assertFailsWith<IllegalStateException> { operation() }
+            assertFalse(error is CancellationException, "closed operation surfaced as $error")
+            assertEquals("File response store 'file-responses' is closed", error.message)
+        }
+        assertTrue(Files.exists(root.resolve("response-00000000.bin")))
+    }
+
     private suspend fun <T> reopenWith(
         path: Path,
         bytes: ByteArray,
@@ -388,6 +600,20 @@ class FileResponseStoreIT {
             require(payload.firstOrNull() == marker) { "Unexpected marker" }
             return response("decoded", payload.drop(1).toByteArray())
         }
+    }
+
+    private class InflatingCodec : ResponseCodec {
+        override val descriptor: ResponseCodecDescriptor = ResponseCodecDescriptor("inflating", 1)
+
+        override fun encode(response: CrawlResponse): ByteArray = response.body.toByteArray()
+
+        override fun decode(payload: ByteArray): CrawlResponse = CrawlResponse(
+            request = CrawlRequest("decoded"),
+            statusCode = 200,
+            headers = Headers.empty(),
+            body = ResponseBody.from(payload + byteArrayOf(9, 9)),
+            receivedAt = Instant.EPOCH,
+        )
     }
 
     private class ThrowingCodec(private val cause: IllegalStateException) : ResponseCodec {

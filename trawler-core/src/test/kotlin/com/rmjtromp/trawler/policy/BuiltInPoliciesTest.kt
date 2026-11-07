@@ -282,6 +282,80 @@ class BuiltInPoliciesTest {
         assertFailsWith<IllegalArgumentException> { QueueWatermark(1, -1) }
     }
 
+    @Test
+    fun `built-in policy constructors report their own validation messages`() {
+        listOf(
+            "Concurrency permit count must be positive" to { FixedConcurrencyPolicy(0) },
+            "Concurrency permit count must be positive" to { FixedConcurrencyPolicy(-1) },
+            "Concurrency policy ID must not be blank" to { FixedConcurrencyPolicy(1, id = " ") },
+            "Recrawl duration must not be negative" to { RecrawlAfter(Duration.ofNanos(-1)) },
+            "Recrawl policy ID must not be blank" to { RecrawlAfter(Duration.ZERO, id = "") },
+            "Circuit failure threshold must be positive" to { ConsecutiveFailureCircuitBreaker(0, Duration.ofSeconds(1)) },
+            "Circuit cooldown must be positive" to { ConsecutiveFailureCircuitBreaker(1, Duration.ZERO) },
+            "Circuit cooldown must be positive" to { ConsecutiveFailureCircuitBreaker(1, Duration.ofNanos(-1)) },
+            "Circuit policy ID must not be blank" to {
+                ConsecutiveFailureCircuitBreaker(1, Duration.ofSeconds(1), id = " ")
+            },
+            "Queue low watermark must not be negative" to { QueueWatermark(1, -1) },
+            "Queue high watermark must exceed low watermark" to { QueueWatermark(1, 1) },
+            "Queue watermark policy ID must not be blank" to { QueueWatermark(2, 1, id = "") },
+        ).forEach { (message, construct) ->
+            assertEquals(message, assertFailsWith<IllegalArgumentException> { construct() }.message)
+        }
+        assertEquals("concurrency-3", FixedConcurrencyPolicy(3).id)
+        assertEquals("recrawl-after-1500ms", RecrawlAfter(Duration.ofMillis(1500)).id)
+        assertEquals("consecutive-failure-circuit-2", ConsecutiveFailureCircuitBreaker(2, Duration.ofSeconds(1)).id)
+        assertEquals("queue-watermark-1-3", QueueWatermark(3, 1).id)
+    }
+
+    @Test
+    fun `recrawl-after uses whichever eligibility bound is present or later`() {
+        val context = requestContext()
+        val now = Instant.parse("2026-01-01T00:00:10Z")
+        val policy = RecrawlAfter(Duration.ofSeconds(10), MutableClock(now))
+
+        assertEquals(RecrawlDecision.Eligible, policy.decide(context.request, history(), context))
+        val nextOnly = policy.decide(context.request, history(nextEligibleAt = now.plusSeconds(1)), context)
+        assertEquals(RecrawlDecision.Deferred(now.plusSeconds(1), "Recrawl cooldown is active"), nextOnly)
+        assertEquals(
+            RecrawlDecision.Eligible,
+            policy.decide(context.request, history(nextEligibleAt = now), context),
+        )
+        val policyLater = policy.decide(
+            context.request,
+            history(lastCompletedAt = now.minusSeconds(5), nextEligibleAt = now.plusSeconds(1)),
+            context,
+        )
+        assertEquals(RecrawlDecision.Deferred(now.plusSeconds(5), "Recrawl cooldown is active"), policyLater)
+    }
+
+    @Test
+    fun `failure classifier falls back to a generic category for anonymous failures`() {
+        val context = FailureContext(requestContext().crawler, null)
+        val anonymous = object : RuntimeException("anonymous") {}
+        val classification = DefaultFailureClassifier.classify(anonymous, context)
+        assertEquals("failure", classification.category)
+        assertFalse(classification.retryableByDefault)
+    }
+
+    @Test
+    fun `disabled override without a reason uses the documented default reason`() {
+        val decision = AlwaysEligiblePipelinePolicy.decide(
+            eligibilityContext().copy(override = PipelineEligibilityOverride(enabled = false)),
+        )
+        assertEquals(PipelineEligibilityDecision.Disabled("Pipeline disabled by operator override"), decision)
+    }
+
+    @Test
+    fun `admission policies treat a missing checkpoint as fresh discovery`() {
+        assertIs<DiscoveryAdmissionDecision.Defer>(BacklogFirst.decide(admissionContext(1).copy(checkpoint = null)))
+        assertEquals(DiscoveryAdmissionDecision.Admit, BacklogFirst.decide(admissionContext(0).copy(checkpoint = null)))
+        val watermark = QueueWatermark(highWatermark = 2, lowWatermark = 0)
+        assertIs<DiscoveryAdmissionDecision.Defer>(watermark.decide(admissionContext(2).copy(checkpoint = null)))
+        assertIs<DiscoveryAdmissionDecision.Defer>(watermark.decide(admissionContext(1).copy(checkpoint = null)))
+        assertEquals(DiscoveryAdmissionDecision.Admit, watermark.decide(admissionContext(0).copy(checkpoint = null)))
+    }
+
     private fun requestContext(): RequestContext {
         val crawler = CrawlerContext("engine", "pipeline-run", "pipeline")
         return RequestContext(crawler, CrawlRequest("resource"))

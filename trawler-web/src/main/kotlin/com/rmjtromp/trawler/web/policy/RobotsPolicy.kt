@@ -8,6 +8,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.net.URI
+import java.net.URISyntaxException
 import java.time.Duration
 import java.time.Instant
 import java.util.Collections
@@ -134,7 +135,7 @@ public class CachingRobotsPolicy(
     override suspend fun evaluate(target: String, fetcher: RobotsFetcher): RobotsDecision {
         val uri = try {
             URI(target)
-        } catch (_: IllegalArgumentException) {
+        } catch (_: URISyntaxException) {
             return RobotsDecision.Disallowed("target-is-not-a-uri")
         }
         val origin = try {
@@ -232,17 +233,36 @@ private fun ParsedRule.matches(path: String): Boolean {
     if (pattern.isEmpty()) return true
     val endAnchored = pattern.endsWith('$')
     val body = if (endAnchored) pattern.dropLast(1) else pattern
-    val regex = buildString {
-        append('^')
-        body.forEach { character ->
-            when (character) {
-                '*' -> append(".*")
-                else -> append(Regex.escape(character.toString()))
-            }
+    return wildcardMatches(if (endAnchored) body else "$body*", path)
+}
+
+/**
+ * Whole-string match where `*` matches any run of characters and every other
+ * character is literal. It keeps only the most recent `*` as a backtracking
+ * point, so the worst case is O(pattern x path) rather than the exponential
+ * backtracking a generated regex allows for hostile patterns such as `*a*a*a*b`.
+ */
+private fun wildcardMatches(pattern: String, path: String): Boolean {
+    var patternIndex = 0
+    var pathIndex = 0
+    var starIndex = -1
+    var starPathIndex = 0
+    while (pathIndex < path.length) {
+        if (patternIndex < pattern.length && pattern[patternIndex] == '*') {
+            starIndex = patternIndex++
+            starPathIndex = pathIndex
+        } else if (patternIndex < pattern.length && pattern[patternIndex] == path[pathIndex]) {
+            patternIndex++
+            pathIndex++
+        } else if (starIndex >= 0) {
+            patternIndex = starIndex + 1
+            pathIndex = ++starPathIndex
+        } else {
+            return false
         }
-        if (endAnchored) append('$') else append(".*")
     }
-    return Regex(regex).matches(path)
+    while (patternIndex < pattern.length && pattern[patternIndex] == '*') patternIndex++
+    return patternIndex == pattern.length
 }
 
 private object RobotsParser {
@@ -308,9 +328,13 @@ private object RobotsParser {
 
     private fun parseDelay(value: String): Duration? = try {
         val seconds = value.toBigDecimal()
-        if (seconds.signum() < 0) null else Duration.ofMillis(
-            seconds.multiply(java.math.BigDecimal.valueOf(1_000L)).toLong(),
-        )
+        val millis = seconds.multiply(java.math.BigDecimal.valueOf(1_000L))
+        when {
+            seconds.signum() < 0 -> null
+            // Saturate instead of letting BigDecimal.toLong() keep only the low 64 bits.
+            millis > java.math.BigDecimal.valueOf(Long.MAX_VALUE) -> Duration.ofMillis(Long.MAX_VALUE)
+            else -> Duration.ofMillis(millis.toLong())
+        }
     } catch (_: ArithmeticException) {
         null
     } catch (_: NumberFormatException) {

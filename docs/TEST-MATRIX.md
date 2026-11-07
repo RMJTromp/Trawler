@@ -1,6 +1,6 @@
 # Test Matrix
 
-> **Status:** Core contract, database-free engine runtime, scheduler/daemon, JDK file-adapter, web policy/session/discovery, Ktor transport, cross-module typed composition, architecture guards, public DSL usage, and PostgreSQL adapter/E2E coverage added; PostgreSQL IT execution requires Docker
+> **Status:** Core contract, database-free engine runtime, scheduler/daemon, JDK file-adapter, web policy/session/discovery, Ktor transport, cross-module typed composition, architecture guards, public DSL usage, and PostgreSQL adapter/E2E coverage added; PostgreSQL IT execution requires Docker; `trawler-flaresolverr` transport, clearance, and engine end-to-end coverage added
 >
 > **Interpretation:** Scenario cells describe the assertions actually exercised when an owning test is present. `Not covered` is an explicit remaining risk; an owning test may cover only the listed slice of a broader contract.
 
@@ -54,6 +54,8 @@ explicit untested risk.
 | Eligibility, health, overrides, and circuit decisions are pipeline-local | Eligibility, health counters, overrides, and circuit decisions are observable | Exact expiry, failure threshold, cooldown, and CAS revision boundaries | Cancellation is classified; circuit/eligibility invalid inputs fail | Concurrent health CAS is not covered; pipeline-local in-memory state races are covered separately | Persisted circuit cooldown and health snapshots are exercised; durable recovery is not | `BuiltInPoliciesTest.kt`; `InMemoryStateLifecycleTest.kt` |
 | XML discoveries use engine transport, disable unsafe XML features, and obey bounds | RSS/Atom/sitemap links resolve and emit valid HTTP(S) requests through a recording `RequestExecutor` | Exact/above document, location, recursion, and item limits; gzip boundary; cursor resume | Malformed XML, bad link, DTD/entity, non-success status, and oversized input fail visibly | Cancellation reaches a suspended executor and stops traversal | Checkpoint candidates advance with emitted links; no hidden client is created | `XmlDiscoveryTest.kt` |
 | Ktor transport owns one configured client and adapts bounded responses to core | MockEngine and loopback CIO prove method/body, duplicate headers, default/overridden UA and encoding headers, content type, response metadata, identity/gzip/deflate decoding, inspectable non-2xx responses, and no hidden retry | Request/response body, header-count/name/value, target, method, compressed/decompressed, robots-body, timeout, lifecycle, and redirect/location limits are tested at exact and above-limit boundaries | Cause-preserving transport failures, unsupported/chained/malformed encodings, overflow, and invalid protocol metadata remain visible before forbidden calls | Cancellation and timeout release page/robots permits and pacing reservations; owned and caller-owned clients close according to `fromClient` ownership | No durable transport state is implied; loopback CIO restart is represented by a fresh per-test server/client | `KtorTransportTest.kt`; `KtorTransportIT.kt` |
+| `FlareSolverrTransport` executes GET/form POST through FlareSolverr with bounded, typed mapping | GET/POST encoding (`maxTimeout`, cookies, proxy, session, TTL) and solution → response/attribute mapping, plus the real CIO client against a loopback service | Request body/cookie/target bounds and response JSON/body/header/cookie/User-Agent bounds at exact and above-limit values; declared and chunked size limits | Every unsupported method/body/target, every protocol-error shape, `status: error`, refused connection, call timeout, initial and final URL destination rejection; no call or secret leakage on rejection | Call-permit bound, permit and session return on cancellation, exclusive session borrowing | Session pool created on start, rolled back on start failure and restartable, destroyed idempotently on stop with failure aggregation | `FlareSolverrTransportTest.kt`; `FlareSolverrClientTest.kt`; `FlareSolverrConfigurationTest.kt`; `FlareSolverrCioIT.kt` |
+| Challenge detection, single-flight resolution, clearance store, cookie/User-Agent reuse, classification, and visible retry | Cloudflare header/marker detection; one resolution reused for later requests; clearance merged with jar cookies per `KtorTransport` hop; engine run completes after `RetryNow` | Inspected-prefix boundary, store origin/cookie/header bounds, expiry and LRU eviction, cause-depth bound, challenge attempt bound | Resolver failure, cooldown fast-fail, origin mismatch, rejected clearance re-resolution, resolution failure deferred by `RetryAt`; classifier categories and delegation | 8 concurrent challenged requests → 1 resolution; leader cancellation hands off; marker expiry while queued; 3 concurrent engine work items → 1 resolution, 6 attempts | Clearance is process-local only; stop clears it; durable reuse is not claimed | `ChallengeClearanceTest.kt`; `ClearanceStoreTest.kt`; `ClearanceCookieSessionTest.kt`; `CloudflareChallengeDetectorTest.kt`; `FlareSolverrChallengeResolverTest.kt`; `FlareSolverrFailureClassifierTest.kt`; `ChallengeClearanceEngineTest.kt` |
 | Redirects re-enter scope, safety, authorization, pacing, concurrency, and credential rules on every hop | MockEngine and loopback CIO follow relative/absolute/fragment redirects and reach the final target; 301/302/303/307/308 method/body rules are exercised | Zero, exact, exhausted, overlong, missing, invalid, and looping Location/redirect boundaries are covered | Cross-origin credentials and entity/framing headers are stripped; rejected destinations and policy failures make no network call | Every hop re-evaluates destination, robots, concurrency, pacing, and cookies and releases reservations on failure/cancellation | Redirect history is bounded and request-local; no durable redirect audit is claimed | `KtorTransportTest.kt`; `KtorTransportIT.kt` |
 | Redirect history and header policies are bounded and strip cross-origin credentials/entity metadata | Immutable redirect history and safe same/cross-origin header selection | Zero, exact, and exhausted history; body-removal/content-header boundary | Invalid hop/blank reason and forbidden credential/entity headers are rejected or removed | Immutable snapshots prevent mutation across policy calls | History is request-local and non-durable | `WebPolicyTest.kt` |
 | Public-web safety validates schemes, resolved addresses, and rebinding/redirect targets | Allowed public HTTP(S) target passes, IPv6 host normalization reaches the resolver, and allowed-scheme configuration snapshots caller collections | Loopback/private/link-local/metadata/CGNAT/benchmark/multicast/IPv4-mapped and malformed-target boundaries | Any blocked DNS answer, empty answer, resolver failure, or syntactic rejection fails closed before DNS where applicable | Resolver cancellation propagates; policy has no hidden client | No durable safety cache is assumed | `WebPolicyTest.kt` |
@@ -83,31 +85,40 @@ The core unit slice intentionally leaves these behaviors for later phases:
   the active transport/run cancellation cases listed above.
 - Underlying CIO socket connect/request/socket timeout enforcement is not
   directly tested with wall-clock timing; deterministic timeout exceptions,
-  outer cancellation, and cleanup are covered. The PostgreSQL state IT source
-  is present and compiles, but this environment could not execute it because
-  the pinned Testcontainers docker-java client could not connect to the
-  Docker Desktop socket; the database-backed rows therefore remain runtime-
-  unverified here. Public-web DNS and live-server behavior remain outside the
+  outer cancellation, and cleanup are covered. Public-web DNS and live-server behavior remain outside the
   suite; all transport tests use MockEngine or loopback-only fixtures.
-- Durable PostgreSQL response/output/outbox behavior is represented by the
-  adapter IT suites and the durable four-adapter composition test, but requires a successful container run before it
-  can be claimed as executed in this environment. Multi-process checkpoint
-  fencing and concurrent health CAS remain outside this phase; PostgreSQL
-  state retention, health/eligibility CAS, run recovery, and state restart
-  scenarios are represented by `PostgresCrawlStateStoreIT.kt` and have the
-  same runtime dependency.
+- PostgreSQL multi-process checkpoint fencing and concurrent health CAS are
+  exercised through two store instances sharing one schema, not separate JVMs.
+- Defensive and race-only residue (for example `checkNotNull` between
+  lifecycle lines, `?: break` retention arms, sequence "no row" checks, and
+  compiler-generated default-argument or suspend-return branches) is left
+  uncovered rather than tested through reflection. Known dead code:
+  `AtomicAdmissionRejected` in `PostgresCrawlStateStore` and
+  `SqlArgument.TimestampValue` in `PostgresResponseStore`.
+- `JdkNetworkAddressResolver`'s answer-limit throw needs real multi-answer DNS
+  (the JDK resolver SPI requires Java 18; the baseline is 17).
+- A JDK file-adapter write racing `close()` may still surface
+  `CancellationException` instead of the documented closed-state error.
+- In-memory checkpoint/harvest quarantine records are write-only, so their
+  retention bound is not observable through the public API.
 
 These are explicit untested risks, not passing coverage claims. Future feature
 work must add tests to the owning module and update the corresponding row and
 this section in the same change.
 
-The final audit's report-only JaCoCo results from the latest unit-only
-`mvn -Dkotlin.compiler.daemon=false clean verify -DskipITs=true` run are also
-below the requested hard gates: core is 71.77% line / 57.45% branch, web is
-94.80% line / 80.95% branch, and PostgreSQL is 13.85% line / 30.61% branch
-because its database integration bodies could not start. The remaining
-uncovered substantive core branches are concentrated in `EngineRuntime`,
-`PipelineBuilder`, and the JDK file adapters; web branch gaps remain in
-transport construction and the
-public-safety/robots paths. No coverage exclusions or disabled tests were
-added, and JaCoCo hard gates therefore remain disabled.
+Coverage is enforced by `jacoco:check` at 95% line / 90% branch per
+implementation module; the measured values are recorded in
+[`TESTING.md`](TESTING.md#coverage-policy). New test owners added on
+2026-11-07: core `EngineRuntime*Test`, `ReplayContractsTest`,
+`PipelineConfiguration*Test`, `StateContractsTest`, `InMemoryStateBoundaryTest`,
+`PolicyContractsTest`, `ResponseStoreContractsTest`, `EventsTest`,
+`RetentionTest`; web `PublicWebSafetyPolicyTest` (every address class at its
+edges, per-flag, IPv4 embedded in IPv6 judged as IPv4, metadata compared as
+bytes), `KtorTransportSafetyTest` (every redirect hop re-checked by the real
+policy, credential stripping never restored), `RobotsPolicyTest` (linear
+wildcard matcher, capped crawl delays), `CookieSessionRulesTest` (RFC 6265
+domain/path/Secure/Max-Age rules, IP literals exact-match only),
+`XmlDiscoveryHostileInputTest` (DTD/XXE/billion-laughs/gzip-bomb/truncation),
+`HttpOutcomePolicyTest`, `WebTransportContractsTest`; PostgreSQL
+`PostgresCrawlStateStoreContractIT`, `PostgresAdapterContractIT`,
+`PostgresAdapterSupportTest`.

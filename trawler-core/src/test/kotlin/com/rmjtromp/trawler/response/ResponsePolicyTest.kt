@@ -14,6 +14,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
@@ -130,6 +131,65 @@ class ResponsePolicyTest {
         store.put(response("target", "pipeline", Instant.EPOCH))
         assertEquals("target", store.latestByRequestTarget(request("target", "pipeline"))!!.response.request.target)
         assertFailsWith<IllegalArgumentException> { ResponseRetentionRequest(Instant.EPOCH, 0) }
+    }
+
+    @Test
+    fun `latest target cache misses absent targets and treats unbounded or future responses as fresh`() = runTest {
+        val now = Instant.parse("2026-01-01T00:00:10Z")
+        val store = InMemoryResponseStore()
+        val context = ResponseCacheContext(crawler("pipeline-a"), request("target", "pipeline-a"), now)
+
+        assertEquals(ResponseCacheDecision.Miss, LatestTargetResponseCachePolicy().lookup(context, store))
+
+        store.put(response("target", "pipeline-a", Instant.EPOCH))
+        val unbounded = LatestTargetResponseCachePolicy()
+        assertEquals(null, unbounded.maxAge)
+        assertEquals("latest-target-cache", unbounded.id)
+        assertEquals(
+            setOf(ResponseStoreCapability.LOOKUP, ResponseStoreCapability.CACHE),
+            unbounded.requiredCapabilities,
+        )
+        val ancient = assertIs<ResponseCacheDecision.Hit>(unbounded.lookup(context, store))
+        assertEquals(Instant.EPOCH, ancient.stored.response.receivedAt)
+
+        val futureStore = InMemoryResponseStore()
+        futureStore.put(response("target", "pipeline-a", now.plusSeconds(60)))
+        val bounded = LatestTargetResponseCachePolicy(Duration.ofSeconds(1))
+        val future = assertIs<ResponseCacheDecision.Hit>(bounded.lookup(context, futureStore))
+        assertEquals(now.plusSeconds(60), future.stored.response.receivedAt)
+
+        val sameInstantStore = InMemoryResponseStore()
+        sameInstantStore.put(response("target", "pipeline-a", now))
+        assertIs<ResponseCacheDecision.Hit>(bounded.lookup(context, sameInstantStore))
+    }
+
+    @Test
+    fun `cache context factory copies the request context and samples the injected clock once`() {
+        val crawler = crawler("pipeline")
+        val request = request("target", "pipeline")
+        var reads = 0
+        val clock = object : com.rmjtromp.trawler.policy.Clock {
+            override fun now(): Instant {
+                reads++
+                return Instant.parse("2026-02-03T04:05:06Z")
+            }
+        }
+
+        val context = ResponseCacheContext(com.rmjtromp.trawler.model.RequestContext(crawler, request), clock)
+
+        assertSame(crawler, context.crawler)
+        assertSame(request, context.request)
+        assertEquals(Instant.parse("2026-02-03T04:05:06Z"), context.now)
+        assertEquals(1, reads)
+    }
+
+    @Test
+    fun `capture decisions carry optional reasons and preserve failure causes`() {
+        val cause = IllegalStateException("store unavailable")
+        assertEquals(null, ResponseCaptureDecision.Skip().reason)
+        assertSame(cause, ResponseCaptureDecision.Fail(cause).error)
+        assertEquals("cache-disabled", NoResponseCachePolicy.id)
+        assertTrue(NoResponseCachePolicy.requiredCapabilities.isEmpty())
     }
 
     private fun crawler(pipelineId: String): CrawlerContext =

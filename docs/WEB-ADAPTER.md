@@ -82,7 +82,7 @@ The public-web preset defaults are immutable and validated at construction:
 | Origin permits | 2 | Page and robots calls share the origin limit. |
 | Minimum origin delay | 250 ms | Merged with robots delay and `Retry-After`. |
 | Maximum pacing wait | 5 min | Longer server/robots waits fail visibly instead of being silently shortened. |
-| Cookie entries | 512 | In-memory, oldest-entry eviction. |
+| Cookie entries | 512 | In-memory, oldest-entry eviction. Domain matching follows RFC 6265: IP-literal hosts match only exactly, and `Max-Age` takes precedence over `Expires`. |
 | Diagnostic header redaction | Authorization, proxy authorization, cookies, common API/cloud credential headers | Diagnostic copies redact values; execution headers remain unchanged. |
 
 `KtorTransport.create(configuration, policies)` accepts a complete
@@ -117,7 +117,11 @@ that order. The reservation is acquired inside a `try` scope, and both are
 released in `finally` before the next redirect hop. Cancellation propagates
 through Ktor, body decoding, DNS lookup, robots evaluation, and pacing delay.
 The DNS implementation uses a bounded adapter-owned executor rather than a
-global dispatcher. The total request timeout also bounds a redirect chain.
+global dispatcher. The total request timeout also bounds a redirect chain;
+when it expires the transport throws Ktor's `HttpRequestTimeoutException`
+(classified `http-request-timeout`, retryable) rather than coroutine
+cancellation, so an expired chain is a visible, retryable failure. Caller
+cancellation still propagates as cancellation.
 
 ## Redirect security and ordering
 
@@ -192,8 +196,11 @@ no serializer or domain model is introduced.
 `PublicWebSafetyPolicy` permits configured schemes (HTTP and HTTPS by
 default), rejects URI user-info, resolves every hostname, and blocks loopback,
 private/site-local, link-local, multicast, unspecified, carrier-grade NAT,
-benchmark, and known metadata addresses by default. The check runs again for
-every redirect destination.
+benchmark, and known metadata addresses by default. IPv4 addresses embedded in
+IPv6 (mapped `::ffff:0:0/96`, compatible `::/96`, and NAT64 `64:ff9b::/96`) are
+judged by the full IPv4 rules, and IPv6 metadata addresses are compared as raw
+bytes. An oversized DNS answer is classified `web-dns-answer-limit` and is not
+retried. The check runs again for every redirect destination.
 
 This is a fail-closed policy check, not a claim of perfect DNS-to-socket
 pinning: the CIO connection may resolve after the policy lookup, so a strict
@@ -212,7 +219,11 @@ retention/redaction policy before emitting or persisting diagnostics.
 
 `CachingRobotsPolicy` keeps a bounded, process-local origin cache with an
 injected clock, TTL, crawler identity, and bounded robots body. The parser
-supports user-agent groups, allow/disallow prefix/glob rules, and crawl-delay.
+supports user-agent groups, allow/disallow prefix/glob rules (matched with a
+linear wildcard matcher, so hostile patterns cannot cause regex backtracking),
+and crawl-delay. Crawl delays too large to represent are capped and handled by
+the long-delay behavior, never shortened; a target that is not a valid URI is
+disallowed without a fetch.
 The selected user-agent group is evaluated before the page path. A 404 is an
 empty rules document; other unavailable statuses or fetch failures follow the
 configured `ALLOW`, `DENY`, or `FAIL` behavior. The default is `DENY`.
@@ -263,8 +274,11 @@ core and are not used to serialize produced values.
 
 The implementation is verified with the reactor compile/verify commands, the
 module-focused build, Maven dependency-tree inspection, compiler/static source
-scans, deterministic `WebPolicyTest`, `CookieSessionTest`, `XmlDiscoveryTest`,
-`KtorTransportTest`, and `KtorTransportIT` suites. The transport unit tests use
+scans, deterministic `WebPolicyTest`, `PublicWebSafetyPolicyTest`,
+`RobotsPolicyTest`, `HttpOutcomePolicyTest`, `CookieSessionTest`,
+`CookieSessionRulesTest`, `XmlDiscoveryTest`, `XmlDiscoveryHostileInputTest`,
+`KtorTransportTest`, `KtorTransportSafetyTest`, `WebTransportContractsTest`,
+and `KtorTransportIT` suites, gated at 95% line / 90% branch coverage. The transport unit tests use
 Ktor MockEngine; the CIO integration tests use only process-local loopback
 servers and no public website. Together they cover request/response metadata,
 body and header bounds, identity/gzip/deflate decoding, redirect method and
@@ -280,7 +294,14 @@ MockEngine ownership and the remaining matrix are recorded in
 - The module is process-local; cookie and robots caches are not durable.
 - The public-web DNS check is revalidation, not address-pinned socket policy.
 - The robots parser is intentionally bounded and does not claim complete
-  support for every robots extension.
+  support for every robots extension. Non-404 4xx robots responses are treated
+  as unavailable (default `DENY`), which is stricter than RFC 9309, and robots
+  redirects are not followed.
+- The public-web safety preset does not block 240.0.0.0/4, 192.0.0.0/24,
+  TEST-NET ranges, 6to4 (`2002::/16`), Teredo, or `64:ff9b:1::/48`; supply a
+  stricter `WebDestinationPolicy` if those must be rejected.
+- The cookie session has no public-suffix list, stores `Secure` cookies set
+  over plain HTTP, and ignores the dashed `01-Jan-1970` date format.
 - Redirect history is retained during one request and exposed as bounded
   metadata, not as a durable audit record.
 - HTML parsing, response replay, and site-specific recurring strategies remain

@@ -2,7 +2,7 @@
 
 > **Status:** Normative summary
 >
-> **Full plan:** [`plans/FINAL-PLAN.md`](../PLAN.md)
+> **Full plan:** [`PLAN.md`](../PLAN.md)
 
 ## Governing rule
 
@@ -86,7 +86,7 @@ model.
 | Encoding or persistence of `T` | Output adapter/host; caller-owned codecs remain outside core's data model |
 | Scheduling triggers | Host or selected scheduling extension; a replaceable coroutine implementation ships in core |
 | Robots/public-network safety | Optional web policy adapter |
-| Anti-bot/browser behavior | Optional adapter |
+| Anti-bot/browser behavior | Optional adapter; `trawler-flaresolverr` supplies FlareSolverr transport and adapter-local challenge clearance |
 | Logging/metrics/tracing export | Observer adapter |
 
 ## Dependency rule

@@ -76,7 +76,7 @@ class PostgresCrawlStateStoreIT {
         store.start(startContext())
         store.start(startContext())
 
-        assertEquals(2, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_schema_history\""))
+        assertEquals(2, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_schema_history\" WHERE type = 'SQL'"))
         assertEquals(
             2,
             scalarInt(
@@ -602,7 +602,7 @@ class PostgresCrawlStateStoreIT {
             val old = NOW.minusSeconds(20)
             store.startEngineRun("engine-old", old, "manual")
             store.startPipelineRun("engine-old", "pipeline-old-1", "p", old)
-            store.startPipelineRun("engine-old", "pipeline-old-2", "p", old)
+            store.startPipelineRun("engine-old", "pipeline-old-2", "p2", old)
             store.startEngineRun("engine-new", NOW.minusSeconds(10), null)
             store.startPipelineRun("engine-new", "pipeline-new", "p", NOW.minusSeconds(10))
 
@@ -677,7 +677,7 @@ class PostgresCrawlStateStoreIT {
             val runTime = old.minusSeconds(1)
             store.startEngineRun("retention-engine", runTime, null)
             store.startPipelineRun("retention-engine", "retention-pipeline-1", "p", runTime)
-            store.startPipelineRun("retention-engine", "retention-pipeline-2", "p", runTime)
+            store.startPipelineRun("retention-engine", "retention-pipeline-2", "p2", runTime)
             store.completePipelineRun("retention-pipeline-1", DurableRunStatus.COMPLETED, runTime.plusMillis(1), 0)
             store.completePipelineRun("retention-pipeline-2", DurableRunStatus.COMPLETED, runTime.plusMillis(2), 0)
             store.completeEngineRun("retention-engine", DurableRunStatus.COMPLETED, runTime.plusMillis(3), 0)
@@ -884,7 +884,7 @@ class PostgresCrawlStateStoreIT {
             connection.createStatement().use { statement ->
                 statement.execute(
                     """
-                    CREATE OR REPLACE FUNCTION \"$schema\".fail_attempt_insert()
+                    CREATE OR REPLACE FUNCTION "$schema".fail_attempt_insert()
                     RETURNS trigger LANGUAGE plpgsql AS
                     'BEGIN RAISE EXCEPTION ''intentional attempt insert failure''; END;'
                     """.trimIndent(),

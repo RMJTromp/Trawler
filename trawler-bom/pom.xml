@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        Deliberately does not inherit trawler-parent: importing this BOM must
+        align only Trawler artifacts, never the parent's third-party or test
+        dependency management. Keep this version equal to the reactor version.
+    -->
+    <groupId>com.rmjtromp.trawler</groupId>
+    <artifactId>trawler-bom</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>Trawler BOM</name>
+    <description>Version alignment for published Trawler runtime artifacts. Contains no code or third-party versions.</description>
+
+    <distributionManagement>
+        <repository>
+            <id>rmjtromp</id>
+            <url>https://repo.rmjtromp.com/releases</url>
+        </repository>
+        <snapshotRepository>
+            <id>rmjtromp</id>
+            <url>https://repo.rmjtromp.com/snapshots</url>
+        </snapshotRepository>
+    </distributionManagement>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.rmjtromp.trawler</groupId>
+                <artifactId>trawler-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.rmjtromp.trawler</groupId>
+                <artifactId>trawler-web</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.rmjtromp.trawler</groupId>
+                <artifactId>trawler-postgres</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.rmjtromp.trawler</groupId>
+                <artifactId>trawler-flaresolverr</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>

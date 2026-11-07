@@ -40,7 +40,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
-import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 import kotlinx.coroutines.CompletableDeferred
@@ -65,7 +64,7 @@ class PostgresOutboxOutputIT {
         assertEquals(OutputResult.Accepted(0), outbox.write(emptyList(), outputContext()))
         outbox.start(startContext())
         outbox.start(startContext())
-        assertEquals(1, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_outbox_schema_history\""))
+        assertEquals(1, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_outbox_schema_history\" WHERE type = 'SQL'"))
         assertTrue(tableExists(schema, "outbox_entries"))
         assertFalse(tableExists(schema, "response_records"))
         assertFalse(tableExists(schema, "output_entries"))
@@ -116,7 +115,7 @@ class PostgresOutboxOutputIT {
             val failedBatch = assertIs<OutputResult.Failed>(
                 outbox.write(listOf(produced(1), produced(2)), outputContext()),
             )
-            assertSame(cause, failedBatch.error)
+            assertOriginalFailure(cause, failedBatch.error)
             assertEquals(0, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"outbox_entries\""))
         } finally {
             outbox.stop(stopContext())
@@ -143,7 +142,7 @@ class PostgresOutboxOutputIT {
         val schema = nextSchema()
         var observedStatus: String? = null
         val delegate = RecordingDelegate { _, _ ->
-            observedStatus = scalarString(schema, "SELECT status FROM \"$schema\".\"outbox_entries\" WHERE outbox_id = 'postgres-outbox-1'")
+            if (observedStatus == null) observedStatus = scalarString(schema, "SELECT status FROM \"$schema\".\"outbox_entries\" WHERE outbox_id = 'postgres-outbox-1'")
             OutputResult.Accepted(1)
         }
         val outbox = outbox(
@@ -300,11 +299,19 @@ class PostgresOutboxOutputIT {
             id = "it-outbox",
             delegate = delegate,
             codec = IntCodec(descriptor = OutputCodecDescriptor("new-codec", 2)),
+            config = configuration(schema, maxOutboxAttempts = 2),
         )
         reader.start(startContext())
         try {
-            val summary = reader.deliverPending("owner", 1, BASE)
-            assertEquals(1, summary.failed)
+            val first = reader.deliverPending("owner", 1, BASE)
+            assertEquals(1, first.retried)
+            assertEquals(0, first.failed)
+            val pending = outboxRows(schema, "it-outbox").single()
+            assertEquals("PENDING", pending.status)
+            assertTrue(pending.lastError.orEmpty().contains("IllegalStateException"))
+
+            val second = reader.deliverPending("owner", 1, BASE)
+            assertEquals(1, second.failed)
             assertEquals(0, delegate.calls)
             assertEquals("FAILED", outboxRows(schema, "it-outbox").single().status)
             assertTrue(outboxRows(schema, "it-outbox").single().lastError.orEmpty().contains("IllegalStateException"))
@@ -384,8 +391,7 @@ class PostgresOutboxOutputIT {
                 OutputRetentionRequest(RetentionCategory.OUTBOX_HISTORY, BASE.plusSeconds(1), 99),
             )
             assertEquals(1, firstPrune.deleted)
-            assertEquals(1, outboxRows(retentionSchema, "it-outbox").size)
-            assertEquals("FAILED", outboxRows(retentionSchema, "it-outbox").single().status)
+            assertEquals(listOf("FAILED", "PENDING"), outboxRows(retentionSchema, "it-outbox").map { it.status })
             assertEquals(0, scalarInt(retentionSchema, "SELECT COUNT(*) FROM \"$retentionSchema\".\"response_lineage\""))
             assertEquals(1, responseStore.prune(ResponseRetentionRequest(BASE.plusSeconds(1), 99)).deleted)
 

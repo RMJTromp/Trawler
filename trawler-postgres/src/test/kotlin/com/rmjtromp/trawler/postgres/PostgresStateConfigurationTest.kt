@@ -5,6 +5,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -77,10 +78,11 @@ class PostgresStateConfigurationTest {
             { PostgresStateConfiguration("jdbc:postgresql://db", schema = "bad-name") },
             { PostgresStateConfiguration("jdbc:postgresql://db", schema = "a".repeat(64)) },
             { PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 0) },
+            { PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 1, databaseDispatcherParallelism = 1) },
             { PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 2, minimumIdle = -1) },
             { PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 2, minimumIdle = 3) },
-            { PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 1, databaseDispatcherParallelism = 0) },
-            { PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 1, databaseDispatcherParallelism = 2) },
+            { PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 2, databaseDispatcherParallelism = 0) },
+            { PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 2, databaseDispatcherParallelism = 3) },
             { PostgresStateConfiguration("jdbc:postgresql://db", connectionTimeout = Duration.ZERO) },
             { PostgresStateConfiguration("jdbc:postgresql://db", connectionTimeout = Duration.ofMillis(249)) },
             { PostgresStateConfiguration("jdbc:postgresql://db", statementTimeout = Duration.ZERO) },
@@ -156,6 +158,89 @@ class PostgresStateConfigurationTest {
             id = "é",
             configuration = configuration(maxIdentifierBytes = 2),
         )
+    }
+
+    @Test
+    fun `configuration without credentials keeps no password and renders an unredacted plain URL`() {
+        val configuration = PostgresStateConfiguration(jdbcUrl = "jdbc:postgresql://db/trawler", schema = "_private")
+
+        assertNull(configuration.username)
+        assertNull(configuration.passwordCopy())
+        assertEquals("_private", configuration.schema)
+        assertEquals(
+            "PostgresStateConfiguration(jdbcUrl=jdbc:postgresql://db/trawler, schema=_private, " +
+                "maximumPoolSize=8, databaseDispatcherParallelism=8)",
+            configuration.toString(),
+        )
+    }
+
+    @Test
+    fun `pool and dispatcher bounds report which limit was violated`() {
+        val cases = listOf<Pair<String, () -> Unit>>(
+            "PostgreSQL pool size must be at least 2 for Flyway migration" to {
+                PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 1, databaseDispatcherParallelism = 1)
+            },
+            "PostgreSQL dispatcher parallelism must be positive" to {
+                PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 2, databaseDispatcherParallelism = 0)
+            },
+            "PostgreSQL dispatcher parallelism must not exceed the pool size" to {
+                PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 2, databaseDispatcherParallelism = 3)
+            },
+        )
+        cases.forEach { (message, candidate) ->
+            assertEquals(message, assertFailsWith<IllegalArgumentException> { candidate() }.message)
+        }
+        assertEquals(1, PostgresStateConfiguration("jdbc:postgresql://db", maximumPoolSize = 2, databaseDispatcherParallelism = 1).databaseDispatcherParallelism)
+    }
+
+    @Test
+    fun `every timeout rejects negative durations with its own message`() {
+        val negative = Duration.ofMillis(-1)
+        val cases = mapOf<String, () -> Unit>(
+            "connection timeout" to { PostgresStateConfiguration("jdbc:postgresql://db", connectionTimeout = negative) },
+            "statement timeout" to { PostgresStateConfiguration("jdbc:postgresql://db", statementTimeout = negative) },
+            "lease duration" to { PostgresStateConfiguration("jdbc:postgresql://db", leaseDuration = negative) },
+            "stale-run threshold" to { PostgresStateConfiguration("jdbc:postgresql://db", staleRunAfter = negative) },
+            "outbox lease duration" to {
+                PostgresStateConfiguration("jdbc:postgresql://db", outboxLeaseDuration = negative)
+            },
+        )
+        cases.forEach { (label, candidate) ->
+            val error = assertFailsWith<IllegalArgumentException> { candidate() }
+            assertEquals("PostgreSQL $label must be positive", error.message)
+        }
+    }
+
+    @Test
+    fun `request codec limits and descriptors validate every field at the exact boundary`() {
+        val exact = PostgresRequestCodecLimits(
+            maxEncodedBytes = 1,
+            maxBodyBytes = 0,
+            maxHeaderCount = 0,
+            maxAttributeCount = 0,
+            maxHeaderNameBytes = 1,
+            maxHeaderValueBytes = 0,
+            maxTargetBytes = 1,
+            maxAttributeNameBytes = 1,
+            maxAttributeValueBytes = 0,
+        )
+        val invalid = listOf<Pair<String, () -> Unit>>(
+            "Encoded request bound must be positive" to { exact.copy(maxEncodedBytes = 0) },
+            "Request body bound must not be negative" to { exact.copy(maxBodyBytes = -1) },
+            "Header count bound must not be negative" to { exact.copy(maxHeaderCount = -1) },
+            "Attribute count bound must not be negative" to { exact.copy(maxAttributeCount = -1) },
+            "Header name bound must be positive" to { exact.copy(maxHeaderNameBytes = 0) },
+            "Header value bound must not be negative" to { exact.copy(maxHeaderValueBytes = -1) },
+            "Request target bound must be positive" to { exact.copy(maxTargetBytes = 0) },
+            "Attribute name bound must be positive" to { exact.copy(maxAttributeNameBytes = 0) },
+            "Attribute value bound must not be negative" to { exact.copy(maxAttributeValueBytes = -1) },
+            "PostgreSQL codec ID must not be blank" to { PostgresCodecDescriptor(" ", 0) },
+            "PostgreSQL codec version must not be negative" to { PostgresCodecDescriptor("codec", -1) },
+        )
+        invalid.forEach { (message, candidate) ->
+            assertEquals(message, assertFailsWith<IllegalArgumentException> { candidate() }.message)
+        }
+        assertEquals(0, PostgresCodecDescriptor("codec", 0).version)
     }
 
     private fun configuration(

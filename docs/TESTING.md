@@ -1,6 +1,6 @@
 # Testing
 
-> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, Ktor transport, cross-module typed composition, architecture/API guards, and PostgreSQL state/response/output/outbox tests added; PostgreSQL execution requires Docker
+> **Status:** Infrastructure implemented; core contract, scheduler/daemon, JDK file-adapter, database-free runtime, web policy/session/discovery, Ktor transport, cross-module typed composition, architecture/API guards, and PostgreSQL state/response/output/outbox tests added; FlareSolverr transport/challenge-clearance unit, engine end-to-end, and loopback CIO tests added; all suites pass with JaCoCo gates of 95% line / 90% branch per module; PostgreSQL execution requires Docker
 >
 > **Owner:** `trawler-parent` build configuration and the non-published
 > `trawler-coverage` aggregate module, with test dependencies owned by each
@@ -58,7 +58,11 @@ Run a focused module and its reactor dependencies:
 mvn -pl trawler-core -am clean verify
 mvn -pl trawler-web -am clean verify
 mvn -pl trawler-postgres -am clean verify
+mvn -pl trawler-flaresolverr -am clean verify
 ```
+
+`trawler-flaresolverr` can also be verified alone against installed core/web
+snapshots with `mvn -B -pl trawler-flaresolverr verify`.
 
 Run one unit class or one integration class:
 
@@ -102,6 +106,13 @@ classpath. Each module declares its test dependencies with Maven `test` scope:
   process-local loopback `ServerSocket` fixture and add no runtime dependency.
 - `trawler-postgres`: the shared test support plus Testcontainers PostgreSQL
   and its JUnit 5 integration; Testcontainers is not a core or web dependency.
+- `trawler-flaresolverr`: the shared test support plus Ktor `MockEngine`
+  (the same test-scoped artifact `trawler-web` uses). A module-internal
+  `HttpClientEngine` seam lets unit tests drive the FlareSolverr client through
+  MockEngine; `FlareSolverrCioIT` exercises the real CIO client against a
+  process-local loopback JDK `HttpServer`. No Docker, live FlareSolverr, or
+  public network is used. The parent's strict `surefire.failIfNoTests`
+  default applies.
 
 Tests use handwritten fakes by default. No mocking framework is selected.
 The full version, license, transitive-dependency, and removal inventory is in
@@ -186,16 +197,37 @@ the final aggregate owned by `trawler-coverage`:
 - `jacoco:prepare-agent` instruments unit and integration test JVMs;
 - `jacoco:report` writes per-module HTML and XML reports under
   `<module>/target/site/jacoco/`;
-- `trawler-coverage` runs `jacoco:report-aggregate` after core, web, and
-  PostgreSQL, writing the reactor report under
+- `jacoco:check` fails `verify` for any implementation module below 95% line
+  or 90% branch coverage (`jacoco.line.minimum` / `jacoco.branch.minimum` in
+  the parent POM). Build-only `pom` modules have no execution data and are
+  skipped;
+- `trawler-coverage` runs `jacoco:report-aggregate` after every
+  implementation module, writing the reactor report under
   `target/site/jacoco-aggregate/`.
 
-Coverage remains report-only because the final audit did not meet the required
-95% line and 90% branch thresholds: PostgreSQL integration execution is blocked
-by the unavailable Docker/Testcontainers runtime, and the generated module
-reports still contain uncovered substantive branches. No `jacoco:check` goal
-is enabled until those thresholds are honestly met. A report with no executed
-feature tests is not evidence of behavioral coverage.
+Coverage measured by the 2026-11-07 `mvn clean verify` run (Docker Engine 29,
+Testcontainers 1.21.4, `postgres:16.4-alpine`):
+
+| Module | Line | Branch | Tests (unit + IT) |
+|---|---:|---:|---:|
+| `trawler-core` | 98.9% | 95.9% | 318 + 27 |
+| `trawler-web` | 99.7% | 96.3% | 146 + 3 |
+| `trawler-postgres` | 99.2% | 95.1% | 20 + 69 |
+| `trawler-flaresolverr` | 99.5% | 96.1% | 105 + 6 |
+
+The remaining uncovered code is defensive, race-only, or compiler-generated;
+each module's residue is listed in [`TEST-MATRIX.md`](TEST-MATRIX.md). The
+gate is a floor, not a goal: a coverage number never replaces a contract
+assertion, and thresholds must not be lowered or code excluded to pass it.
+
+The PostgreSQL integration suite first executed on 2026-11-07; earlier runs
+could not reach Docker because Testcontainers 1.20.x negotiates Docker API 1.32,
+which Docker Engine 29 rejects. PostgreSQL fault injection uses triggers, an
+external transaction holding row locks (observed through `pg_stat_activity`
+rather than sleeps), and `pg_terminate_backend`. Exception-identity
+assertions use `assertOriginalFailure`, because kotlinx.coroutines stack-trace
+recovery (enabled with JVM assertions) may surface a copy whose cause is the
+original exception.
 
 ## Failure handling
 
@@ -213,6 +245,18 @@ test remains failing until the smallest production correction is made.
 
 ## Current limitations
 
+`trawler-flaresolverr` tests run against a controlled fake FlareSolverr
+(MockEngine for unit tests, a loopback JDK `HttpServer` for `*IT`), so they
+prove adapter behavior against the documented v3 protocol shape, not against
+a real FlareSolverr release; compatibility with FlareSolverr 3.5.2 rests on
+the manual smoke check in [`FLARESOLVERR.md`](FLARESOLVERR.md#verification).
+The single-flight and leader-cancellation tests use virtual time; the
+engine end-to-end test synchronizes its first round with a barrier and is
+bounded by a timeout guard. The CIO call-timeout IT intentionally waits for
+the minimum one-second FlareSolverr `maxTimeout`. Not covered: real browser
+behavior, FlareSolverr session TTL rotation, and the CIO engine's own socket
+timeout tuning beyond the asserted call timeout.
+
 The core module contains deterministic `*Test.kt` coverage for contracts,
 the database-free engine runtime, scheduling, and daemon behavior, plus JDK
 file-store `*IT.kt` coverage. Web policy, session, XML-discovery, Ktor
@@ -222,13 +266,13 @@ unit coverage and real-database `*IT.kt` source coverage for independent
 state/response/output/outbox migrations, lifecycle, codecs, queue/lease
 fencing, output transactions, response ownership/retention, outbox
 retries/reclaim/cancellation, local lineage, and the durable composition
-restart/replay scenario. Its execution remains
-dependent on a working Docker/Testcontainers connection in the verification
-environment.
+restart/replay scenario, plus contract ITs for every configuration bound,
+lock-loss and cancellation rollback, connection termination, and outbox lease
+expiry during delivery. Its execution requires a working Docker runtime.
 The actual CIO timeout behavior of the underlying socket engine is also not
 directly exercised with wall-clock timing; deterministic timeout exceptions,
-outer cancellation, and reservation cleanup are covered. Coverage is
-report-only, so the matrix and the generated JaCoCo reports must be read
-together; a report is not a substitute for a contract assertion. Feature work
+outer cancellation, and reservation cleanup are covered. The coverage
+gate and the matrix must be read together; a report is not a substitute for a
+contract assertion. Feature work
 must add tests to the owning module and update the corresponding matrix row in
 the same change.

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-23
 - **Decision owners:** Project owner
-- **Related plan:** `plans/FINAL-PLAN.md`, Phase 4; [`POSTGRES-STATE.md`](../POSTGRES-STATE.md)
+- **Related plan:** `PLAN.md`, Phase 4; [`POSTGRES-STATE.md`](../POSTGRES-STATE.md)
 
 ## Context
 

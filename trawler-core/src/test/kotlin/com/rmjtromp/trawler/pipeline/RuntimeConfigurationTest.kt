@@ -172,6 +172,17 @@ class RuntimeConfigurationTest {
         assertFailsWith<IllegalArgumentException> { RunRequest(setOf(" ")) }
         assertFailsWith<IllegalArgumentException> { RunRequest(reason = " ") }
         assertFailsWith<IllegalArgumentException> { RunRequest(timeout = Duration.ZERO) }
+        assertEquals(
+            "Run timeout must be positive when present",
+            assertFailsWith<IllegalArgumentException> { RunRequest(timeout = Duration.ofNanos(-1)) }.message,
+        )
+        val bounded = RunRequest(pipelineIds = setOf("one"), reason = "manual", timeout = Duration.ofNanos(1))
+        assertEquals("manual", bounded.reason)
+        assertEquals(Duration.ofNanos(1), bounded.timeout)
+        val unbounded = RunRequest()
+        assertEquals(null, unbounded.selectedPipelineIds)
+        assertEquals(null, unbounded.timeout)
+        assertEquals(null, DaemonConfig().selectedPipelineIds)
         assertFailsWith<IllegalArgumentException> { DaemonConfig(pipelineIds = emptySet()) }
         assertFailsWith<IllegalArgumentException> { DaemonConfig(pipelineIds = setOf(" ")) }
         assertFailsWith<IllegalArgumentException> { RunFailure(" ", IllegalStateException()) }

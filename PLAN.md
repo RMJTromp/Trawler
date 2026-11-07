@@ -876,21 +876,24 @@ trawler-core
     lightweight generic policy implementations
     built-in coroutine scheduler
 
-trawler-web                         added when Phase 3 implementation begins
+trawler-web                         implemented in Phase 3
     Ktor transport
     HTTP middleware and redirects
     public-web safety and robots
     HTTP retry/pacing/cookie behavior
     RSS/Atom and sitemap discovery
 
-trawler-postgres                    added when Phase 4 implementation begins
+trawler-postgres                    implemented in Phase 4
     durable resources/jobs/attempts/leases
     run/checkpoint/optional harvest state
     optional PostgreSQL response store
     optional PostgreSQL output and outbox
 
+trawler-flaresolverr                implemented in Phase 7
+    FlareSolverr transport and optional session pool
+    adapter-local challenge detection/resolution and clearance reuse
+
 specialized artifacts              created only on implementation demand
-    trawler-antibot-flaresolverr
     trawler-transport-browser
     trawler-observability-otel
     trawler-warc
@@ -1124,7 +1127,7 @@ No domain-specific example is a prerequisite for core correctness. An adapter ma
 
 Each phase's exit gate is mandatory. Verification should be proportionate to risk and include compilation, static inspection, and focused runtime demonstrations.
 
-This plan does **not** authorize adding or refactoring automated tests. The repository instruction requires explicit user authorization before tests are added. If tests are later authorized, the highest-risk scenarios are typed pipeline isolation, lease fencing, recrawl identity, attempt/crash accounting, atomic checkpoint advancement, redirect safety, cancellation cleanup, replay network isolation, and output duplicate windows.
+Every phase includes automated tests for the behavior it adds (see `AGENTS.md` §7). The highest-risk scenarios are typed pipeline isolation, lease fencing, recrawl identity, attempt/crash accounting, atomic checkpoint advancement, redirect safety, cancellation cleanup, replay network isolation, and output duplicate windows.
 
 Dependency versions must be selected from the actual project baseline and compatibility requirements at implementation time; the stale version table in PLAN-4 is not normative.
 
@@ -1183,6 +1186,6 @@ This final plan deliberately corrects the following issues in its inputs:
 17. **Live events are not treated as durable operational truth.** Durable summaries/history require explicit adapters.
 18. **Retention is not one global TTL.** Each state, response, output, session, or observer adapter owns its retention and lineage rules.
 19. **Anti-bot is not a first-release core priority.** Its generic hooks are allowed early; provider adapters are demand-driven.
-20. **The repository baseline is corrected.** There is currently no production implementation, and the README's claims of mandatory PostgreSQL/archival/anti-bot behavior are aspirational and conflict with this authoritative architecture.
+20. **The repository baseline is corrected.** When this plan was written there was no production implementation, and the README's claims of mandatory PostgreSQL/archival/anti-bot behavior are aspirational and conflict with this authoritative architecture.
 
 This is the plan to implement. Lower-priority plan documents remain historical design input only.

@@ -5,6 +5,7 @@ import com.zaxxer.hikari.HikariDataSource
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -63,6 +64,12 @@ internal class PostgresAdapterResources(
                             .defaultSchema(configuration.schema)
                             .table(migrationHistoryTable)
                             .createSchemas(true)
+                            // Each adapter keeps an independent history table in a
+                            // possibly shared schema. Without a version-0 baseline,
+                            // Flyway refuses a non-empty schema that lacks this
+                            // adapter's history table; V1 and later still apply.
+                            .baselineOnMigrate(true)
+                            .baselineVersion("0")
                             .load()
                             .migrate()
                     }
@@ -108,6 +115,9 @@ internal class PostgresAdapterResources(
                 connection.autoCommit = false
                 try {
                     val result = block(connection)
+                    // A caller cancelled while a blocking statement ran must
+                    // not observe cancellation for work that was committed.
+                    ensureActive()
                     connection.commit()
                     result
                 } catch (error: Throwable) {

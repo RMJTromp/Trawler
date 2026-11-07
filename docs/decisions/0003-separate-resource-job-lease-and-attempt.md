@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-23
 - **Decision owners:** Project owner
-- **Related plan:** `plans/FINAL-PLAN.md`, section 9
+- **Related plan:** `PLAN.md`, section 9
 
 ## Context
 

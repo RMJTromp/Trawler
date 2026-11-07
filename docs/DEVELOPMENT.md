@@ -42,6 +42,12 @@ Compile the implemented PostgreSQL state adapter and its core dependency:
 mvn -pl trawler-postgres -am clean compile
 ```
 
+Compile the implemented FlareSolverr adapter and its core/web dependencies:
+
+```bash
+mvn -pl trawler-flaresolverr -am clean compile
+```
+
 Run the configured verification lifecycle:
 
 ```bash
@@ -55,11 +61,13 @@ mvn dependency:tree
 ```
 
 The root POM is the reactor/build parent. Production implementation is in
-`trawler-core`, the optional `trawler-web` adapter, and the optional
-`trawler-postgres` state adapter; `trawler-coverage` is build-only. Future
+`trawler-core`, the optional `trawler-web` adapter, the optional
+`trawler-postgres` state adapter, and the optional `trawler-flaresolverr`
+adapter; `trawler-bom` is a code-free version-alignment
+POM and `trawler-coverage` is build-only and never deployed. Future
 runtime modules are added only with their real implementation according to
 `docs/MODULES.md`. There is no runnable main class. Repository-wide test
-infrastructure and the authorized Phase 1–6 contract, adapter, and end-to-end
+infrastructure and the Phase 1–7 contract, adapter, and end-to-end
 test suite are configured; see
 [`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md) for ownership,
 commands, and remaining risks. The Phase 2 core library has a bounded
@@ -77,10 +85,10 @@ to make an unimplemented adapter appear available.
 
 ### 1. Establish scope
 
-- Read `AGENTS.md`, `plans/FINAL-PLAN.md`, and relevant docs.
+- Read `AGENTS.md`, `PLAN.md`, and relevant docs.
 - Inspect `git status` before editing.
 - Identify the requested outcome and owning layer.
-- Identify whether the task authorizes production code, tests, dependency changes, migrations, external systems, or destructive actions.
+- Identify whether the task authorizes production code, dependency changes, migrations, external systems, or destructive actions. Tests for changed behavior are always in scope.
 - Preserve unrelated work.
 
 ### 2. Design against boundaries
@@ -130,26 +138,25 @@ Report:
 - files changed;
 - architecture or dependency decisions;
 - commands and inspections run;
-- whether automated tests were authorized, added, and run;
+- which automated tests were added or updated, and the result of running them;
 - limitations, risks, or follow-up work.
 
 Never say “all checks passed” without listing the checks.
 
-## Testing authorization
+## Testing requirement
 
-Automated tests are controlled by the project owner.
+Automated tests are part of every behavioral change. A change that adds or
+alters production behavior must add or update tests for that behavior in the
+same change, and a bug fix must include a test that fails without the fix.
+Fixtures, test utilities, and test-scoped dependencies may be added as needed,
+subject to the dependency rules in [`DEPENDENCIES.md`](DEPENDENCIES.md).
 
-Agents must not add or refactor tests unless explicitly requested for the current task. This includes fixtures, test utilities, test-only dependencies, test plugins, snapshots, and generated test scaffolding.
+Correcting a test whose expectation is wrong is allowed; the handoff must name
+the changed assertion and the reason. Never weaken or delete a test merely to
+make the build pass. Behavior that genuinely cannot be tested automatically is
+recorded in the untested-risk register in [`TEST-MATRIX.md`](TEST-MATRIX.md).
 
-If tests are not authorized, production quality still requires:
-
-- compiler validation;
-- static inspection;
-- deterministic manual or local demonstrations where appropriate;
-- explicit reasoning about failure and boundary cases;
-- disclosure that automated tests were not added or run.
-
-If tests are authorized, use the following standards.
+Use the following standards.
 
 ### Test levels
 
@@ -259,6 +266,6 @@ Deadlock avoidance and stale-worker fencing take precedence over throughput. Per
 - [ ] Security and retention impacts are addressed.
 - [ ] Relevant documentation is updated.
 - [ ] Applicable build/inspection checks passed.
-- [ ] Test authorization was followed.
+- [ ] Changed behavior is covered by passing automated tests.
 - [ ] Final diff contains no unrelated edits.
 - [ ] Handoff reports verification and residual risk honestly.

@@ -154,6 +154,7 @@ public class InMemoryCookieSession(
         var secure = false
         var expiresAt = now.plus(configuration.maxCookieLifetime)
         var delete = false
+        var maxAgeSeen = false
         parts.drop(1).forEach { rawAttribute ->
             val attribute = rawAttribute.trim()
             val equals = attribute.indexOf('=')
@@ -172,14 +173,19 @@ public class InMemoryCookieSession(
                 "secure" -> secure = true
                 "max-age" -> {
                     val seconds = attributeValue.toLongOrNull() ?: return null
-                    if (seconds <= 0) delete = true else {
+                    maxAgeSeen = true
+                    delete = seconds <= 0
+                    if (!delete) {
                         val bounded = minOf(seconds, configuration.maxCookieLifetime.seconds)
                         expiresAt = now.plusSeconds(bounded)
                     }
                 }
 
-                "expires" -> parseExpiry(attributeValue)?.let {
-                    expiresAt = minOf(it, now.plus(configuration.maxCookieLifetime))
+                // RFC 6265 section 5.3: Max-Age takes precedence over Expires in either order.
+                "expires" -> if (!maxAgeSeen) {
+                    parseExpiry(attributeValue)?.let {
+                        expiresAt = minOf(it, now.plus(configuration.maxCookieLifetime))
+                    }
                 }
             }
         }
@@ -216,8 +222,11 @@ public class InMemoryCookieSession(
         null
     }
 
+    /** RFC 6265 section 5.1.3: suffix matching applies to host names, never to IP literals. */
     private fun domainMatches(host: String, domain: String): Boolean =
-        host == domain || host.endsWith(".$domain")
+        host == domain || (!host.isIpLiteral() && host.endsWith(".$domain"))
+
+    private fun String.isIpLiteral(): Boolean = startsWith('[') || all { it == '.' || it in '0'..'9' }
 }
 
 private fun URI.pathOrRoot(): String = rawPath.takeIf { it.isNotEmpty() } ?: "/"

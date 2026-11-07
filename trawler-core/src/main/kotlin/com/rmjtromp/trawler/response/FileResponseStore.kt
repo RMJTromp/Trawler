@@ -180,14 +180,22 @@ public class FileResponseStore(
         }
     }
 
-    private suspend fun <T> onFileDispatcher(action: suspend () -> T): T =
-        withContext(dispatcher) {
+    private suspend fun <T> onFileDispatcher(action: suspend () -> T): T {
+        // Checked before dispatch: a closed executor rejects the task with a
+        // CancellationException, which callers would mistake for cancellation.
+        checkOpen()
+        return withContext(dispatcher) {
             mutex.withLock {
-                check(!closed.get()) { "File response store '$id' is closed" }
+                checkOpen()
                 loadIfNeeded()
                 action()
             }
         }
+    }
+
+    private fun checkOpen() {
+        check(!closed.get()) { "File response store '$id' is closed" }
+    }
 
     private fun loadIfNeeded() {
         if (loaded) return

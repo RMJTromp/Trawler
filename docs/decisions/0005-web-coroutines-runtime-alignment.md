@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-23
 - **Decision owners:** Project owner
-- **Related plan:** `plans/FINAL-PLAN.md`, sections 3.2, 11, and Phase 3
+- **Related plan:** `PLAN.md`, sections 3.2, 11, and Phase 3
 
 ## Context
 

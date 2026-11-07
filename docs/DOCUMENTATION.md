@@ -81,7 +81,7 @@ Sensitive data, redaction, authorization, persistence, and cleanup.
 
 ## Verification
 
-Commands, inspections, demonstrations, and authorized tests.
+Commands, inspections, demonstrations, and the automated tests that cover the feature.
 
 ## Limitations
 

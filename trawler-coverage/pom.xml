@@ -17,6 +17,10 @@
     <name>Trawler Reactor Coverage</name>
     <description>Non-published JaCoCo aggregate for the complete Trawler reactor.</description>
 
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.rmjtromp.trawler</groupId>
@@ -32,6 +36,12 @@
         <dependency>
             <groupId>com.rmjtromp.trawler</groupId>
             <artifactId>trawler-postgres</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.rmjtromp.trawler</groupId>
+            <artifactId>trawler-flaresolverr</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>

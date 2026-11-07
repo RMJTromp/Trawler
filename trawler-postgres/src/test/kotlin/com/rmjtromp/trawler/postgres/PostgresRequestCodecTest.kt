@@ -211,6 +211,88 @@ class PostgresRequestCodecTest {
         }
     }
 
+    @Test
+    fun `default registry and codec use the documented binary descriptor and default bounds`() {
+        val registry = PostgresRequestCodecRegistry()
+        val encoded = registry.encode(request())
+        assertEquals(PostgresCodecDescriptor("trawler-binary-request", 1), encoded.descriptor)
+        assertEquals(request(), registry.decode(encoded.descriptor, encoded.toByteArray()))
+
+        val codec = BinaryPostgresRequestCodec()
+        assertEquals(PostgresCodecDescriptor("trawler-binary-request", 1), codec.descriptor)
+        val exactTarget = CrawlRequest("t".repeat(16 * 1_024))
+        assertEquals(exactTarget, codec.decode(codec.encode(exactTarget)))
+        assertFailsWith<IllegalArgumentException> { codec.encode(CrawlRequest("t".repeat(16 * 1_024 + 1))) }
+        assertFailsWith<IllegalArgumentException> {
+            codec.encode(CrawlRequest("target", headers = Headers.from(List(257) { Header("h$it", "v") })))
+        }
+    }
+
+    @Test
+    fun `registry with an explicit active descriptor still requires at least one codec`() {
+        val error = assertFailsWith<IllegalArgumentException> {
+            PostgresRequestCodecRegistry(emptyList(), active = PostgresCodecDescriptor("request", 1))
+        }
+        assertEquals("At least one PostgreSQL request codec is required", error.message)
+    }
+
+    @Test
+    fun `decoder rejects negative string count and body sizes written by a corrupt producer`() {
+        val codec = BinaryPostgresRequestCodec(limits())
+
+        val negativeTarget = rawPayload { writeInt(-1) }
+        assertEquals(
+            "Request codec string exceeds its configured bound",
+            assertFailsWith<IllegalArgumentException> { codec.decode(negativeTarget) }.message,
+        )
+
+        val negativeHeaderCount = rawPayload {
+            writeRawString("target")
+            writeRawString("GET")
+            writeInt(-1)
+        }
+        assertEquals(
+            "Encoded request header count exceeds its configured bound",
+            assertFailsWith<IllegalArgumentException> { codec.decode(negativeHeaderCount) }.message,
+        )
+
+        val belowAbsentBody = rawPayload {
+            writeRawString("target")
+            writeRawString("GET")
+            writeInt(0)
+            writeInt(-2)
+        }
+        assertEquals(
+            "Encoded request body exceeds the PostgreSQL codec bound",
+            assertFailsWith<IllegalArgumentException> { codec.decode(belowAbsentBody) }.message,
+        )
+
+        val absentBody = rawPayload {
+            writeRawString("target")
+            writeRawString("GET")
+            writeInt(0)
+            writeInt(-1)
+            writeInt(0)
+        }
+        assertEquals(CrawlRequest("target"), codec.decode(absentBody))
+    }
+
+    private fun rawPayload(fields: java.io.DataOutputStream.() -> Unit): ByteArray {
+        val bytes = java.io.ByteArrayOutputStream()
+        java.io.DataOutputStream(bytes).use { output ->
+            output.writeInt(0x5452_5752)
+            output.writeInt(1)
+            output.fields()
+        }
+        return bytes.toByteArray()
+    }
+
+    private fun java.io.DataOutputStream.writeRawString(value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        writeInt(bytes.size)
+        write(bytes)
+    }
+
     private fun request(): CrawlRequest = CrawlRequest(
         target = "https://example.test/é",
         method = RequestMethod("POST"),

@@ -29,7 +29,11 @@ public object DefaultWebFailureClassifier : FailureClassifier {
     override fun classify(error: Throwable, context: FailureContext): FailureClassification = when (error) {
         is WebPolicyRejectedException -> FailureClassification("web-policy-rejected", false, error.reason)
         is RobotsUnavailableException -> FailureClassification("robots-unavailable", true, error.message)
-        is WebAddressResolutionException -> FailureClassification("web-dns-failure", true, error.host)
+        is WebAddressResolutionException -> if (error.cause is NetworkAddressLimitExceededException) {
+            FailureClassification("web-dns-answer-limit", false)
+        } else {
+            FailureClassification("web-dns-failure", true, error.host)
+        }
         is WebResponseTooLargeException -> FailureClassification("web-body-limit", false, error.limitKind)
         is WebResponseHeadersTooLargeException -> FailureClassification("web-header-limit", false)
         is WebResponseHeaderNameTooLargeException -> FailureClassification("web-header-name-limit", false)

@@ -6,6 +6,7 @@ import com.rmjtromp.trawler.pipeline.Output
 import com.rmjtromp.trawler.pipeline.OutputResult
 import com.rmjtromp.trawler.pipeline.Produced
 import com.rmjtromp.trawler.pipeline.ProductionContext
+import com.rmjtromp.trawler.retention.RetentionCategory
 import java.time.Duration
 import java.time.Instant
 import kotlin.test.assertEquals
@@ -312,6 +313,157 @@ class OutputsTest {
         }
     }
 
+    @Test
+    fun `no output reports an explicit skip without retaining values`() = runTest {
+        val output = NoOutput<Int>()
+        assertEquals("no-output", output.id)
+        assertEquals(
+            OutputResult.Skipped("No output destination selected"),
+            output.write(listOf(produced(1), produced(2)), context),
+        )
+        assertEquals(OutputResult.Skipped("No output destination selected"), output.write(emptyList(), context))
+        assertEquals("custom", NoOutput<Int>("custom").id)
+        assertEquals(
+            "No-output ID must not be blank",
+            assertFailsWith<IllegalArgumentException> { NoOutput<Int>(" ") }.message,
+        )
+    }
+
+    @Test
+    fun `flow output default capacity buffers writes until the host collects`() = runTest {
+        val output = FlowOutput<Int>()
+        assertEquals("flow", output.id)
+        assertEquals(OutputResult.Accepted(128), output.write((1..128).map(::produced), context))
+        val blocked = async(start = CoroutineStart.UNDISPATCHED) { output.write(listOf(produced(129)), context) }
+        assertFalse(blocked.isCompleted)
+        assertEquals(1, output.flow.first().value)
+        assertEquals(OutputResult.Accepted(1), blocked.await())
+        output.close()
+        assertEquals(
+            "Flow output ID must not be blank",
+            assertFailsWith<IllegalArgumentException> { FlowOutput<Int>(id = " ") }.message,
+        )
+    }
+
+    @Test
+    fun `retrying output delegates custom policies without delay and propagates delegate cancellation`() = runTest {
+        val failure = IllegalStateException("temporary")
+        var attempts = 0
+        val delegate = RecordingOutput<Int> { batch, _ ->
+            attempts++
+            if (attempts < 3) OutputResult.Failed(failure) else OutputResult.Accepted(batch.size)
+        }
+        val policy = RecordingRetryPolicy(OutputRetryDecision.Retry)
+        val output = RetryingOutput(delegate, policy, maxAttempts = 5)
+        assertEquals("recording-output-retry", output.id)
+        assertEquals(OutputResult.Accepted(1), output.write(listOf(produced(1)), context))
+        assertEquals(listOf(1, 2), policy.attempts)
+        assertEquals(0L, testScheduler.currentTime)
+
+        val cancellation = CancellationException("delegate cancelled")
+        val cancelling = RetryingOutput(
+            RecordingOutput<Int> { _, _ -> throw cancellation },
+            RecordingRetryPolicy(OutputRetryDecision.Retry),
+        )
+        assertSame(cancellation, assertFailsWith<CancellationException> {
+            cancelling.write(listOf(produced(1)), context)
+        })
+
+        output.close()
+        assertEquals(1, delegate.closeCalls)
+        RetryingOutput(PlainOutput()).close()
+        assertEquals(
+            "Retrying output ID must not be blank",
+            assertFailsWith<IllegalArgumentException> { RetryingOutput(PlainOutput(), id = " ") }.message,
+        )
+    }
+
+    @Test
+    fun `fixed output retry policy stops exactly at its attempt bound`() {
+        val policy = FixedOutputRetryPolicy(maxAttempts = 2)
+        val error = IllegalStateException("failed")
+        assertEquals("fixed-output-retry", policy.id)
+        assertEquals(Duration.ZERO, policy.delay)
+        assertEquals(OutputRetryDecision.Retry, policy.decide(1, error))
+        assertEquals(OutputRetryDecision.Stop, policy.decide(2, error))
+        assertEquals(OutputRetryDecision.Stop, policy.decide(3, error))
+    }
+
+    @Test
+    fun `decorators close only lifecycle delegates and reject blank identifiers`() = runTest {
+        val plain = PlainOutput()
+        BatchedOutput(plain).close()
+        IdempotentOutput(plain, OutputIdempotencyHook { _, _ -> OutputIdempotencyDecision.Write }).close()
+        assertEquals(0, plain.writes)
+
+        val lifecycle = RecordingOutput<Int> { batch, _ -> OutputResult.Accepted(batch.size) }
+        val batched = BatchedOutput(lifecycle)
+        assertEquals("recording-output-batched", batched.id)
+        assertEquals(128, batched.maxBatchSize)
+        batched.close()
+        assertEquals(1, lifecycle.closeCalls)
+        assertEquals(
+            "recording-output-idempotent",
+            IdempotentOutput(lifecycle, OutputIdempotencyHook { _, _ -> OutputIdempotencyDecision.Write }).id,
+        )
+
+        assertEquals(
+            "Batched output ID must not be blank",
+            assertFailsWith<IllegalArgumentException> { BatchedOutput(plain, id = " ") }.message,
+        )
+        assertEquals(
+            "Idempotent output ID must not be blank",
+            assertFailsWith<IllegalArgumentException> {
+                IdempotentOutput(plain, OutputIdempotencyHook { _, _ -> OutputIdempotencyDecision.Write }, id = " ")
+            }.message,
+        )
+        assertEquals(
+            "Idempotency rejection reason must not be blank",
+            assertFailsWith<IllegalArgumentException> { OutputIdempotencyDecision.Reject(" ") }.message,
+        )
+    }
+
+    @Test
+    fun `idempotent output returns delegate failures unchanged`() = runTest {
+        val failure = IllegalStateException("delegate failed")
+        val output = IdempotentOutput(
+            RecordingOutput<Int> { _, _ -> OutputResult.Failed(failure) },
+            OutputIdempotencyHook { item, _ ->
+                if (item.value == 1) OutputIdempotencyDecision.Suppress else OutputIdempotencyDecision.Write
+            },
+        )
+        val result = assertIs<OutputResult.Failed>(output.write(listOf(produced(1), produced(2)), context))
+        assertSame(failure, result.error)
+    }
+
+    @Test
+    fun `output retention requests accept only output-owned categories and positive batches`() {
+        val output = OutputRetentionRequest(RetentionCategory.OUTPUT_HISTORY, Instant.EPOCH, 1)
+        assertEquals(RetentionCategory.OUTPUT_HISTORY, output.category)
+        assertEquals(Instant.EPOCH, output.cutoff)
+        assertEquals(1, output.maxEntries)
+        assertEquals(
+            RetentionCategory.OUTBOX_HISTORY,
+            OutputRetentionRequest(RetentionCategory.OUTBOX_HISTORY, Instant.EPOCH, 2).category,
+        )
+        RetentionCategory.entries
+            .filterNot { it == RetentionCategory.OUTPUT_HISTORY || it == RetentionCategory.OUTBOX_HISTORY }
+            .forEach { category ->
+                assertEquals(
+                    "Output retention supports only output-owned categories",
+                    assertFailsWith<IllegalArgumentException> {
+                        OutputRetentionRequest(category, Instant.EPOCH, 1)
+                    }.message,
+                )
+            }
+        assertEquals(
+            "Output retention batch must be positive",
+            assertFailsWith<IllegalArgumentException> {
+                OutputRetentionRequest(RetentionCategory.OUTPUT_HISTORY, Instant.EPOCH, 0)
+            }.message,
+        )
+    }
+
     private val context: OutputContext = OutputContext(
         CrawlerContext("engine", "pipeline-run", "pipeline"),
     )
@@ -329,6 +481,16 @@ class OutputsTest {
             producedAt = Instant.EPOCH,
         ),
     )
+
+    private class PlainOutput : Output<Int> {
+        override val id: String = "plain"
+        var writes: Int = 0
+
+        override suspend fun write(items: List<Produced<Int>>, context: OutputContext): OutputResult {
+            writes++
+            return OutputResult.Accepted(items.size)
+        }
+    }
 
     private class RecordingRetryPolicy(
         private val decision: OutputRetryDecision,
