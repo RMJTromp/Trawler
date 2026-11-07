@@ -106,6 +106,95 @@ class InMemoryResponseStoreTest {
         assertEquals(3, retained.map { it.reference }.distinct().size)
     }
 
+    @Test
+    fun `explicit no-response store retains nothing and advertises no capability`() = runTest {
+        assertEquals("no-response", NoResponseStore.id)
+        assertTrue(NoResponseStore.capabilities.isEmpty())
+        assertNull(NoResponseStore.put(response("target", "pipeline", Instant.EPOCH)))
+        assertNull(NoResponseStore.find(ResponseLookup.ByTarget("target")))
+        assertNull(NoResponseStore.find(ResponseLookup.ByRequestId("request-target")))
+    }
+
+    @Test
+    fun `lookups miss unknown keys and responses without engine metadata are not attributed`() = runTest {
+        val store = InMemoryResponseStore(id = "custom-memory")
+        assertEquals("custom-memory", store.id)
+        assertEquals(
+            setOf(
+                ResponseStoreCapability.LOOKUP,
+                ResponseStoreCapability.CACHE,
+                ResponseStoreCapability.HISTORY,
+                ResponseStoreCapability.REPLAY,
+                ResponseStoreCapability.TTL_EVICTION,
+            ),
+            store.capabilities,
+        )
+        val anonymous = store.put(
+            CrawlResponse(
+                request = CrawlRequest("anonymous"),
+                statusCode = 200,
+                headers = Headers.empty(),
+                body = ResponseBody.from(byteArrayOf(1)),
+                receivedAt = Instant.EPOCH,
+            ),
+        )!!
+        val owned = store.put(response("owned", "pipeline", Instant.EPOCH, "request-owned"))!!
+
+        assertNull(store.find(ResponseLookup.ByReference(com.rmjtromp.trawler.model.ResponseReference("missing"))))
+        assertNull(store.find(ResponseLookup.ByTarget("missing")))
+        assertNull(store.find(ResponseLookup.ByRequestId("missing")))
+        assertNull(store.find(ResponseLookup.ByReference(anonymous))!!.pipelineId)
+        assertEquals("pipeline", store.find(ResponseLookup.ByReference(owned))!!.pipelineId)
+        assertTrue(store.history("missing", 1).isEmpty())
+        assertEquals(
+            listOf(owned),
+            store.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 10).map { it.reference },
+        )
+    }
+
+    @Test
+    fun `replay supports reference and request queries under an ownership predicate`() = runTest {
+        val store = InMemoryResponseStore()
+        val first = store.put(response("first", "pipeline-a", Instant.EPOCH, "shared"))!!
+        val second = store.put(response("second", "pipeline-b", Instant.EPOCH, "shared"))!!
+
+        assertEquals(
+            listOf(first),
+            store.replay(ResponseReplayQuery.ByReference(first), limit = 5).map { it.reference },
+        )
+        assertTrue(store.replay(ResponseReplayQuery.ByReference(first), limit = 5, pipelineId = "pipeline-b").isEmpty())
+        assertEquals(
+            listOf(first, second),
+            store.replay(ResponseReplayQuery.ByRequestId("shared"), limit = 5).map { it.reference },
+        )
+        assertEquals(
+            listOf(second),
+            store.replay(ResponseReplayQuery.ByRequestId("shared"), limit = 5, pipelineId = "pipeline-b")
+                .map { it.reference },
+        )
+        assertTrue(store.replay(ResponseReplayQuery.ByRequestId("other"), limit = 5).isEmpty())
+    }
+
+    @Test
+    fun `invalid store identity and query arguments are rejected before reading state`() = runTest {
+        val store = InMemoryResponseStore()
+        assertFailsWith<IllegalArgumentException> { InMemoryResponseStore(id = " ") }
+        assertEquals(
+            "Replay pipeline ID must not be blank",
+            assertFailsWith<IllegalArgumentException> {
+                store.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 1, pipelineId = " ")
+            }.message,
+        )
+        assertEquals(
+            "History limit must be positive",
+            assertFailsWith<IllegalArgumentException> { store.history("request", 0) }.message,
+        )
+        assertEquals(
+            "Response request ID must not be blank",
+            assertFailsWith<IllegalArgumentException> { store.history(" ", 1) }.message,
+        )
+    }
+
     private fun response(
         target: String,
         pipelineId: String,

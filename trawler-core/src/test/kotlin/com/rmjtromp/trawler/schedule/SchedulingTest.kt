@@ -621,6 +621,273 @@ class SchedulingTest {
         assertTrue(handle.completion.isCompleted)
     }
 
+    @Test
+    fun `finite zero-interval schedule with default observer queues back-to-back triggers`() = runTest {
+        val calls = mutableListOf<RunRequest>()
+        val handle = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.Finite(runs = 3, overlap = OverlapBehavior.QUEUE, maxQueuedRuns = 2),
+            clock = virtualClock(),
+            pipelineIds = setOf("selected"),
+            run = { request ->
+                calls += request
+                completedRun()
+            },
+        )
+        try {
+            runCurrent()
+            assertEquals(3, calls.size)
+            assertEquals(0L, testScheduler.currentTime)
+            assertTrue(calls.all { it.selectedPipelineIds == setOf("selected") && it.reason == "scheduled" })
+            assertTrue(handle.completion.isCompleted)
+        } finally {
+            handle.cancel()
+        }
+    }
+
+    @Test
+    fun `fixed delay immediate first run counts toward its bound`() = runTest {
+        val startedAt = mutableListOf<Long>()
+        val handle = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.FixedDelay(Duration.ofSeconds(2), maxRuns = 2, immediateFirstRun = true),
+            clock = virtualClock(),
+            run = {
+                startedAt += testScheduler.currentTime
+                completedRun()
+            },
+        )
+        try {
+            runCurrent()
+            assertEquals(listOf(0L), startedAt)
+            advanceTimeBy(1_999)
+            runCurrent()
+            assertEquals(listOf(0L), startedAt)
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(listOf(0L, 2_000L), startedAt)
+            advanceUntilIdle()
+            assertEquals(listOf(0L, 2_000L), startedAt)
+            assertTrue(handle.completion.isCompleted)
+        } finally {
+            handle.cancel()
+        }
+
+        val delayedStarts = mutableListOf<Long>()
+        val baseline = testScheduler.currentTime
+        val delayed = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.FixedDelay(Duration.ofSeconds(2), maxRuns = 1),
+            clock = virtualClock(),
+            run = {
+                delayedStarts += testScheduler.currentTime - baseline
+                completedRun()
+            },
+        )
+        try {
+            runCurrent()
+            assertTrue(delayedStarts.isEmpty())
+            advanceTimeBy(2_000)
+            runCurrent()
+            assertEquals(listOf(2_000L), delayedStarts)
+            assertTrue(delayed.completion.isCompleted)
+        } finally {
+            delayed.cancel()
+        }
+    }
+
+    @Test
+    fun `unbounded fixed delay and fixed rate schedules repeat until cancelled`() = runTest {
+        val delayStarts = mutableListOf<Long>()
+        val delayHandle = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.FixedDelay(Duration.ofSeconds(1), immediateFirstRun = true),
+            clock = virtualClock(),
+            run = {
+                delayStarts += testScheduler.currentTime
+                completedRun()
+            },
+        )
+        val rateStarts = mutableListOf<Long>()
+        val rateHandle = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.FixedRate(Duration.ofSeconds(1), immediateFirstRun = true),
+            clock = virtualClock(),
+            run = {
+                rateStarts += testScheduler.currentTime
+                completedRun()
+            },
+        )
+        try {
+            runCurrent()
+            advanceTimeBy(3_000)
+            runCurrent()
+            assertEquals(listOf(0L, 1_000L, 2_000L, 3_000L), delayStarts)
+            assertEquals(listOf(0L, 1_000L, 2_000L, 3_000L), rateStarts)
+        } finally {
+            delayHandle.cancel()
+            rateHandle.cancel()
+        }
+        assertTrue(delayHandle.completion.isCompleted)
+        assertTrue(rateHandle.completion.isCompleted)
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertEquals(4, delayStarts.size)
+        assertEquals(4, rateStarts.size)
+    }
+
+    @Test
+    fun `fixed rate without an immediate run waits one period and catches up without delay when late`() = runTest {
+        val onTimeStarts = mutableListOf<Long>()
+        val onTime = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.FixedRate(Duration.ofSeconds(5), maxRuns = 1),
+            clock = virtualClock(),
+            run = {
+                onTimeStarts += testScheduler.currentTime
+                completedRun()
+            },
+        )
+        try {
+            runCurrent()
+            advanceTimeBy(4_999)
+            runCurrent()
+            assertTrue(onTimeStarts.isEmpty())
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(listOf(5_000L), onTimeStarts)
+            assertTrue(onTime.completion.isCompleted)
+        } finally {
+            onTime.cancel()
+        }
+
+        val lateClock = SteppingClock(Instant.EPOCH, Duration.ofHours(1))
+        val lateCalls = mutableListOf<Long>()
+        val events = mutableListOf<SchedulerEvent>()
+        val late = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.FixedRate(
+                period = Duration.ofSeconds(1),
+                maxRuns = 3,
+                overlap = OverlapBehavior.QUEUE,
+                maxQueuedRuns = 3,
+            ),
+            clock = lateClock,
+            run = {
+                lateCalls += testScheduler.currentTime
+                completedRun()
+            },
+            observe = { events += it },
+        )
+        try {
+            val before = testScheduler.currentTime
+            runCurrent()
+            assertEquals(listOf(before, before, before), lateCalls)
+            assertEquals(listOf(1L, 2L, 3L), events.filterIsInstance<SchedulerEvent.Triggered>().map { it.sequence })
+            assertTrue(late.completion.isCompleted)
+        } finally {
+            late.cancel()
+        }
+    }
+
+    @Test
+    fun `daily immediate first run counts toward its bound and unbounded daily repeats each day after its immediate run`() = runTest {
+        val clock = MutableClock(Instant.parse("2026-01-01T08:00:00Z"))
+        var boundedCalls = 0
+        val bounded = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.Daily(
+                LocalTime.of(10, 0),
+                ZoneOffset.UTC,
+                maxRuns = 2,
+                immediateFirstRun = true,
+            ),
+            clock = clock,
+            run = {
+                boundedCalls++
+                completedRun()
+            },
+        )
+        try {
+            runCurrent()
+            assertEquals(1, boundedCalls)
+            advanceTimeBy(Duration.ofHours(2).toMillis() - 1)
+            runCurrent()
+            assertEquals(1, boundedCalls)
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(2, boundedCalls)
+            assertTrue(bounded.completion.isCompleted)
+        } finally {
+            bounded.cancel()
+        }
+
+        val start = Instant.parse("2026-01-01T09:00:00Z")
+        val unboundedStarts = mutableListOf<Instant>()
+        val baseline = testScheduler.currentTime
+        val dailyClock = object : Clock {
+            override fun now(): Instant = start.plusMillis(testScheduler.currentTime - baseline)
+        }
+        val unbounded = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.Daily(LocalTime.of(10, 0), ZoneOffset.UTC, immediateFirstRun = true),
+            clock = dailyClock,
+            run = {
+                unboundedStarts += dailyClock.now()
+                completedRun()
+            },
+        )
+        try {
+            runCurrent()
+            advanceTimeBy(Duration.ofHours(1).plusDays(1).toMillis())
+            runCurrent()
+            assertEquals(
+                listOf(
+                    Instant.parse("2026-01-01T09:00:00Z"),
+                    Instant.parse("2026-01-01T10:00:00Z"),
+                    Instant.parse("2026-01-02T10:00:00Z"),
+                ),
+                unboundedStarts,
+            )
+            assertTrue(!unbounded.completion.isCompleted)
+        } finally {
+            unbounded.cancel()
+        }
+        assertTrue(unbounded.completion.isCompleted)
+    }
+
+    @Test
+    fun `terminal results without recorded failures still report a status-specific failure`() = runTest {
+        val events = mutableListOf<SchedulerEvent>()
+        val statuses = ArrayDeque(listOf(RunStatus.FAILED, RunStatus.ABANDONED, RunStatus.CANCELLED))
+        val handle = CoroutineScheduler().start(
+            scope = this,
+            trigger = ScheduleTrigger.Manual(),
+            run = { result(statuses.removeFirst()) },
+            observe = { events += it },
+        )
+        try {
+            repeat(3) {
+                assertIs<ScheduleSubmission.Started>(handle.trigger())
+                runCurrent()
+            }
+        } finally {
+            handle.cancel()
+        }
+        val failures = events.filterIsInstance<SchedulerEvent.RunFailed>()
+        assertEquals(listOf(1L, 2L, 3L), failures.map { it.sequence })
+        assertTrue(failures.all { it.error is IllegalStateException })
+        assertEquals(
+            listOf(
+                "Scheduled run ended with FAILED",
+                "Scheduled run ended with ABANDONED",
+                "Scheduled run ended with CANCELLED",
+            ),
+            failures.map { it.error.message },
+        )
+        assertTrue(events.filterIsInstance<SchedulerEvent.RunCompleted>().isEmpty())
+    }
+
     private suspend fun fireDaily(
         scope: TestScope,
         clock: MutableClock,
@@ -668,6 +935,24 @@ class SchedulingTest {
     private fun assertInvalid(expectedMessage: String, create: () -> Any) {
         val error = assertFailsWith<IllegalArgumentException> { create() }
         assertEquals(expectedMessage, error.message)
+    }
+
+    private fun TestScope.virtualClock(): Clock {
+        val baseline = testScheduler.currentTime
+        return object : Clock {
+            override fun now(): Instant = Instant.EPOCH.plusMillis(testScheduler.currentTime - baseline)
+        }
+    }
+
+    /** Each read moves time forward by [step], so every computed target is already in the past. */
+    private class SteppingClock(start: Instant, private val step: Duration) : Clock {
+        private var current: Instant = start
+
+        override fun now(): Instant {
+            val value = current
+            current = current.plus(step)
+            return value
+        }
     }
 
     private class MutableClock(var current: Instant) : Clock {

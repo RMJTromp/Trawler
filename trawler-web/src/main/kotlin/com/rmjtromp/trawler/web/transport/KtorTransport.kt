@@ -26,6 +26,7 @@ import com.rmjtromp.trawler.web.policy.WebResponseHeadersTooLargeException
 import com.rmjtromp.trawler.web.policy.WebResponseTooLargeException
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.headers
 import io.ktor.client.request.prepareRequest
@@ -38,7 +39,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.readAvailable
 import java.io.ByteArrayInputStream
@@ -85,9 +86,12 @@ public class KtorTransport private constructor(
         require((request.body?.size ?: 0) <= configuration.maxRequestBodyBytes) {
             "Request body exceeds configured limit of ${configuration.maxRequestBodyBytes} bytes"
         }
-        return withTimeout(configuration.totalRequestTimeout.toMillis()) {
+        val totalTimeoutMillis = configuration.totalRequestTimeout.toMillis()
+        // A TimeoutCancellationException would look like caller cancellation to the engine,
+        // so an expired chain timeout is reported as an ordinary, classifiable timeout failure.
+        return withTimeoutOrNull(totalTimeoutMillis) {
             executeRedirectChain(request)
-        }
+        } ?: throw HttpRequestTimeoutException(request.target, totalTimeoutMillis)
     }
 
     /**

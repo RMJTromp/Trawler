@@ -256,6 +256,139 @@ class DiscoveryHarvestTest {
         assertFailsWith<IllegalArgumentException> { HarvestCompletion.Incomplete(" ") }
     }
 
+    @Test
+    fun `checkpoint codec quarantines a different codec ID with a descriptive reason`() {
+        val codec = object : DiscoveryCheckpointCodec {
+            override val descriptor: DiscoveryCheckpointCodecDescriptor = DiscoveryCheckpointCodecDescriptor("feed", 2)
+            override val strategyId: String = "cursor"
+        }
+        val foreign = DiscoveryCheckpoint(
+            revision = 3,
+            codecId = "other-feed",
+            codecVersion = 2,
+            payload = CheckpointPayload.from(byteArrayOf(1)),
+            strategyId = "cursor",
+        )
+        val quarantine = assertIs<CheckpointResolution.Quarantine>(codec.resolve(foreign))
+        assertEquals("Checkpoint descriptor or strategy does not match feed@2/cursor", quarantine.reason)
+        assertIs<CheckpointResolution.Quarantine>(codec.resolve(foreign.copy(codecId = "feed", strategyId = null)))
+    }
+
+    @Test
+    fun `checkpoint candidates and emissions validate optional identifiers and default checkpoints`() {
+        val descriptor = DiscoveryCheckpointCodecDescriptor("feed", 1)
+        val payload = CheckpointPayload.from(byteArrayOf(9))
+        val candidate = DiscoveryCheckpointCandidate(descriptor, "cursor", payload)
+        assertEquals(null, candidate.generationId)
+        assertEquals(payload, candidate.payload)
+        assertEquals("generation", DiscoveryCheckpointCandidate(descriptor, "cursor", payload, "generation").generationId)
+        listOf(
+            "Checkpoint strategy ID must not be blank" to { DiscoveryCheckpointCandidate(descriptor, " ", payload) },
+            "Checkpoint generation ID must not be blank when present" to {
+                DiscoveryCheckpointCandidate(descriptor, "cursor", payload, "")
+            },
+            "Checkpoint generation ID must not be blank when present" to {
+                DiscoveryCheckpointCandidate(descriptor, "cursor", payload, " ")
+            },
+        ).forEach { (message, construct) ->
+            assertEquals(message, assertFailsWith<IllegalArgumentException> { construct() }.message)
+        }
+
+        val request = CrawlRequest("page")
+        assertEquals(null, DiscoveryEmission.Request(request).checkpoint)
+        assertEquals(candidate, DiscoveryEmission.Request(request, candidate).checkpoint)
+        val response = com.rmjtromp.trawler.model.CrawlResponse(
+            request = request,
+            statusCode = 200,
+            headers = com.rmjtromp.trawler.model.Headers.empty(),
+            body = com.rmjtromp.trawler.model.ResponseBody.empty(),
+            receivedAt = Instant.EPOCH,
+        )
+        val existing = DiscoveryEmission.ExistingResponse(request, response)
+        assertEquals(null, existing.checkpoint)
+        assertEquals(candidate, DiscoveryEmission.ExistingResponse(request, response, candidate).checkpoint)
+        assertEquals(request, PaginationDecision.Next(request).request)
+
+        val context = discoveryContext()
+        assertEquals(null, context.checkpoint)
+        assertEquals(null, context.incrementalWindow)
+    }
+
+    @Test
+    fun `built-in discoveries reject blank identifiers`() {
+        assertEquals(
+            "Seed discovery ID must not be blank",
+            assertFailsWith<IllegalArgumentException> { SeedDiscovery(id = " ", requests = emptyList()) }.message,
+        )
+        assertEquals(
+            "Flow discovery ID must not be blank",
+            assertFailsWith<IllegalArgumentException> {
+                FlowDiscovery(id = "", requests = flow { emit(CrawlRequest("one")) })
+            }.message,
+        )
+        assertEquals("seeds", SeedDiscovery(requests = emptyList()).id)
+        assertEquals("flow-discovery", FlowDiscovery(requests = flow { emit(CrawlRequest("one")) }).id)
+    }
+
+    @Test
+    fun `harvest values validate identifiers and bounded counters`() {
+        val payload = CheckpointPayload.from(byteArrayOf())
+        val candidate = HarvestStateCandidate("strategy", "codec", 0, payload, historicalComplete = false)
+        assertEquals(0, candidate.codecVersion)
+        listOf(
+            "Harvest strategy ID must not be blank" to { HarvestStateCandidate(" ", "codec", 0, payload, false) },
+            "Harvest state codec ID must not be blank" to { HarvestStateCandidate("strategy", "", 0, payload, false) },
+            "Harvest state codec version must not be negative" to {
+                HarvestStateCandidate("strategy", "codec", -1, payload, false)
+            },
+            "Discovery ID must not be blank" to { HarvestContext("pipeline", " ", null, null, 0, Instant.EPOCH) },
+            "Cursor harvest strategy ID must not be blank" to { CursorHarvestStrategy(" ") },
+            "Watermark harvest strategy ID must not be blank" to {
+                WatermarkHarvestStrategy(FixedOverlapBoundaryPolicy(Duration.ZERO), id = "")
+            },
+            "Historical harvest strategy ID must not be blank" to {
+                HistoricalThenIncrementalHarvestStrategy(FixedOverlapBoundaryPolicy(Duration.ZERO), id = " ")
+            },
+            "Incremental boundary policy ID must not be blank" to { FixedOverlapBoundaryPolicy(Duration.ZERO, id = " ") },
+        ).forEach { (message, construct) ->
+            assertEquals(message, assertFailsWith<IllegalArgumentException> { construct() }.message)
+        }
+        assertEquals("deferred", HarvestAdmission.Defer("deferred").reason)
+        assertEquals("open", HarvestCompletion.Incomplete("open").reason)
+        assertEquals("fixed-overlap-2000ms", FixedOverlapBoundaryPolicy(Duration.ofSeconds(2)).id)
+        assertEquals(null, StatelessHarvestStrategy.stateCodec)
+        assertEquals(null, StatelessHarvestStrategy.window(harvestContext(Instant.EPOCH)))
+        assertEquals(null, CursorHarvestStrategy().stateCodec)
+        assertEquals(HarvestMode.CURSOR, CursorHarvestStrategy().mode)
+        assertEquals(null, harvestContext(Instant.EPOCH).incrementalWindow)
+        assertEquals(null, completionContext().previousState)
+    }
+
+    @Test
+    fun `boundary codecs treat absent or empty state as a first window and reject foreign codec IDs`() {
+        val now = Instant.parse("2026-01-01T00:00:20Z")
+        val watermark = WatermarkHarvestStrategy(FixedOverlapBoundaryPolicy(Duration.ofSeconds(1)))
+        val codec = assertNotNull(watermark.stateCodec)
+        val emptyState = HarvestState(
+            revision = 0,
+            strategyId = watermark.id,
+            codecId = codec.descriptor.id,
+            codecVersion = codec.descriptor.version,
+            payload = CheckpointPayload.from(byteArrayOf()),
+        )
+        assertEquals(IncrementalBoundaryPolicy.Window(null, now), watermark.window(harvestContext(now, emptyState)))
+        val foreign = assertIs<HarvestStateResolution.Quarantine>(codec.resolve(emptyState.copy(codecId = "foreign")))
+        assertEquals(
+            "Harvest state does not match trawler-core-instant-boundary@1/watermark",
+            foreign.reason,
+        )
+
+        val historical = HistoricalThenIncrementalHarvestStrategy(FixedOverlapBoundaryPolicy(Duration.ZERO))
+        assertEquals(null, historical.window(harvestContext(now)))
+        assertEquals(HarvestMode.HISTORICAL_THEN_INCREMENTAL, historical.mode)
+        assertEquals(HarvestMode.WATERMARK, watermark.mode)
+    }
+
     private fun discoveryContext(): DiscoveryContext = DiscoveryContext(
         crawler = CrawlerContext("engine", "pipeline-run", "pipeline"),
         executor = RequestExecutor { _, _ -> error("discovery test must not execute transport") },

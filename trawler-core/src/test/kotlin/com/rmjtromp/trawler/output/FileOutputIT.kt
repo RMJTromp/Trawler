@@ -305,6 +305,163 @@ class FileOutputIT {
         assertFailsWith<IllegalArgumentException> { OutputRetentionRequest(RetentionCategory.RESPONSES, Instant.EPOCH, 1) }
     }
 
+    @Test
+    fun `codec cancellation propagates and leaves the output usable`() = runTest {
+        val cancellation = CancellationException("encode cancelled")
+        val cancelling = FileOutput(root = root.resolve("cancelling"), codec = CancellingCodec(cancellation))
+        try {
+            val thrown = assertFailsWith<CancellationException> {
+                cancelling.write(listOf(produced(1)), context)
+            }
+            assertEquals(cancellation.message, thrown.message)
+            assertTrue(segmentFiles(root.resolve("cancelling")).isEmpty())
+            assertEquals(OutputResult.Accepted(0), cancelling.write(emptyList(), context))
+        } finally {
+            cancelling.close()
+        }
+    }
+
+    @Test
+    fun `pruning the current segment forces a new segment for later writes`() = runTest {
+        val output = FileOutput(
+            root = root,
+            codec = IntCodec("prune-current"),
+            maxSegments = 4,
+            maxSegmentBytes = 400,
+            maxItemsPerSegment = 2,
+            maxEncodedItemBytes = 4,
+        )
+        try {
+            assertEquals(OutputResult.Accepted(3), output.write((1..3).map(::produced), context))
+            val files = segmentFiles(root)
+            assertEquals(2, files.size)
+            files.forEach { Files.setLastModifiedTime(it, FileTime.from(Instant.EPOCH)) }
+            val request = OutputRetentionRequest(RetentionCategory.OUTPUT_HISTORY, Instant.EPOCH.plusSeconds(1), 1)
+
+            assertEquals(1L, output.prune(request).deleted)
+            assertEquals(listOf(listOf(3)), segmentFiles(root).map { readSegment(it).payloads.map(::decodeInt) })
+            assertEquals(1L, output.prune(request).deleted)
+            assertTrue(segmentFiles(root).isEmpty())
+            assertEquals(0L, output.prune(request).deleted)
+
+            assertEquals(OutputResult.Accepted(1), output.write(listOf(produced(4)), context))
+            val rewritten = segmentFiles(root).map(::readSegment)
+            assertEquals(listOf(3L), rewritten.map { it.sequence })
+            assertEquals(listOf(listOf(4)), rewritten.map { it.payloads.map(::decodeInt) })
+        } finally {
+            output.close()
+        }
+
+        segmentFiles(root).forEach { Files.setLastModifiedTime(it, FileTime.from(Instant.EPOCH)) }
+        val otherCodec = FileOutput(root = root, codec = IntCodec("other-codec"), maxSegments = 4, maxSegmentBytes = 400, maxEncodedItemBytes = 4)
+        try {
+            val request = OutputRetentionRequest(RetentionCategory.OUTPUT_HISTORY, Instant.EPOCH.plusSeconds(1), 5)
+            assertEquals(1L, otherCodec.prune(request).deleted)
+            assertTrue(segmentFiles(root).isEmpty())
+        } finally {
+            otherCodec.close()
+        }
+    }
+
+    @Test
+    fun `an exhausted persisted sequence fails the write without creating a segment`() = runTest {
+        val writer = FileOutput(root = root, codec = IntCodec("old-codec"), maxSegments = 2)
+        writer.write(listOf(produced(1)), context)
+        writer.close()
+        val path = segmentFiles(root).single()
+        val patched = Files.readAllBytes(path).also { ByteBuffer.wrap(it).putLong(8, Long.MAX_VALUE) }
+        Files.write(path, patched, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+
+        val reopened = FileOutput(root = root, codec = IntCodec("new-codec"), maxSegments = 2)
+        try {
+            val failed = assertIs<OutputResult.Failed>(reopened.write(listOf(produced(2)), context))
+            assertEquals("File output sequence exhausted", failed.error.message)
+            assertEquals(listOf(path), segmentFiles(root))
+            assertEquals(Long.MAX_VALUE, readSegment(path).sequence)
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    fun `reopened segments exceeding item or identifier bounds are rejected`() = runTest {
+        val codec = IntCodec("bounded")
+        val writer = FileOutput(
+            root = root,
+            codec = codec,
+            maxSegments = 2,
+            maxSegmentBytes = 400,
+            maxItemsPerSegment = 2,
+            maxEncodedItemBytes = 4,
+        )
+        writer.write(listOf(produced(1), produced(2)), context)
+        writer.close()
+        val path = segmentFiles(root).single()
+        val valid = Files.readAllBytes(path)
+        val frameOffset = 4 + 4 + 8 + 4 + "bounded".length + 4
+
+        val tooManyItems = FileOutput(
+            root = root,
+            codec = codec,
+            maxSegments = 2,
+            maxSegmentBytes = 400,
+            maxItemsPerSegment = 1,
+            maxEncodedItemBytes = 4,
+        )
+        try {
+            val error = assertFailsWith<IllegalArgumentException> { tooManyItems.write(emptyList(), context) }
+            assertEquals("File output segment exceeds the configured item bound", error.message)
+        } finally {
+            tooManyItems.close()
+        }
+
+        val negativeFrame = valid.copyOf().also { ByteBuffer.wrap(it).putInt(frameOffset, -1) }
+        assertEquals(
+            "File output frame exceeds the configured item bound",
+            reopenMalformed(path, negativeFrame, codec, maxSegmentBytes = 400) { write(emptyList(), context) }.message,
+        )
+        val oversizedIdentifier = valid.copyOf().also { ByteBuffer.wrap(it).putInt(16, 256) }
+        assertEquals(
+            "File output codec ID exceeds its bound",
+            reopenMalformed(path, oversizedIdentifier, codec, maxSegmentBytes = 400) { write(emptyList(), context) }.message,
+        )
+        val negativeIdentifier = valid.copyOf().also { ByteBuffer.wrap(it).putInt(16, -1) }
+        assertEquals(
+            "File output codec ID exceeds its bound",
+            reopenMalformed(path, negativeIdentifier, codec, maxSegmentBytes = 400) { write(emptyList(), context) }.message,
+        )
+    }
+
+    @Test
+    fun `codec identifiers beyond the header bound fail before any segment is created`() = runTest {
+        val output = FileOutput(root = root, codec = IntCodec("x".repeat(256)), maxSegmentBytes = 2_048, maxEncodedItemBytes = 4)
+        try {
+            val failed = assertIs<OutputResult.Failed>(output.write(listOf(produced(1)), context))
+            assertIs<IllegalArgumentException>(failed.error)
+            assertEquals("File output codec ID exceeds its bound", failed.error.message)
+            assertTrue(Files.list(root).use { paths -> paths.noneMatch { it.fileName.toString().endsWith(".bin") } })
+            assertTrue(Files.list(root).use { paths -> paths.noneMatch { it.fileName.toString().endsWith(".tmp") } })
+        } finally {
+            output.close()
+        }
+    }
+
+    @Test
+    fun `operations after close fail as closed-resource errors rather than cancellation`() = runTest {
+        val output = FileOutput(root = root, codec = IntCodec("closed"))
+        assertEquals(OutputResult.Accepted(1), output.write(listOf(produced(1)), context))
+        output.close()
+
+        val writeError = assertFailsWith<IllegalStateException> { output.write(listOf(produced(2)), context) }
+        assertFalse(writeError is CancellationException, "closed write surfaced as $writeError")
+        assertEquals("File output 'file-output' is closed", writeError.message)
+        val pruneError = assertFailsWith<IllegalStateException> {
+            output.prune(OutputRetentionRequest(RetentionCategory.OUTPUT_HISTORY, Instant.EPOCH, 1))
+        }
+        assertFalse(pruneError is CancellationException, "closed prune surfaced as $pruneError")
+        assertEquals(1, segmentFiles(root).size)
+    }
+
     private suspend fun <T> reopenMalformed(
         path: Path,
         bytes: ByteArray,
@@ -382,6 +539,14 @@ class FileOutputIT {
         override fun encode(item: Produced<Int>): ByteArray = ByteBuffer.allocate(4).putInt(item.value).array()
 
         override fun decode(payload: ByteArray): Produced<Int> = produced(ByteBuffer.wrap(payload).int)
+    }
+
+    private class CancellingCodec(private val cancellation: CancellationException) : OutputCodec<Int> {
+        override val descriptor: OutputCodecDescriptor = OutputCodecDescriptor("cancelling", 1)
+
+        override fun encode(item: Produced<Int>): ByteArray = throw cancellation
+
+        override fun decode(payload: ByteArray): Produced<Int> = error("decode must not be called")
     }
 
     private class ThrowingCodec(private val cause: IllegalStateException) : OutputCodec<Int> {

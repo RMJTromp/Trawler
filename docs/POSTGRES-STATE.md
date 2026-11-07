@@ -78,7 +78,7 @@ start. Its defaults are deliberately finite:
 
 | Setting | Default | Meaning |
 |---|---:|---|
-| `maximumPoolSize` | `8` | Hikari connections owned by this adapter. |
+| `maximumPoolSize` | `8` | Hikari connections owned by this adapter; minimum 2, because Flyway holds a second connection during startup migration. |
 | `databaseDispatcherParallelism` | pool size | Fixed blocking-dispatcher threads; it cannot exceed the pool. |
 | `connectionTimeout` | 30 seconds | Hikari pool acquisition bound. |
 | `statementTimeout` | 30 seconds | JDBC statement timeout, rounded up to seconds. |
@@ -138,7 +138,12 @@ adapter reusable for a later explicit start; a normal `stop` is terminal.
 JDBC work runs on the adapter-owned bounded dispatcher. Coroutine cancellation
 stops awaiting the operation; Hikari acquisition and every JDBC statement are
 also bounded by configured timeouts. Transactions roll back on failure or
-cancellation and connections are returned through `use` blocks. Codec encode
+cancellation and connections are returned through `use` blocks. A caller
+cancelled before commit is rolled back (the transaction checks for
+cancellation immediately before `commit`); cancellation that arrives during
+or after the commit can still commit while the caller observes
+`CancellationException`, the same at-least-once window as a crash after
+commit. Codec encode
 and decode are local operations and do not create clients or acquire unrelated
 resources.
 
@@ -148,7 +153,12 @@ The state adapter applies `db/migration/state/V1__create_trawler_state.sql`
 and `V2__add_discovery_and_pipeline_state.sql` with
 `flyway_schema_history`. Response, output, and outbox adapters apply their own
 `V1` migrations under separate locations and history tables, so selecting a
-response or output adapter does not require operational-state tables:
+response or output adapter does not require operational-state tables. Several
+adapters may share one schema: each Flyway run uses `baselineOnMigrate` with
+baseline version `0`, so a schema that already contains another adapter's (or
+the host's) tables receives this adapter's history table and all of its `V1`+
+migrations instead of being rejected as non-empty. A table-name collision with
+host-owned objects still fails the migration loudly:
 
 | Object | Important columns and purpose |
 |---|---|
@@ -319,11 +329,12 @@ retention, transactional output, lineage release, FIFO outbox claims,
 reclaim/fencing, retry exhaustion, cancellation release, and duplicate-window
 delivery semantics with direct SQL assertions.
 
-The IT source compiles and is discoverable by Failsafe, but its execution is
-environment-dependent. In the current verification environment Docker CLI
-access worked while the pinned docker-java/Testcontainers client could not
-complete its Docker socket connection, so the database assertions remain
-runtime-unverified here. A focused run is:
+`PostgresCrawlStateStoreContractIT.kt` and `PostgresAdapterContractIT.kt` add
+every configuration bound, lock-loss and cancellation rollback, connection
+termination with pool recovery, and outbox lease expiry during delivery. The
+whole suite (20 unit, 69 integration tests) passes against
+`postgres:16.4-alpine` with Testcontainers 1.21.4 on Docker Engine 29, at
+99.2% line / 95.1% branch coverage (2026-11-07). A focused run is:
 
 ```bash
 mvn -pl trawler-postgres -am -Dit.test='Postgres*IT' \
@@ -331,8 +342,6 @@ mvn -pl trawler-postgres -am -Dit.test='Postgres*IT' \
 ```
 
 The required full command is `mvn clean verify` in an environment with a
-Testcontainers-compatible Docker runtime. In this phase the three response,
-output, and outbox IT sources compile and are discoverable, but their database
-assertions are runtime-unverified for the same environment limitation. Test
+Testcontainers-compatible Docker runtime. Test
 ownership, Docker requirements, and the full contract matrix are recorded in [`TESTING.md`](TESTING.md) and
 [`TEST-MATRIX.md`](TEST-MATRIX.md).

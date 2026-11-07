@@ -81,4 +81,74 @@ class PipelineContractsTest {
         assertEquals(listOf("one", "two"), result.values)
         assertEquals("follow-up", result.followUps.single().target)
     }
+
+    @Test
+    fun `production context rejects each blank identifier and accepts absent optional provenance`() {
+        fun context(
+            pipelineId: String = "pipeline",
+            engineRunId: String = "engine",
+            pipelineRunId: String = "run",
+            requestId: String? = null,
+            originalTarget: String? = null,
+            finalTarget: String? = null,
+        ) = ProductionContext(
+            pipelineId = pipelineId,
+            engineRunId = engineRunId,
+            pipelineRunId = pipelineRunId,
+            requestId = requestId,
+            responseReference = null,
+            originalTarget = originalTarget,
+            finalTarget = finalTarget,
+            producedAt = Instant.EPOCH,
+        )
+
+        val minimal = context()
+        assertEquals(null, minimal.requestId)
+        assertEquals(null, minimal.originalTarget)
+        assertEquals(null, minimal.finalTarget)
+        assertEquals(ContextAttributes.empty(), minimal.attributes)
+        assertEquals("request", context(requestId = "request").requestId)
+
+        assertEquals("Engine run ID must not be blank", assertFailsWith<IllegalArgumentException> {
+            context(engineRunId = " ")
+        }.message)
+        assertEquals("Pipeline run ID must not be blank", assertFailsWith<IllegalArgumentException> {
+            context(pipelineRunId = "")
+        }.message)
+        assertEquals("Request ID must not be blank when present", assertFailsWith<IllegalArgumentException> {
+            context(requestId = " ")
+        }.message)
+        assertEquals("Original target must not be blank when present", assertFailsWith<IllegalArgumentException> {
+            context(originalTarget = " ")
+        }.message)
+        assertEquals("Final target must not be blank when present", assertFailsWith<IllegalArgumentException> {
+            context(finalTarget = " ")
+        }.message)
+    }
+
+    @Test
+    fun `contract defaults are explicit and optional reasons stay absent`() {
+        val output = object : Output<Int> {
+            override val id: String = "output"
+            override suspend fun write(
+                items: List<Produced<Int>>,
+                context: com.rmjtromp.trawler.model.OutputContext,
+            ): OutputResult = OutputResult.Accepted(items.size)
+        }
+        val binding = OutputBinding(output)
+        assertSame(output, binding.output)
+        assertEquals(OutputRequirement.REQUIRED, binding.requirement)
+        assertEquals(OutputRequirement.BEST_EFFORT, OutputBinding(output, OutputRequirement.BEST_EFFORT).requirement)
+
+        assertEquals(null, TransformDecision.Drop().reason)
+        assertEquals(null, OutputResult.Skipped().reason)
+        assertEquals(null, ExtractionResult.Ignore().reason)
+        assertEquals(null, OutputResult.Failed(IllegalStateException()).retryHint)
+        assertEquals(emptyList(), ExtractionResult.Success(listOf(1)).followUps)
+        assertEquals(OutputResult.Accepted(0), OutputResult.Accepted(0))
+
+        val definition = PipelineDefinition("pipeline")
+        assertEquals(null, definition.displayName)
+        assertEquals("Pipeline", PipelineDefinition("pipeline", "Pipeline").displayName)
+    }
 }

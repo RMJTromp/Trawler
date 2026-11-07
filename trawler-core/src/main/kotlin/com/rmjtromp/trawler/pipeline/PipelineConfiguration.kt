@@ -216,7 +216,7 @@ public class PipelineBuilder<T : Any> public constructor(
 
     /** Sets the local router once; use [replaceTransport] for an explicit replacement. */
     public fun transport(router: TransportRouter): PipelineBuilder<T> {
-        recordSingleAssignment("transport", transportConfigured, replacement = false)
+        recordSingleAssignment("transport", transportConfigured)
         transportRouter = router
         transportConfigured = true
         return this
@@ -231,7 +231,7 @@ public class PipelineBuilder<T : Any> public constructor(
 
     /** Sets the required extractor once; use [replaceExtractor] to replace it explicitly. */
     public fun extract(extractor: Extractor<T>): PipelineBuilder<T> {
-        recordSingleAssignment("extractor", extractorConfigured, replacement = false)
+        recordSingleAssignment("extractor", extractorConfigured)
         this.extractor = extractor
         extractorConfigured = true
         return this
@@ -297,7 +297,7 @@ public class PipelineBuilder<T : Any> public constructor(
 
     /** Sets the complete local policy bundle once, replacing inherited defaults. */
     public fun policies(policies: PipelinePolicies): PipelineBuilder<T> {
-        recordSingleAssignment("policies", policySetConfigured, replacement = false)
+        recordSingleAssignment("policies", policySetConfigured)
         policySet = policies
         policySetConfigured = true
         return this
@@ -312,7 +312,7 @@ public class PipelineBuilder<T : Any> public constructor(
 
     /** Replaces the inherited request canonicalizer once. */
     public fun canonicalize(policy: RequestCanonicalizer): PipelineBuilder<T> {
-        requestCanonicalizer = assignPolicy("requestCanonicalizer", requestCanonicalizer, policy)
+        requestCanonicalizer = assignPolicy("requestCanonicalizer", requestCanonicalizer, policy, "replaceCanonicalizer")
         return this
     }
 
@@ -324,7 +324,7 @@ public class PipelineBuilder<T : Any> public constructor(
 
     /** Replaces the inherited request identity strategy once. */
     public fun identity(policy: RequestIdentityStrategy): PipelineBuilder<T> {
-        requestIdentity = assignPolicy("requestIdentity", requestIdentity, policy)
+        requestIdentity = assignPolicy("requestIdentity", requestIdentity, policy, "replaceIdentity")
         return this
     }
 
@@ -504,7 +504,7 @@ public class PipelineBuilder<T : Any> public constructor(
 
     /** Installs one explicit recurring-harvest strategy for this pipeline. */
     public fun harvest(strategy: HarvestStrategy): PipelineBuilder<T> {
-        recordSingleAssignment("harvest", harvestStrategy != null, replacement = false)
+        recordSingleAssignment("harvest", harvestStrategy != null)
         harvestStrategy = strategy
         return this
     }
@@ -578,7 +578,7 @@ public class PipelineBuilder<T : Any> public constructor(
         extractor?.let {
             addIdentifierIssues(issues, "pipeline[${definition.id}].extractor", listOf(it.id))
         }
-        effectivePolicies?.let { addPolicyIdentifierIssues(issues, definition.id, it) }
+        effectivePolicies?.let { addPolicyIdentifierIssues(issues, definition.id, resolvePolicies(defaults)) }
 
         return sortedIssues(issues)
     }
@@ -635,21 +635,32 @@ public class PipelineBuilder<T : Any> public constructor(
         )
     }
 
-    private fun recordSingleAssignment(slot: String, alreadyConfigured: Boolean, replacement: Boolean) {
-        if (alreadyConfigured && !replacement) {
+    private fun recordSingleAssignment(
+        slot: String,
+        alreadyConfigured: Boolean,
+        replaceMethod: String = defaultReplaceMethod(slot),
+    ) {
+        if (alreadyConfigured) {
             builderIssues += ConfigurationIssue(
                 path = "pipeline[${definition.id}].$slot",
                 code = ConfigurationIssueCode.DUPLICATE_SINGLE_EXTENSION,
-                message = "Multiple local registrations require an explicit " +
-                    "replace${slot.replaceFirstChar { it.uppercase() }} call",
+                message = "Multiple local registrations require an explicit $replaceMethod call",
             )
         }
     }
 
-    private fun <P> assignPolicy(slot: String, current: P?, next: P): P {
-        recordSingleAssignment(slot, current != null, replacement = false)
+    private fun <P> assignPolicy(
+        slot: String,
+        current: P?,
+        next: P,
+        replaceMethod: String = defaultReplaceMethod(slot),
+    ): P {
+        recordSingleAssignment(slot, current != null, replaceMethod)
         return next
     }
+
+    /** Slots are non-empty literals, so the first character always exists. */
+    private fun defaultReplaceMethod(slot: String): String = "replace${slot[0].uppercaseChar()}${slot.substring(1)}"
 }
 
 /** Creates and builds a typed pipeline outside an engine DSL. */

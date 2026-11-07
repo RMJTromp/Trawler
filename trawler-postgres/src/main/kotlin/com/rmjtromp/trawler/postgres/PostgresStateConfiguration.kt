@@ -76,7 +76,9 @@ public class PostgresStateConfiguration(
         require(isSafeIdentifier(schema)) {
             "PostgreSQL state schema must be a simple SQL identifier"
         }
-        require(maximumPoolSize > 0) { "PostgreSQL pool size must be positive" }
+        // Flyway holds a second connection for the migration itself, so a
+        // one-connection pool can never complete adapter startup.
+        require(maximumPoolSize >= 2) { "PostgreSQL pool size must be at least 2 for Flyway migration" }
         require(minimumIdle in 0..maximumPoolSize) {
             "PostgreSQL minimum idle must be between zero and the pool size"
         }

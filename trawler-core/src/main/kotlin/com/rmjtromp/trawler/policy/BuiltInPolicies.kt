@@ -178,12 +178,12 @@ public class FixedConcurrencyPolicy(
     private val maxPermits: Int,
     override val id: String = "concurrency-$maxPermits",
 ) : ConcurrencyPolicy {
-    private val semaphore = Semaphore(maxPermits)
-
     init {
         require(maxPermits > 0) { "Concurrency permit count must be positive" }
         require(id.isNotBlank()) { "Concurrency policy ID must not be blank" }
     }
+
+    private val semaphore = Semaphore(maxPermits)
 
     override suspend fun acquire(request: CrawlRequest, context: RequestContext): ConcurrencyPermit {
         semaphore.acquire()

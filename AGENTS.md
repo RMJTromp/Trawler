@@ -9,7 +9,7 @@ The words **must**, **must not**, **required**, and **forbidden** are normative.
 Before making changes, read:
 
 1. this file in full;
-2. `plans/FINAL-PLAN.md` for architecture and delivery phases;
+2. `PLAN.md` for architecture and delivery phases;
 3. `docs/MODULES.md` before adding/moving a Maven module or deciding where an implementation belongs;
 4. the focused documents under `docs/` relevant to the task;
 5. the files currently being changed and their direct collaborators.
@@ -19,7 +19,7 @@ Authority order:
 ```text
 explicit user instruction
   > AGENTS.md
-  > plans/FINAL-PLAN.md
+  > PLAN.md
   > focused docs under docs/
   > README.md
   > examples, comments, old discussion, or inferred convention
@@ -29,7 +29,7 @@ If two authoritative rules still conflict, stop and ask. Do not silently select 
 
 ## 2. Current project status
 
-Trawler is ready for Phase 1 implementation. The Maven reactor currently contains the build-only `trawler-parent` and implementation-ready `trawler-core`; there is no production implementation yet.
+Phases 0–6 of `PLAN.md` are implemented and unreleased (`0.1.0-SNAPSHOT`). The Maven reactor contains the build-only `trawler-parent`, the version-alignment `trawler-bom`, the runtime artifacts `trawler-core`, `trawler-web`, `trawler-postgres`, and the Phase 7 `trawler-flaresolverr` adapter, and the non-published `trawler-coverage` aggregate. `README.md` and the feature records under `docs/` describe exactly what each artifact implements; other Phase 7 integrations exist only when their module is present in the reactor.
 
 Do not:
 
@@ -224,22 +224,17 @@ Changes to dependencies must update both the POM and dependency documentation in
 
 ## 7. Testing policy
 
-### 7.1 Authorization
+### 7.1 Tests are required
 
-Do **not** add, generate, rewrite, move, or refactor tests unless the user explicitly requests tests for the current task.
+Every change that adds or alters behavior must add or update automated tests in the same change. Untested production code is incomplete work, not a finished change. Bug fixes must include a test that fails without the fix.
 
-An implementation request alone is not permission to add tests. A plan mentioning tests is not permission. Existing test dependencies are not permission.
+Fixing a test that encodes a wrong expectation is allowed, but the handoff must say which assertion changed and why; never edit a test merely to make a build green.
 
-If tests are not authorized:
+If a behavior genuinely cannot be tested automatically, document it in the untested-risk register in `docs/TEST-MATRIX.md` and state it in the handoff.
 
-- do not create test files;
-- do not add test dependencies or test plugins;
-- still perform compilation, static inspection, and focused manual verification appropriate to the change;
-- state clearly in the handoff that automated tests were not added or run.
+### 7.2 Test standards
 
-### 7.2 Standards when tests are authorized
-
-When the user explicitly authorizes tests:
+All tests must follow these standards:
 
 - test public behavior and contracts rather than private implementation details;
 - include negative, boundary, cancellation, failure, and recovery cases;
@@ -252,7 +247,7 @@ When the user explicitly authorizes tests:
 - do not reduce coverage, weaken assertions, add sleeps, or swallow failures to make tests pass;
 - document any remaining untested risk.
 
-High-risk areas, when tests are authorized, include:
+High-risk areas that require explicit coverage include:
 
 - type isolation across heterogeneous pipelines;
 - cancellation and cleanup;
@@ -335,7 +330,7 @@ Additional requirements:
 2. Inspect repository state and relevant files.
 3. Restate the requested outcome and identify the owning layer.
 4. Identify architecture, dependency, security, persistence, and documentation impact.
-5. Confirm whether the request authorizes production code, tests, dependency changes, and external actions; do not infer broader authorization.
+5. Confirm whether the request authorizes production code, dependency changes, and external actions; do not infer broader authorization. Tests for the changed behavior are always in scope.
 6. Make the smallest complete plan appropriate to the task.
 
 ### During implementation
@@ -352,7 +347,7 @@ Additional requirements:
 2. Run formatting/check commands only on the relevant changed scope when possible.
 3. Run `mvn clean compile` for production/build changes.
 4. Run `mvn clean verify` when the configured lifecycle and task scope justify it.
-5. Run authorized tests if tests were requested.
+5. Add or update tests for the changed behavior and run them; `mvn clean verify` must pass.
 6. Confirm documentation, dependency inventory, and project-status claims are accurate.
 7. Confirm core dependency boundaries are intact.
 8. Report files changed, important decisions, verification performed, tests not run, and remaining risk.
@@ -381,13 +376,13 @@ A stylistically clean change that violates an earlier priority must not be accep
 A change is complete only when:
 
 - it fulfills the exact requested outcome;
-- it respects `plans/FINAL-PLAN.md` and these rules;
+- it respects `PLAN.md` and these rules;
 - it introduces no unjustified dependency or adapter leakage;
 - lifecycle, cancellation, failure, persistence, and delivery behavior are explicit;
 - resources are bounded and cleaned up;
 - documentation matches reality;
 - applicable verification succeeds;
-- test authorization was respected;
+- the changed behavior is covered by automated tests that pass;
 - the handoff accurately reports what was and was not verified;
 - no unrelated user work was altered.
 

@@ -59,7 +59,7 @@ class PostgresOutputIT {
         assertEquals(OutputResult.Accepted(0), output.write(emptyList(), outputContext()))
         output.start(startContext())
         output.start(startContext())
-        assertEquals(1, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_output_schema_history\""))
+        assertEquals(1, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_output_schema_history\" WHERE type = 'SQL'"))
         assertTrue(tableExists(schema, "output_entries"))
         assertFalse(tableExists(schema, "response_records"))
         assertFalse(tableExists(schema, "outbox_entries"))
@@ -118,7 +118,7 @@ class PostgresOutputIT {
             val codecFailure = assertIs<OutputResult.Failed>(
                 output.write(listOf(produced(1), produced(2)), outputContext()),
             )
-            assertEquals(cause, codecFailure.error)
+            assertOriginalFailure(cause, codecFailure.error)
             assertEquals(0, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"output_entries\""))
         } finally {
             output.stop(stopContext())

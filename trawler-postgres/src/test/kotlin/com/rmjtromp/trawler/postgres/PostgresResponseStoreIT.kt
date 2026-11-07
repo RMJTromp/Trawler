@@ -50,7 +50,7 @@ class PostgresResponseStoreIT {
         }
         store.start(startContext())
         store.start(startContext())
-        assertEquals(1, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_response_schema_history\""))
+        assertEquals(1, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_response_schema_history\" WHERE type = 'SQL'"))
         assertTrue(tableExists(schema, "response_records"))
         assertTrue(tableExists(schema, "response_lineage"))
         assertFalse(tableExists(schema, "jobs"))
@@ -307,6 +307,31 @@ class PostgresResponseStoreIT {
             )
             assertEquals(1, second.deleted)
             assertNotNull(store.find(ResponseLookup.ByReference(newer)))
+        } finally {
+            store.stop(stopContext())
+        }
+    }
+
+    @Test
+    fun `response adapter migrates into a shared schema that already contains other tables`(): Unit = runBlocking {
+        val schema = nextSchema()
+        withConnection { connection ->
+            connection.createStatement().use {
+                it.execute("CREATE SCHEMA \"$schema\"")
+                it.execute("CREATE TABLE \"$schema\".\"host_owned\" (id INTEGER PRIMARY KEY)")
+                it.execute("INSERT INTO \"$schema\".\"host_owned\" VALUES (7)")
+            }
+        }
+        val store = store(schema)
+        store.start(startContext())
+        try {
+            assertTrue(tableExists(schema, "response_records"))
+            assertEquals(
+                1,
+                scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"flyway_response_schema_history\" WHERE type = 'SQL' AND success"),
+            )
+            assertEquals(1, scalarInt(schema, "SELECT COUNT(*) FROM \"$schema\".\"host_owned\" WHERE id = 7"))
+            assertNotNull(store.put(response("https://example.test/shared", "pipeline", byteArrayOf(1))))
         } finally {
             store.stop(stopContext())
         }

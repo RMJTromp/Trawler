@@ -2695,7 +2695,7 @@ private suspend fun <T : Any> deliverOutputs(
     counters: PipelineCounters,
     produced: List<Produced<T>>,
     crawler: CrawlerContext,
-    beforeDelivery: suspend () -> Unit = {},
+    beforeDelivery: suspend () -> Unit,
 ) {
     if (produced.isEmpty()) return
     if (pipeline.outputs.isEmpty()) {
@@ -2725,9 +2725,7 @@ private suspend fun <T : Any> deliverOutputs(
                 }
 
                 is OutputResult.Skipped -> {
-                    if (binding.output is NoOutput<*>) {
-                        context.event(CrawlerEventType.VALUE_DROPPED, crawler, detail = result.reason)
-                    } else if (binding.requirement == OutputRequirement.REQUIRED) {
+                    if (binding.output !is NoOutput<*> && binding.requirement == OutputRequirement.REQUIRED) {
                         throw StageFailure(
                             "output:${binding.output.id}",
                             IllegalStateException(result.reason ?: "Required output skipped delivery"),
@@ -3028,7 +3026,7 @@ private suspend fun storeResponse(
 
 private fun CrawlRequest.withRuntimeAttributes(
     context: TypedPipelineExecutionContext,
-    requestId: String? = null,
+    requestId: String?,
 ): CrawlRequest = copy(
     attributes = ContextAttributes.from(
         attributes.entries
@@ -3042,7 +3040,7 @@ private fun CrawlRequest.withRuntimeAttributes(
 
 private fun CrawlResponse.withRuntimeAttributes(
     context: TypedPipelineExecutionContext,
-    requestId: String? = null,
+    requestId: String?,
 ): CrawlResponse = copy(
     request = request.withRuntimeAttributes(context, requestId),
 )
@@ -3129,5 +3127,3 @@ private fun RunResult.toDurableStatus(): DurableRunStatus = when (status) {
     RunStatus.FAILED -> DurableRunStatus.FAILED
     RunStatus.CANCELLED -> DurableRunStatus.CANCELLED
 }
-
-private class EngineDaemonHandleMarker

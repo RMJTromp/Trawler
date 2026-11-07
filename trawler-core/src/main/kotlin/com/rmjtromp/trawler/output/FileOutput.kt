@@ -130,14 +130,22 @@ public class FileOutput<T : Any>(
         }
     }
 
-    private suspend fun <R> onFileDispatcher(action: suspend () -> R): R =
-        withContext(dispatcher) {
+    private suspend fun <R> onFileDispatcher(action: suspend () -> R): R {
+        // Checked before dispatch: a closed executor rejects the task with a
+        // CancellationException, which callers would mistake for cancellation.
+        checkOpen()
+        return withContext(dispatcher) {
             mutex.withLock {
-                check(!closed.get()) { "File output '$id' is closed" }
+                checkOpen()
                 loadIfNeeded()
                 action()
             }
         }
+    }
+
+    private fun checkOpen() {
+        check(!closed.get()) { "File output '$id' is closed" }
+    }
 
     private fun append(payload: ByteArray) {
         var segment = current

@@ -131,4 +131,76 @@ class CoreModelsTest {
             CrawlerContext("engine", "pipeline-run", "pipeline", requestId = " ")
         }
     }
+
+    @Test
+    fun `value-equal collections and bodies compare by content and render without secrets`() {
+        val attributes = ContextAttributes.of(ContextAttribute("trace", "one"))
+        assertEquals(attributes, ContextAttributes.from(listOf(ContextAttribute("trace", "one"))))
+        assertEquals(attributes.hashCode(), ContextAttributes.from(listOf(ContextAttribute("trace", "one"))).hashCode())
+        assertNotEquals(attributes, ContextAttributes.empty())
+        assertNotEquals<Any>(attributes, "trace=one")
+        assertEquals(null, attributes["missing"])
+        assertEquals("ContextAttributes(entries=[ContextAttribute(name=trace, value=one)])", attributes.toString())
+
+        val headers = Headers.of(Header("Accept", "text/plain"))
+        assertEquals(headers, Headers.from(listOf(Header("Accept", "text/plain"))))
+        assertEquals(headers.hashCode(), Headers.from(listOf(Header("Accept", "text/plain"))).hashCode())
+        assertNotEquals<Any>(headers, listOf(Header("Accept", "text/plain")))
+        assertEquals(emptyList(), headers["missing"])
+        assertTrue(headers.toString().startsWith("Headers(entries="))
+
+        val requestBody = RequestBody.from(byteArrayOf(1, 2))
+        assertEquals(requestBody, RequestBody.from(byteArrayOf(1, 2)))
+        assertEquals(requestBody.hashCode(), RequestBody.from(byteArrayOf(1, 2)).hashCode())
+        assertNotEquals(requestBody, RequestBody.from(byteArrayOf(1, 3)))
+        assertNotEquals<Any>(requestBody, ResponseBody.from(byteArrayOf(1, 2)))
+        assertEquals("RequestBody(size=2)", requestBody.toString())
+        assertEquals(0, RequestBody.empty().size)
+        assertEquals(RequestBody.empty(), RequestBody.from(ByteArray(0)))
+
+        val responseBody = ResponseBody.from(byteArrayOf(7))
+        assertEquals(responseBody, ResponseBody.from(byteArrayOf(7)))
+        assertEquals(responseBody.hashCode(), ResponseBody.from(byteArrayOf(7)).hashCode())
+        assertNotEquals(responseBody, ResponseBody.from(byteArrayOf(8)))
+        assertNotEquals<Any>(responseBody, requestBody)
+        assertEquals("ResponseBody(size=1)", responseBody.toString())
+        assertEquals(0, ResponseBody.empty().size)
+    }
+
+    @Test
+    fun `crawler context validates every optional identifier only when present`() {
+        val context = CrawlerContext("engine", "pipeline-run", "pipeline", requestId = "request", attemptId = "attempt")
+        assertEquals("attempt", context.attemptId)
+        assertEquals(null, CrawlerContext("engine", "pipeline-run", "pipeline").attemptId)
+        listOf(
+            "Engine run ID must not be blank" to { CrawlerContext(" ", "pipeline-run", "pipeline") },
+            "Pipeline run ID must not be blank" to { CrawlerContext("engine", "", "pipeline") },
+            "Pipeline ID must not be blank" to { CrawlerContext("engine", "pipeline-run", "") },
+            "Request ID must not be blank when present" to {
+                CrawlerContext("engine", "pipeline-run", "pipeline", requestId = "")
+            },
+            "Attempt ID must not be blank when present" to {
+                CrawlerContext("engine", "pipeline-run", "pipeline", attemptId = " ")
+            },
+            "Attempt ID must not be blank when present" to {
+                CrawlerContext("engine", "pipeline-run", "pipeline", attemptId = "")
+            },
+        ).forEach { (message, construct) ->
+            assertEquals(message, assertFailsWith<IllegalArgumentException> { construct() }.message)
+        }
+    }
+
+    @Test
+    fun `request and response defaults are transport neutral`() {
+        val request = CrawlRequest("opaque")
+        assertEquals(RequestMethod.GET, request.method)
+        assertEquals("GET", request.method.value)
+        assertEquals(Headers.empty(), request.headers)
+        assertEquals(null, request.body)
+        assertEquals(ContextAttributes.empty(), request.attributes)
+        val response = CrawlResponse(request, null, Headers.empty(), ResponseBody.empty(), Instant.EPOCH, "final")
+        assertEquals(null, response.statusCode)
+        assertEquals("final", response.finalTarget)
+        assertEquals("reference", ResponseReference("reference").value)
+    }
 }

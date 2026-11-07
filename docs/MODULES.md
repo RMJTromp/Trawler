@@ -16,7 +16,7 @@ Three ideas must remain distinct:
 
 Physical modules exist to isolate dependencies, technology stacks, heavy operational footprints, or meaningful independent replacement—not to mirror every interface.
 
-> **Current repository status:** The reactor contains the build-only `trawler-parent` and `trawler-coverage` projects, plus `trawler-core` and the implemented optional `trawler-web` and `trawler-postgres` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, resumable/recurring discovery coordination, Ktor/web behavior, bounded XML discovery, durable PostgreSQL operational state, optional response storage/replay, typed file output, PostgreSQL output, and fenced outbox delivery are implemented. Specialized modules remain planned.
+> **Current repository status:** The reactor contains the build-only `trawler-parent` and `trawler-coverage` projects, the version-alignment `trawler-bom`, plus `trawler-core` and the implemented optional `trawler-web`, `trawler-postgres`, and `trawler-flaresolverr` adapters. Core typed contracts, composition, configuration validation, the bounded database-free runtime, lightweight built-ins, resumable/recurring discovery coordination, Ktor/web behavior, bounded XML discovery, durable PostgreSQL operational state, optional response storage/replay, typed file output, PostgreSQL output, fenced outbox delivery, and the opt-in FlareSolverr transport and challenge-clearance reuse are implemented. Other specialized modules remain planned.
 
 ## Module admission test
 
@@ -48,9 +48,21 @@ Owns:
 
 It must contain no runtime code or runtime dependencies.
 
+### `trawler-bom`
+
+**Packaging:** Published Maven `pom` module containing only `dependencyManagement`.
+
+Aligns the versions of the published Trawler runtime artifacts. It deliberately
+does not inherit `trawler-parent`, because an imported BOM contributes its whole
+effective dependency management; inheriting the parent would leak Ktor,
+PostgreSQL, JUnit, and Testcontainers versions into consumers. Its version must
+be kept equal to the reactor version, and every new runtime artifact must be
+added to it in the same change that creates the artifact.
+
 ### `trawler-coverage`
 
 **Packaging:** Non-published build-only Maven `pom` module, last in the reactor.
+Deployment is disabled with `maven.deploy.skip`.
 
 Owns only the JaCoCo `report-aggregate` execution. It has provided-scoped
 references to each implementation module so the aggregate report is generated
@@ -149,13 +161,42 @@ independent retention without adding a universal produced-data table.
 
 A generic multi-database JDBC abstraction is not part of this initial artifact. Add `trawler-jdbc` later only if real non-PostgreSQL implementations demonstrate a shared contract and implementation worth extracting.
 
+### `trawler-flaresolverr`
+
+**Creation:** Phase 7; created with the first real FlareSolverr implementation.
+
+**Packaging:** Published optional JAR depending on `trawler-core` and
+`trawler-web`.
+
+Owns the opt-in integration with an operator-run FlareSolverr v3 service:
+
+- `FlareSolverrTransport`, a core `Transport` that executes `GET` and
+  form-urlencoded `POST` through FlareSolverr's `/v1` API, with an optional
+  lifecycle-owned session pool;
+- adapter-local challenge contracts (`ChallengeDetector`, `ChallengeResolver`,
+  `ChallengeKind`) and the bundled `CloudflareChallengeDetector`;
+- `FlareSolverrChallengeResolver`, the bounded process-local
+  `ClearanceStore`, and `ChallengeClearance`, which coordinates per-origin
+  single-flight resolution and reuses clearance through `trawler-web`'s
+  `CookieSession` and request middleware;
+- `FlareSolverrFailureClassifier` and `ChallengeRetryPolicy`, keeping retry
+  visible to engine attempt accounting.
+
+It is separate because it integrates a specialized external service with its
+own session, credential, and network-safety footprint that most users omit,
+and it adds the module-owned `kotlinx-serialization-json-jvm` dependency. The
+`trawler-web` dependency is inherent: clearance is reused by `KtorTransport`
+and target admission uses `WebDestinationPolicy`. Challenge contracts stay in
+this artifact rather than core; see
+[ADR-0009](decisions/0009-flaresolverr-adapter-boundary.md) and the
+[feature record](FLARESOLVERR.md).
+
 ### Specialized artifacts
 
 Create these only when their implementations are requested:
 
 | Artifact | Why separate |
 |---|---|
-| `trawler-antibot-flaresolverr` | Specialized external service, session/security behavior, and limited audience. Depends on core and normally web. |
 | `trawler-transport-browser` | Heavy browser/native/runtime footprint and distinct lifecycle. |
 | `trawler-observability-otel` | Substantial telemetry dependency graph and ecosystem compatibility. |
 | `trawler-warc` | Specialized archive format and conformance requirements. |
@@ -164,7 +205,7 @@ Do not create placeholder POMs for these modules before implementation begins.
 
 ### Build and consumer support artifacts
 
-Create `trawler-bom` when at least two runtime artifacts are ready to be published. It aligns all Trawler artifact versions and contains no code.
+`trawler-bom` exists because multiple runtime artifacts are published. It aligns all Trawler runtime artifact versions and contains no code or third-party versions.
 
 Do not create a “depends on everything” artifact initially. Such an artifact would pull PostgreSQL, Ktor, telemetry, browser, or anti-bot dependencies into users that do not need them. A convenience starter may be added later only for a proven common deployment profile and must list exactly what it brings in.
 
@@ -183,6 +224,7 @@ Examples remain in the repository but are not published as production runtime de
 | Bounded file response/output | `trawler-core` | Implemented JDK-only, codec-driven standard capability; no separate tiny artifact. WARC/object storage remains separate. |
 | Ktor + web policies and bounded RSS/Atom/sitemap discovery | `trawler-web` | Cohesive HTTP semantics and shared external stack; XML behavior uses JDK APIs without a parser dependency. |
 | PostgreSQL state, run history, leases, attempts, request codecs, checkpoints, recurring state, response history, typed output, outbox, and retention | `trawler-postgres` | Cohesive database stack; Phase 4/5/6 capabilities remain separately activated. |
+| FlareSolverr transport, challenge detection/resolution contracts, clearance store, and challenge retry/classification | `trawler-flaresolverr` | One specialized external service and its JSON protocol; transport and clearance reuse remain separately selected. |
 
 ## What must not become a module
 
@@ -209,20 +251,22 @@ trawler-core                           Kotlin + coroutines
   ↑
   ├── trawler-web                      Ktor and justified web dependencies
   ├── trawler-postgres                 JDBC/PostgreSQL/pool/migrations
+  ├── trawler-flaresolverr             FlareSolverr client (Ktor CIO + kotlinx-serialization JSON); also depends on trawler-web
   ├── trawler-coverage                 provided-scoped report aggregation only
   ├── trawler-observability-otel       OpenTelemetry stack
   └── specialized adapters             their technology dependencies
 
-trawler-bom                            version alignment only, added later
+trawler-bom                            version alignment only; no parent, no code
 ```
 
-No sibling adapter may become a transitive requirement of another unless the relationship is inherent and documented. For example, a FlareSolverr integration may depend on `trawler-web`; PostgreSQL must never become a dependency of web transport.
+No sibling adapter may become a transitive requirement of another unless the relationship is inherent and documented. For example, `trawler-flaresolverr` depends on `trawler-web`; PostgreSQL must never become a dependency of web transport.
 
 ## Repository creation policy
 
 Add a runtime module in the same change that begins its real implementation.
-The Phase 3 change created `trawler-web` and the Phase 4 change created
-`trawler-postgres` with:
+The Phase 3 change created `trawler-web`, the Phase 4 change created
+`trawler-postgres`, and the Phase 7 FlareSolverr change created
+`trawler-flaresolverr` with:
 
 - the module POM;
 - dependency inventory update;

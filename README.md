@@ -2,7 +2,7 @@
 
 Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-> **Project status:** The current `0.1.0-SNAPSHOT` build includes the `trawler-core`, `trawler-web`, and `trawler-postgres` artifacts. Core provides typed pipeline composition, bounded execution, scheduling, discovery coordination, response storage and replay, typed outputs, and replaceable policies. The optional web artifact provides Ktor/CIO transport, web policies, and bounded XML discovery. The optional PostgreSQL artifact provides durable operational state, fenced leases, recurring discovery state, response/output history, outbox delivery, and retention. The artifacts are implemented but unreleased; specialized integrations such as browser, FlareSolverr, telemetry, WARC/object storage, and external delivery/scheduling are not included in the current distribution.
+> **Project status:** The current `0.1.0-SNAPSHOT` build includes the `trawler-core`, `trawler-web`, `trawler-postgres`, and `trawler-flaresolverr` artifacts. Core provides typed pipeline composition, bounded execution, scheduling, discovery coordination, response storage and replay, typed outputs, and replaceable policies. The optional web artifact provides Ktor/CIO transport, web policies, and bounded XML discovery. The optional PostgreSQL artifact provides durable operational state, fenced leases, recurring discovery state, response/output history, outbox delivery, and retention. The optional FlareSolverr artifact provides an opt-in FlareSolverr transport and solve-then-reuse challenge clearance for web pipelines. The artifacts are implemented but unreleased; specialized integrations such as browser, telemetry, WARC/object storage, and external delivery/scheduling are not included in the current distribution.
 
 The governing product rule is:
 
@@ -161,12 +161,22 @@ The implemented optional `trawler-postgres` adapter provides:
   delivery, and independent retention; these are not part of operational state
   and do not define a universal extracted-record table.
 
+The implemented optional `trawler-flaresolverr` adapter provides:
+
+- a FlareSolverr v3 transport for `GET` and form-urlencoded `POST`, with an
+  optional lifecycle-owned session pool and initial/final URL destination checks;
+- adapter-local challenge detection (Cloudflare detector included), per-origin
+  single-flight resolution through FlareSolverr, and a bounded in-memory
+  clearance store whose cookies and User-Agent are reused by `KtorTransport`;
+- failure classification and a retry decorator that keep challenge retries
+  visible to engine attempt accounting.
+
 Not included in the current distribution:
 
 - object-store or WARC response storage;
 - queue-backed outputs and external delivery integrations;
 - specialized discovery beyond the bounded RSS/Atom/sitemap and pagination hooks;
-- FlareSolverr or browser challenge resolution;
+- browser transport or browser-based challenge resolution beyond the FlareSolverr adapter;
 - SLF4J, Micrometer, or OpenTelemetry observers;
 - specialized external scheduling integrations when the built-in coroutine scheduler is insufficient.
 
@@ -178,13 +188,15 @@ Trawler uses logical extension boundaries everywhere, but only a few cohesive ph
 
 ```text
 trawler-parent                 build/version management only
+├── trawler-bom                version alignment for Trawler artifacts
 ├── trawler-core               engine + lightweight dependency-free built-ins
 ├── trawler-web                Ktor + cohesive public-web behavior
 ├── trawler-postgres            PostgreSQL durable operational state
+├── trawler-flaresolverr       FlareSolverr transport + challenge clearance (uses trawler-web)
 └── trawler-coverage            non-published JaCoCo reactor aggregate
 
 not in the current reactor:
-└── specialized artifacts      browser, FlareSolverr, OpenTelemetry, WARC
+└── specialized artifacts      browser, OpenTelemetry, WARC
 ```
 
 A small extension does not receive its own Maven artifact merely because it is replaceable. The built-in scheduler, in-memory state, seed discovery, callback output, response stores, and generic policies are bundled in `trawler-core`.
@@ -219,8 +231,9 @@ A separate artifact is used when a capability introduces an external technology 
 ## Current repository state
 
 The repository contains the implemented core contracts/runtime, optional Ktor
-web adapter, and optional durable PostgreSQL state/response/output adapter.
-Specialized integrations are intentionally outside the current reactor.
+web adapter, optional durable PostgreSQL state/response/output adapter, and
+optional FlareSolverr adapter. Other specialized integrations are
+intentionally outside the current reactor.
 
 ```text
 Trawler/
@@ -241,6 +254,12 @@ Trawler/
 │   ├── src/main/kotlin/       PostgreSQL state, response/output history, leases, attempts, codecs, and recurring state
 │   ├── src/main/resources/    adapter-owned Flyway migrations
 │   └── README.md              PostgreSQL-specific scope and build entry point
+├── trawler-flaresolverr/
+│   ├── pom.xml                optional FlareSolverr adapter artifact
+│   ├── src/main/kotlin/       FlareSolverr transport, challenge detection/resolution, clearance reuse
+│   └── README.md              FlareSolverr-specific scope and build entry point
+├── trawler-bom/
+│   └── pom.xml                published version-alignment BOM
 ├── trawler-coverage/
 │   └── pom.xml                non-published JaCoCo aggregate module
 ├── docs/
@@ -254,6 +273,7 @@ Trawler/
 │   ├── POSTGRES-STATE.md      durable state feature record
 │   ├── RECURRING-DISCOVERY.md resumable/recurring discovery record
 │   ├── RESPONSE-OUTPUT.md     response/output/replay/retention record
+│   ├── FLARESOLVERR.md        FlareSolverr adapter feature record
 │   └── decisions/             architecture decision records
 └── PLAN.md                    authoritative architecture plan
 ```
@@ -283,14 +303,17 @@ mvn clean verify
 ```
 
 The reactor contains the core JAR, optional `trawler-web` JAR, optional
-`trawler-postgres` JAR, and the non-published `trawler-coverage` reporting
-module. Core contains typed contracts, immutable
+`trawler-postgres` JAR, optional `trawler-flaresolverr` JAR, the `trawler-bom`
+version-alignment POM, and the
+non-published `trawler-coverage` reporting module. Core contains typed contracts, immutable
 configuration, bounded runtime/scheduling, generic resumable-discovery
 coordination, optional response stores/replay, and typed file output; the web
 artifact owns Ktor/HTTP and bounded XML discovery; the PostgreSQL artifact owns
 JDBC, Hikari, Flyway, durable operational state, response/output history,
 fenced outbox delivery, leases, attempts, request codecs, checkpoints, harvest
-state, eligibility state, and independent retention. Do not add placeholder
+state, eligibility state, and independent retention; the FlareSolverr
+artifact owns the FlareSolverr client, transport, and challenge-clearance
+reuse. Do not add placeholder
 classes or resources for capabilities that are not implemented.
 
 There is currently no runnable main class; the engine and adapters are library
@@ -298,8 +321,9 @@ APIs. See the [typed core contracts feature record](docs/TYPED-CORE-CONTRACTS.md
 the [in-memory engine feature record](docs/IN-MEMORY-ENGINE.md), the [web
 adapter feature record](docs/WEB-ADAPTER.md), the [PostgreSQL state feature
 record](docs/POSTGRES-STATE.md), the [recurring discovery feature record](docs/RECURRING-DISCOVERY.md),
-and the [response/output feature record](docs/RESPONSE-OUTPUT.md) for the
-current module boundaries and implemented capabilities.
+the [response/output feature record](docs/RESPONSE-OUTPUT.md), and the
+[FlareSolverr adapter feature record](docs/FLARESOLVERR.md) for the current
+module boundaries and implemented capabilities.
 
 ## Using Trawler with Maven
 
@@ -314,6 +338,26 @@ repository to your project:
     </repository>
 </repositories>
 ```
+
+Optionally import the BOM so every Trawler artifact uses one version:
+
+```xml
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>com.rmjtromp.trawler</groupId>
+            <artifactId>trawler-bom</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+```
+
+The BOM manages only Trawler artifacts; it does not pin Ktor, PostgreSQL, or
+any other third-party version. With it imported, the `<version>` elements
+below may be omitted.
 
 Add the core library:
 
@@ -339,6 +383,13 @@ Add these optional adapters only when needed:
     <artifactId>trawler-postgres</artifactId>
     <version>0.1.0-SNAPSHOT</version>
 </dependency>
+
+<!-- Requires a separately operated FlareSolverr v3 service; brings in trawler-web. -->
+<dependency>
+    <groupId>com.rmjtromp.trawler</groupId>
+    <artifactId>trawler-flaresolverr</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
 ```
 
 For a released version, use the same coordinates with the release version and
@@ -360,7 +411,10 @@ the Ktor CIO transport and its adapter-scoped transitive graph; MockEngine is
 owned by that module's tests. The optional
 `trawler-postgres` artifact owns the PostgreSQL driver, HikariCP, Flyway, and
 their adapter-scoped transitive graph; Testcontainers is owned by that
-module's tests and none of those dependencies enter core.
+module's tests and none of those dependencies enter core. The optional
+`trawler-flaresolverr` artifact depends on `trawler-web`, reuses its Ktor CIO
+client library for the FlareSolverr endpoint, and adds only
+`kotlinx-serialization-json-jvm` for the FlareSolverr JSON protocol.
 See
 [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for the complete direct and
 resolved inventory and [docs/TESTING.md](docs/TESTING.md) for test commands and
@@ -394,9 +448,9 @@ No change is complete merely because it compiles.
 
 ### Tests
 
-Repository policy requires explicit owner authorization before an agent adds or refactors automated tests. Agents must not infer permission from an implementation request.
-
-When tests are authorized:
+Every change that adds or alters behavior must add or update automated tests
+in the same change; bug fixes include a test that fails without the fix. Tests
+must:
 
 - test externally observable contracts, not private implementation trivia;
 - cover failure, cancellation, boundary, and recovery behavior—not only happy paths;
@@ -405,7 +459,8 @@ When tests are authorized:
 - do not weaken assertions or delete coverage to make a change pass;
 - document intentionally untested risk.
 
-When tests are not authorized, compilation, static inspection, and focused manual verification remain mandatory, and the handoff must state that automated tests were not added or run.
+Behavior that genuinely cannot be tested automatically is recorded in the
+untested-risk register in [docs/TEST-MATRIX.md](docs/TEST-MATRIX.md).
 
 Full rules are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 

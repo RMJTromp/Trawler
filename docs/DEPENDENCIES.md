@@ -9,17 +9,20 @@
 | Module | Packaging | Published runtime artifact | Purpose |
 |---|---|---|---|
 | `trawler-parent` | `pom` | No | Reactor, version, dependency, and plugin management. It has no runtime dependencies. |
-| `trawler-coverage` | `pom` | No | Last-in-reactor JaCoCo aggregate reporting. It has only provided-scoped build references to implementation modules. |
+| `trawler-bom` | `pom` | Yes | Version alignment for Trawler runtime artifacts only. It does not inherit `trawler-parent`, so importing it never manages third-party or test dependency versions. |
+| `trawler-coverage` | `pom` | No (`maven.deploy.skip`) | Last-in-reactor JaCoCo aggregate reporting. It has only provided-scoped build references to implementation modules. |
 | `trawler-core` | `jar` | Yes, once releases begin | Generic contracts/engine and lightweight official implementations. |
 | `trawler-web` | `jar` | Yes, once releases begin | Optional Ktor/CIO HTTP transport, replaceable web policies, and bounded XML discovery. |
 | `trawler-postgres` | `jar` | Yes, once releases begin | Optional PostgreSQL operational state, response history, typed output, fenced outbox, leases, attempts, run history, request codecs, checkpoints, and recurring state. |
+| `trawler-flaresolverr` | `jar` | Yes, once releases begin | Optional FlareSolverr v3 transport and solve-then-reuse challenge clearance for `trawler-web` pipelines. |
 
 Future module ownership is defined in [`MODULES.md`](MODULES.md). Modules are not created before their implementation begins.
 
 The ownership and purpose descriptions below include approved future core
 capabilities. Phases 1 through 6 are implemented in the current core/web/
-PostgreSQL sources. Later specialized adapters remain planned and do not
-justify additional dependencies.
+PostgreSQL sources, and the Phase 7 `trawler-flaresolverr` adapter is
+implemented. Other specialized adapters remain planned and do not justify
+additional dependencies.
 
 All project modules use the group ID `com.rmjtromp.trawler` and inherit the coordinated version from `trawler-parent`.
 
@@ -92,6 +95,49 @@ parser, compression, serializer, or output dependency was added. No
 serializer, database, HTTP, logging, telemetry, browser, or anti-bot type
 enters core.
 
+## `trawler-flaresolverr` direct runtime dependencies
+
+| Coordinate | Version source | Scope | Owner | Purpose | Why retained |
+|---|---|---|---|---|---|
+| `com.rmjtromp.trawler:trawler-core` | `${project.version}` in parent `pom.xml` | Compile | `trawler-flaresolverr` | Transport, middleware, lifecycle, policy, and model contracts. | The adapter implements the existing core boundary. |
+| `com.rmjtromp.trawler:trawler-web` | `${project.version}` (declared in the module POM, as `trawler-coverage` does) | Compile | `trawler-flaresolverr` | `WebDestinationPolicy`, `WebOrigin`, `CookieSession`, `WebPolicyRejectedException`, and `CookieHeaderLimitException` reused for target safety and clearance reuse with `KtorTransport`. | Inherent coupling documented in [`MODULES.md`](MODULES.md): challenge clearance is reused by the web transport, and duplicating web safety/session contracts would fork them. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `ktor.coroutines.version` in parent `pom.xml` (`1.11.0`) | Compile | `trawler-flaresolverr` | `Mutex`, `Semaphore`, `Channel`, `NonCancellable`, and cancellation for single-flight, call permits, and the session pool. | Same Ktor-aligned runtime as `trawler-web` ([ADR-0005](decisions/0005-web-coroutines-runtime-alignment.md)); without the direct declaration the parent's dependency management would down-select Ktor's coroutines to core's 1.10.2. |
+| `io.ktor:ktor-client-cio-jvm` | `ktor.version` in parent `pom.xml` (`3.5.1`) | Compile | `trawler-flaresolverr` | The module's own CIO client for the FlareSolverr `/v1` endpoint, with timeouts and bounded body reads. | Used directly by this module's code; it is already on the classpath through `trawler-web`, so no second HTTP library is introduced. |
+| `org.jetbrains.kotlinx:kotlinx-serialization-json-jvm` | `kotlinx.serialization.version` in parent `pom.xml` (`1.11.0`) | Compile | `trawler-flaresolverr` | Building FlareSolverr command JSON and parsing its responses with the tree API (`buildJsonObject`, `Json.parseToJsonElement`). | Owner-approved JSON choice. The tree API needs no compiler plugin; 1.11.0 is built for Kotlin 2.3 (compatible with the project's 2.3.0 compiler) and matches the `kotlinx-serialization-core-jvm:1.11.0` that Ktor already brings. |
+
+Admission answers for the one new third-party artifact,
+`kotlinx-serialization-json-jvm`:
+
+1. **Implemented need:** the FlareSolverr `/v1` protocol is JSON in both
+   directions; the JDK has no JSON API, and hand-written parsing of untrusted
+   service output would be a larger correctness and security risk.
+2. **Owner:** `trawler-flaresolverr` only, compile scope. It is never used to
+   encode `T`, responses, state, or outputs.
+3. **Alternatives:** Ktor content negotiation would add more artifacts and the
+   serialization compiler plugin; Jackson would add a second, unrelated
+   serializer stack beside the kotlinx-serialization core Ktor already brings.
+4. **Leakage:** no public signature in the module exposes a
+   kotlinx-serialization or Ktor type; nothing reaches `trawler-core`.
+5. **Transitives:** only `kotlinx-serialization-core-jvm:1.11.0` (already
+   resolved through Ktor) and `kotlin-stdlib`, which parent management keeps
+   at `2.3.0` (the artifact declares 2.3.20, the same way Ktor's declared
+   2.3.21 is managed down in `trawler-web`).
+6. **License:** Apache-2.0.
+7. **Maintenance:** maintained by JetBrains; 1.11.0 is pinned. 1.12.0 targets
+   Kotlin 2.4 and was not selected while the compiler baseline is 2.3.0.
+8. **Security:** no known advisories at selection; parsing operates on a
+   byte-bounded body and the parser handles deep nesting without unbounded
+   recursion. Review advisories before release.
+9. **Scope:** narrowest runtime scope possible for a library that parses at
+   runtime.
+10. **Removal:** removing `trawler-flaresolverr` (or replacing its internal
+    JSON handling) removes the dependency, the parent property, and its
+    `dependencyManagement` entry with no effect on other modules.
+
+Its tests use the repository's test-scoped `kotlin-test-junit5`,
+`junit-jupiter`, `kotlinx-coroutines-test`, and `ktor-client-mock-jvm`, with
+versions from parent management.
+
 ## Test-only dependencies
 
 Test libraries are never placed on a production dependency path. The parent
@@ -107,13 +153,15 @@ the JUnit API/engine/platform artifacts transitively named by
 | `org.jetbrains.kotlin:kotlin-test-junit5` | `kotlin.version` (`2.3.0`) | Test | All implementation modules | Kotlin assertions and JUnit 5 test integration. | Test source support only; remove with the repository test suite. Apache-2.0, maintained with Kotlin, no production API leakage. |
 | `org.junit.jupiter:junit-jupiter` | `junit.jupiter.version` (`5.11.4`) | Test | All implementation modules | JUnit 5 API, engine, and parameterized-test support. | Test runner only; remove with JUnit tests. EPL-2.0, pinned and isolated from runtime artifacts. |
 | `org.jetbrains.kotlinx:kotlinx-coroutines-test` | `coroutines.version` (`1.10.2`) | Test | All implementation modules | Virtual coroutine time, deterministic dispatchers, and structured test scopes. | Test-only coroutine scheduler; it does not replace production coroutines. Apache-2.0, removed if coroutine tests are removed. |
-| `io.ktor:ktor-client-mock-jvm` | `ktor.version` (`3.5.1`) | Test | `trawler-web` tests only | Ktor `MockEngine` for controlled, in-process transport tests. | Web test dependency; it cannot be used by core or PostgreSQL tests and is removed with the Ktor adapter tests. Apache-2.0; Ktor transitives remain test-scoped. |
-| `org.testcontainers:postgresql` | `testcontainers.version` (`1.20.6`) | Test | `trawler-postgres` tests only | Isolated PostgreSQL containers for database integration tests. | PostgreSQL test infrastructure only; Docker/Testcontainers transitives never enter production. MIT; remove with PostgreSQL integration tests. |
-| `org.testcontainers:junit-jupiter` | `testcontainers.version` (`1.20.6`) | Test | `trawler-postgres` tests only | JUnit 5 lifecycle integration for PostgreSQL containers. | PostgreSQL IT support only; remove with container-based tests. MIT; no core or web exposure. |
+| `io.ktor:ktor-client-mock-jvm` | `ktor.version` (`3.5.1`) | Test | `trawler-web` and `trawler-flaresolverr` tests | Ktor `MockEngine` for controlled, in-process transport and fake-FlareSolverr tests. | Ktor-adapter test dependency; it cannot be used by core or PostgreSQL tests and is removed with the Ktor-based adapter tests. Apache-2.0; Ktor transitives remain test-scoped. |
+| `org.testcontainers:postgresql` | `testcontainers.version` (`1.21.4`) | Test | `trawler-postgres` tests only | Isolated PostgreSQL containers for database integration tests. | PostgreSQL test infrastructure only; Docker/Testcontainers transitives never enter production. MIT; remove with PostgreSQL integration tests. |
+| `org.testcontainers:junit-jupiter` | `testcontainers.version` (`1.21.4`) | Test | `trawler-postgres` tests only | JUnit 5 lifecycle integration for PostgreSQL containers. | PostgreSQL IT support only; remove with container-based tests. MIT; no core or web exposure. |
 
 Kotlin and kotlinx libraries use Apache-2.0 licensing. JUnit Jupiter uses the
 EPL-2.0 license, Ktor uses Apache-2.0, and Testcontainers uses MIT. Testcontainers
-adds Docker client/container-management transitives, while MockEngine adds the
+adds Docker client/container-management transitives (1.21.4 is the minimum
+release compatible with Docker Engine 29, which rejects the Docker API 1.32
+negotiated by 1.20.x), while MockEngine adds the
 Ktor test engine graph; both are deliberately test-only. Security advisories,
 license changes, and container-image updates must be reviewed before release.
 No mocking framework is selected; tests should use small handwritten fakes.
@@ -172,11 +220,19 @@ above. The resolved dependency tree is intentionally retained in this file
 so the unavoidable Flyway Jackson transitive is visible rather than mistaken
 for an adapter-owned request serializer.
 
+The implemented `trawler-flaresolverr` graph is the `trawler-web` graph above
+plus exactly one unique runtime coordinate:
+
+| Coordinate | Introduced by | Purpose | Policy |
+|---|---|---|---|
+| `org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.11.0` | Direct `trawler-flaresolverr` dependency | FlareSolverr command/response JSON tree. | Adapter-owned; its `kotlinx-serialization-core-jvm:1.11.0` transitive is the same version Ktor already resolves. |
+
 The exact resolved versions and mediation are checked with:
 
 ```bash
 mvn -pl trawler-web -am dependency:tree -Dscope=runtime -Dverbose
 mvn -pl trawler-postgres -am dependency:tree -Dscope=runtime -Dverbose
+mvn -pl trawler-flaresolverr -am dependency:tree -Dscope=runtime -Dverbose
 ```
 
 The resolved tree was verified with `mvn dependency:tree`. Maven plugin implementation dependencies are build-tool internals and are not placed on Trawler's application runtime classpath; they are reviewed when an explicitly configured plugin is added or upgraded.
@@ -189,7 +245,7 @@ The resolved tree was verified with `mvn dependency:tree`. Maven plugin implemen
 | `org.apache.maven.plugins:maven-compiler-plugin` | `${maven.compiler.version}` | Managed by `trawler-parent` and activated by the Kotlin modules; enforces JVM release 17 for Java or mixed Kotlin/Java builds. |
 | `org.apache.maven.plugins:maven-surefire-plugin` | `${maven.surefire.version}` (`3.5.4`) | Runs unit classes matching `*Test` during `test` on the JUnit Platform; strict no-test and no-specified-test defaults are property-backed and can only be relaxed explicitly for focused reactor commands. |
 | `org.apache.maven.plugins:maven-failsafe-plugin` | `${maven.surefire.version}` (`3.5.4`) | Runs classes matching `*IT` during `integration-test` and verifies them during `verify`; `skipITs` is explicit and defaults to false. |
-| `org.jacoco:jacoco-maven-plugin` | `${jacoco.version}` (`0.8.15`) | Attaches the test agent, writes per-module HTML/XML reports at `verify`, and the last-in-reactor `trawler-coverage` module writes the reactor aggregate report. The pinned release supports the JDK 26 class files used by the host. No coverage check gate is enabled yet. |
+| `org.jacoco:jacoco-maven-plugin` | `${jacoco.version}` (`0.8.15`) | Attaches the test agent, writes per-module HTML/XML reports at `verify`, and the last-in-reactor `trawler-coverage` module writes the reactor aggregate report. The pinned release supports the JDK 26 class files used by the host. `jacoco:check` enforces 95% line / 90% branch per implementation module (`jacoco.line.minimum`, `jacoco.branch.minimum`). |
 
 Maven Central is used through Maven's default repository configuration; the project does not declare a redundant repository entry.
 
@@ -197,8 +253,8 @@ The test plugins are explicitly pinned because test discovery, the `test` versus
 `verify` split, and report generation are repository contracts. Core owns
 deterministic contract, scheduler/daemon, and JDK file-store tests; web owns
 MockEngine and loopback CIO tests; PostgreSQL owns its Testcontainers suites.
-A discovered failing test fails the build. JaCoCo is report-only until the
-final audit phase enables hard thresholds.
+A discovered failing test fails the build, and so does coverage below the
+JaCoCo thresholds.
 
 ## Removed from the unexplained baseline
 
@@ -211,12 +267,11 @@ The following were removed because no implemented component owns them:
 | `jackson-module-kotlin` | Core must not mandate JSON or serialize `T`. |
 | `jackson-datatype-jsr310` | Same ownership violation; no current adapter requires it. |
 | `mockk` | No mocking framework is selected; the authorized suite uses small handwritten fakes. |
-| `io.ktor:ktor-client-mock-jvm` in core or PostgreSQL | MockEngine belongs only to `trawler-web` tests. |
+| `io.ktor:ktor-client-mock-jvm` in core or PostgreSQL | MockEngine belongs only to Ktor-based adapter (`trawler-web`, `trawler-flaresolverr`) tests. |
 | `org.testcontainers:postgresql` or `org.testcontainers:junit-jupiter` in core or web | PostgreSQL containers belong only to `trawler-postgres` tests. |
 | `exec-maven-plugin` | It referenced a non-existent example main class. Trawler is a library and currently has no runnable application. |
 
-The test dependencies and lifecycle plugins above are now authorized and
-owned. Removal still requires deleting the corresponding test sources and
+The test dependencies and lifecycle plugins above are approved and owned. Removal still requires deleting the corresponding test sources and
 updating [`docs/TESTING.md`](TESTING.md) and [`docs/TEST-MATRIX.md`](TEST-MATRIX.md).
 
 ## Dependency admission checklist
@@ -255,7 +310,7 @@ A missing answer blocks addition.
 - Parsers belong in discovery/extraction adapters or examples.
 - Logging and telemetry libraries belong in observer adapters.
 - Browser and anti-bot libraries belong in their provider adapters.
-- Test libraries may be added only after explicit user authorization for tests.
+- Test libraries are test-scoped in the module whose tests use them and follow the same admission rules as runtime dependencies.
 - A dependency used by one example must not become a transitive core dependency.
 
 ## Expected future dependency ownership
@@ -272,8 +327,8 @@ in the current delivery. They are not approval to add dependencies now:
 | Jsoup | `trawler-web` or an example only if its actual parser requires it |
 | SLF4J | A dedicated observer adapter only if demand justifies the artifact; otherwise host event consumption |
 | Micrometer/OpenTelemetry | `trawler-observability-otel` or another dedicated observability artifact |
-| FlareSolverr client | `trawler-antibot-flaresolverr` |
+| FlareSolverr client | `trawler-flaresolverr`; implemented with the existing Ktor CIO client and `kotlinx-serialization-json-jvm` |
 | Browser automation | `trawler-transport-browser` |
-| JUnit/coroutines-test/MockK | Authorized test scope only |
+| JUnit/coroutines-test/MockK | Test scope only, in the module whose tests use them |
 
 Do not add any item in this table until its owning implementation is part of the requested task.

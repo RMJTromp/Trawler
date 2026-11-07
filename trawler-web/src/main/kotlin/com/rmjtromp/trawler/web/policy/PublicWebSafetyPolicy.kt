@@ -98,12 +98,9 @@ public class PublicWebSafetyPolicy(
         if (configuration.blockPrivateAddresses && address.isAnyLocalAddress) return true
 
         val bytes = address.address
-        val ipv4 = when {
-            bytes.size == 4 -> bytes
-            bytes.size == 16 && bytes.take(10).all { it == 0.toByte() } &&
-                bytes[10] == 0xff.toByte() && bytes[11] == 0xff.toByte() -> bytes.copyOfRange(12, 16)
-            else -> null
-        }
+        // An IPv6 address that embeds an IPv4 destination is judged exactly as that IPv4 address.
+        embeddedIpv4(bytes)?.let { return isBlocked(InetAddress.getByAddress(it)) }
+        val ipv4 = if (bytes.size == 4) bytes else null
         if (ipv4 != null) {
             val first = ipv4[0].toInt() and 0xff
             val second = ipv4[1].toInt() and 0xff
@@ -132,12 +129,35 @@ public class PublicWebSafetyPolicy(
             if (configuration.blockPrivateAddresses && first in 0xfc..0xfd) return true
             if (configuration.blockLinkLocalAddresses && first == 0xfe && second in 0x80..0xbf) return true
             if (configuration.blockMulticastAddresses && first == 0xff) return true
-            if (configuration.blockMetadataAddresses) {
-                val text = address.hostAddress.substringBefore('%').lowercase(Locale.ROOT)
-                if (text == "fd00:ec2::254" || text == "fe80::a9fe:a9fe") return true
+            if (configuration.blockMetadataAddresses && IPV6_METADATA_ADDRESSES.any { it.contentEquals(bytes) }) {
+                return true
             }
         }
         return false
+    }
+
+    private companion object {
+        /** AWS IPv6 IMDS and the link-local form of 169.254.169.254, compared as raw bytes. */
+        val IPV6_METADATA_ADDRESSES: List<ByteArray> = listOf(
+            InetAddress.getByName("fd00:ec2::254").address,
+            InetAddress.getByName("fe80::a9fe:a9fe").address,
+        )
+
+        /**
+         * Returns the IPv4 destination embedded in an IPv4-mapped (`::ffff:0:0/96`),
+         * IPv4-compatible (`::/96`, excluding `::/104` so `::` and `::1` keep their
+         * IPv6 meaning), or NAT64 well-known-prefix (`64:ff9b::/96`) address.
+         */
+        fun embeddedIpv4(bytes: ByteArray): ByteArray? {
+            if (bytes.size != 16) return null
+            val mapped = (0..9).all { bytes[it] == 0.toByte() } &&
+                bytes[10] == 0xff.toByte() && bytes[11] == 0xff.toByte()
+            val compatible = (0..11).all { bytes[it] == 0.toByte() } && bytes[12] != 0.toByte()
+            val nat64 = bytes[0] == 0.toByte() && bytes[1] == 0x64.toByte() &&
+                bytes[2] == 0xff.toByte() && bytes[3] == 0x9b.toByte() &&
+                (4..11).all { bytes[it] == 0.toByte() }
+            return if (mapped || compatible || nat64) bytes.copyOfRange(12, 16) else null
+        }
     }
 }
 
