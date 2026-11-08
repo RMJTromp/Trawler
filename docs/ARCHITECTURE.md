@@ -162,7 +162,7 @@ Rules:
 
 ## Optional recurring harvest model
 
-Historical/incremental behavior is an installed strategy, not universal engine state. A historical completion claim is allowed only after its discovery end condition, relevant checkpoints, dependent jobs, run outcome, and configured completion predicate are all settled.
+Historical/incremental behavior is an installed strategy, not universal engine state. A historical completion claim is allowed only after its discovery end condition, relevant checkpoints, dependent jobs, run outcome, and configured completion predicate are all settled. Permanently failed items count as settled only for strategies that explicitly opt in; infrastructure, store, output, and exhausted transient failures always block completion (ADR-0010).
 
 Stateless and one-shot pipelines must not pay for harvest state they do not use.
 

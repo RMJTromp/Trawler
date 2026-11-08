@@ -14,6 +14,7 @@ import com.rmjtromp.trawler.response.ResponseHistoryStore
 import com.rmjtromp.trawler.response.ResponseLookup
 import com.rmjtromp.trawler.response.ResponseReplayQuery
 import com.rmjtromp.trawler.response.ResponseReplayStore
+import com.rmjtromp.trawler.response.ResponseReplayVersions
 import com.rmjtromp.trawler.response.ResponseRetentionRequest
 import com.rmjtromp.trawler.response.ResponseRetentionResult
 import com.rmjtromp.trawler.response.ResponseStore
@@ -105,7 +106,7 @@ public class PostgresResponseStore(
         val now = clock.now()
         return resources.transaction { connection ->
             val sequence = nextSequence(connection)
-            val reference = ResponseReference("postgres-response-$sequence")
+            val reference = ResponseReference("$REFERENCE_PREFIX$sequence")
             connection.prepareBounded(
                 """
                 INSERT INTO ${resources.table("response_records")} (
@@ -193,12 +194,23 @@ public class PostgresResponseStore(
 
                 is ResponseReplayQuery.ByPipelineId -> {
                     requirePostgresUtf8Bound(query.pipelineId, configuration.maxIdentifierBytes, "response pipeline ID")
+                    val afterSequence = query.after?.let(::sequenceOf)
+                    val cursorPredicate = afterSequence?.let { " AND sequence > ?" }.orEmpty()
+                    val latestPredicate = if (query.versions == ResponseReplayVersions.LATEST_PER_TARGET) {
+                        " AND NOT EXISTS (SELECT 1 FROM ${resources.table("response_records")} newer" +
+                            " WHERE newer.pipeline_id = selected.pipeline_id" +
+                            " AND newer.target = selected.target" +
+                            " AND newer.sequence > selected.sequence)"
+                    } else {
+                        ""
+                    }
                     selectMany(
                         connection,
-                        "pipeline_id = ?$ownershipPredicate ORDER BY sequence ASC LIMIT ?",
+                        "pipeline_id = ?$ownershipPredicate$cursorPredicate$latestPredicate ORDER BY sequence ASC LIMIT ?",
                         buildList {
                             add(SqlArgument.Text(query.pipelineId))
                             pipelineId?.let { add(SqlArgument.Text(it)) }
+                            afterSequence?.let { add(SqlArgument.BigInteger(it)) }
                             add(SqlArgument.Integer(boundedLimit))
                         },
                     )
@@ -325,7 +337,7 @@ public class PostgresResponseStore(
         val sql = """
             SELECT response_id, sequence, pipeline_id, codec_id, codec_version, body_size,
                    octet_length(payload) AS payload_size, payload
-            FROM ${resources.table("response_records")}
+            FROM ${resources.table("response_records")} selected
             WHERE $predicate
         """.trimIndent()
         return connection.prepareBounded(sql, configuration).use { statement ->
@@ -333,6 +345,7 @@ public class PostgresResponseStore(
                 when (argument) {
                     is SqlArgument.Text -> statement.setString(index + 1, argument.value)
                     is SqlArgument.Integer -> statement.setInt(index + 1, argument.value)
+                    is SqlArgument.BigInteger -> statement.setLong(index + 1, argument.value)
                     is SqlArgument.TimestampValue -> statement.setTimestamp(index + 1, argument.value)
                 }
             }
@@ -379,6 +392,16 @@ public class PostgresResponseStore(
         return StoredResponse(row.reference, response, row.pipelineId)
     }
 
+    /** References embed the adapter sequence, so a pruned cursor still orders correctly. */
+    private fun sequenceOf(reference: ResponseReference): Long {
+        requirePostgresUtf8Bound(reference.value, configuration.maxIdentifierBytes, "replay cursor reference")
+        return reference.value.removePrefix(REFERENCE_PREFIX)
+            .takeIf { reference.value.startsWith(REFERENCE_PREFIX) }
+            ?.toLongOrNull()
+            ?.takeIf { it > 0 }
+            ?: throw IllegalArgumentException("Replay cursor was not issued by PostgreSQL response store '$id'")
+    }
+
     private data class ResponseRow(
         val reference: ResponseReference,
         val sequence: Long,
@@ -391,6 +414,11 @@ public class PostgresResponseStore(
     private sealed interface SqlArgument {
         data class Text(val value: String) : SqlArgument
         data class Integer(val value: Int) : SqlArgument
+        data class BigInteger(val value: Long) : SqlArgument
         data class TimestampValue(val value: java.sql.Timestamp) : SqlArgument
+    }
+
+    private companion object {
+        const val REFERENCE_PREFIX: String = "postgres-response-"
     }
 }

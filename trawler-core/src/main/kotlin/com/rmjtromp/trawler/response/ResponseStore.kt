@@ -78,12 +78,44 @@ public sealed interface ResponseReplayQuery {
         }
     }
 
-    /** Replays responses associated with one pipeline identifier. */
-    public data class ByPipelineId(public val pipelineId: String) : ResponseReplayQuery {
+    /**
+     * Replays responses associated with one pipeline identifier.
+     *
+     * Results are returned in ascending store order, which is the order the
+     * store accepted the responses. [after] is an exclusive keyset cursor:
+     * only responses stored after that reference are selected, so a caller can
+     * page through a history larger than one bounded replay by passing the
+     * previous [com.rmjtromp.trawler.pipeline.ReplayResult.lastReference].
+     * The reference must have been issued by the same store; a store rejects a
+     * reference it cannot order with [IllegalArgumentException]. A cursor
+     * remains valid after its own response has been pruned.
+     *
+     * [versions] selects whether every retained response is replayed or only
+     * the newest retained response per request target. Latest-version
+     * selection is evaluated when each page is read, so a target that gains a
+     * newer response between pages is replayed again on a later page.
+     */
+    public data class ByPipelineId(
+        public val pipelineId: String,
+        public val after: ResponseReference? = null,
+        public val versions: ResponseReplayVersions = ResponseReplayVersions.ALL,
+    ) : ResponseReplayQuery {
         init {
             require(pipelineId.isNotBlank()) { "Replay pipeline ID must not be blank" }
         }
     }
+}
+
+/** Version selection for pipeline-wide response replay. */
+public enum class ResponseReplayVersions {
+    /** Replay every retained response, including superseded responses for the same target. */
+    ALL,
+
+    /**
+     * Replay only the newest retained response for each request target within
+     * the selected pipeline. Older responses for that target are skipped.
+     */
+    LATEST_PER_TARGET,
 }
 
 /**
@@ -226,6 +258,8 @@ public interface ResponseReplayStore {
      * Replays at most [limit] responses for [query] in adapter-defined order.
      * When [pipelineId] is supplied, the adapter must apply that ownership
      * predicate before limiting results; post-read filtering is insufficient.
+     * [ResponseReplayQuery.ByPipelineId] additionally requires ascending store
+     * order and must apply its cursor and version selection before the limit.
      */
     public suspend fun replay(
         query: ResponseReplayQuery,

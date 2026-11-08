@@ -156,6 +156,66 @@ class DiscoveryHarvestTest {
     }
 
     @Test
+    fun `settled item failures commit only for strategies that explicitly allow them`() {
+        val settled = completionContext().copy(
+            runOutcome = HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES,
+            completionPredicatePassed = false,
+            settledItemFailures = 2,
+        )
+        val overlap = FixedOverlapBoundaryPolicy(Duration.ZERO)
+        listOf<HarvestStrategy>(
+            CursorHarvestStrategy(),
+            WatermarkHarvestStrategy(overlap),
+            HistoricalThenIncrementalHarvestStrategy(overlap),
+        ).forEach { strategy ->
+            assertIs<HarvestCompletion.Incomplete>(strategy.complete(settled), "${strategy.id} blocks by default")
+        }
+        val allow = SettledItemFailurePolicy.ALLOWS_COMPLETION
+        listOf<HarvestStrategy>(
+            CursorHarvestStrategy(settledItemFailures = allow),
+            WatermarkHarvestStrategy(overlap, settledItemFailures = allow),
+            HistoricalThenIncrementalHarvestStrategy(overlap, settledItemFailures = allow),
+        ).forEach { strategy ->
+            assertIs<HarvestCompletion.Commit>(strategy.complete(settled), strategy.id)
+            assertIs<HarvestCompletion.Commit>(strategy.complete(completionContext()), strategy.id)
+            listOf<HarvestCompletionContext.() -> HarvestCompletionContext>(
+                { copy(discoveryReachedNaturalEnd = false) },
+                { copy(checkpointWorkSettled = false) },
+                { copy(generationWorkOpen = 1) },
+                { copy(runOutcome = HarvestRunOutcome.FAILED, settledItemFailures = 0) },
+                { copy(runOutcome = HarvestRunOutcome.ABANDONED, settledItemFailures = 0) },
+                { copy(runOutcome = HarvestRunOutcome.CANCELLED, settledItemFailures = 0) },
+            ).forEach { change ->
+                assertIs<HarvestCompletion.Incomplete>(strategy.complete(change(settled)), strategy.id)
+            }
+        }
+    }
+
+    @Test
+    fun `watermarks commit the end of the searched window rather than the completion time`() {
+        val searchedUntil = Instant.parse("2026-01-01T00:00:00Z")
+        val completedAt = searchedUntil.plus(Duration.ofHours(2))
+        val searched = completionContext(completedAt).copy(
+            incrementalWindow = IncrementalBoundaryPolicy.Window(searchedUntil.minusSeconds(60), searchedUntil),
+        )
+        fun boundary(completion: HarvestCompletion): Instant = Instant.ofEpochMilli(
+            ByteBuffer.wrap(assertNotNull(assertIs<HarvestCompletion.Commit>(completion).state).payload.toByteArray()).long,
+        )
+        val overlap = FixedOverlapBoundaryPolicy(Duration.ofMinutes(5))
+        assertEquals(searchedUntil, boundary(WatermarkHarvestStrategy(overlap).complete(searched)))
+        assertEquals(
+            searchedUntil,
+            boundary(HistoricalThenIncrementalHarvestStrategy(overlap).complete(searched)),
+            "The incremental phase commits its searched window end",
+        )
+        assertEquals(
+            completedAt,
+            boundary(HistoricalThenIncrementalHarvestStrategy(overlap).complete(completionContext(completedAt))),
+            "The historical phase has no window and records its completion time",
+        )
+    }
+
+    @Test
     fun `stateless cursor watermark and historical completion carry the right state`() {
         val now = Instant.parse("2026-01-01T00:00:00Z")
         val stateless = StatelessHarvestStrategy.complete(completionContext(now, HarvestRunOutcome.FAILED))
@@ -251,6 +311,15 @@ class DiscoveryHarvestTest {
         assertFailsWith<IllegalArgumentException> { HarvestContext("pipeline", "discovery", null, null, -1, Instant.EPOCH) }
         assertFailsWith<IllegalArgumentException> {
             HarvestCompletionContext(true, true, -1, HarvestRunOutcome.COMPLETED, true, Instant.EPOCH)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            completionContext().copy(
+                runOutcome = HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES,
+                settledItemFailures = -1,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            completionContext().copy(settledItemFailures = 1)
         }
         assertFailsWith<IllegalArgumentException> { HarvestAdmission.Defer(" ") }
         assertFailsWith<IllegalArgumentException> { HarvestCompletion.Incomplete(" ") }

@@ -134,12 +134,16 @@ installs bounded in-memory state and generic policies; scheduler, response
 retention, and output choices remain explicit:
 
 - in-memory state;
-- seed and caller-provided `Flow` discovery;
+- seed and caller-provided `Flow` discovery, with checkpoint-only progress
+  emissions for resumable discoveries;
+- cursor, watermark, and historical-then-incremental harvest strategies with
+  an explicit opt-in to progress past permanently failed items;
 - callback/no-output collection;
 - direct bounded `Flow<Produced<T>>` output collection;
 - no-response and bounded in-memory response stores;
 - bounded JDK file response/output stores using caller-supplied codecs;
-- response capture/cache policies, replay through the normal typed path, and
+- response capture/cache policies, replay through the normal typed path
+  (paged by store cursor, optionally only the latest version per target), and
   output batching/retry/idempotency decorators;
 - common generic policies;
 - a coroutine scheduler with fixed-delay, fixed-rate, daily timezone-aware, immediate-first-run, and overlap behavior.

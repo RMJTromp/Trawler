@@ -18,6 +18,7 @@ import com.rmjtromp.trawler.response.InMemoryResponseStore
 import com.rmjtromp.trawler.response.ResponseLookup
 import com.rmjtromp.trawler.response.ResponseReplayQuery
 import com.rmjtromp.trawler.response.ResponseReplayStore
+import com.rmjtromp.trawler.response.ResponseReplayVersions
 import com.rmjtromp.trawler.response.ResponseStore
 import com.rmjtromp.trawler.response.ResponseStoreCapability
 import com.rmjtromp.trawler.response.StoredResponse
@@ -304,6 +305,7 @@ class EngineRuntimeReplayTest {
             assertIs<IllegalArgumentException>(failed.failures[1].error)
             assertEquals(listOf("ok"), output.values(), "Later responses are still processed after a stage failure")
             assertEquals(3, failed.responsesRead)
+            assertEquals(ResponseReference("ref-2"), failed.lastReference, "Failed responses still advance the page cursor")
             assertEquals(1, failed.producedValues)
             assertEquals(1, failed.deliveredValues)
             assertEquals("replay-stop:pipeline-replay:PIPELINE_RUN_FAILED", log.last())
@@ -347,6 +349,7 @@ class EngineRuntimeReplayTest {
             assertEquals(listOf("replay-budget"), abandoned.failures.map { it.stage })
             assertEquals("one value", abandoned.failures.single().error.message)
             assertTrue(budgetOutput.batches.isEmpty(), "A budget stop before delivery must not deliver the stopped value")
+            assertEquals(null, abandoned.lastReference, "A budget-interrupted response is replayed again on the next page")
             assertEquals(1, abandoned.producedValues)
             assertEquals("replay-stop:budget-replay:PIPELINE_RUN_ABANDONED", budgetLog.last())
             assertEquals(listOf("replay:ABANDONED"), budgetEvents.details(CrawlerEventType.PIPELINE_RUN_ABANDONED))
@@ -526,6 +529,62 @@ class EngineRuntimeReplayTest {
             release.complete(Unit)
             assertEquals(RunStatus.COMPLETED, first.await().status)
             assertEquals(1, store.replayCalls)
+        } finally {
+            engine.shutdown()
+        }
+    }
+
+    @Test
+    fun `paged replay walks a stored history in bounded pages and can select only the latest version per target`() = runTest {
+        val store = InMemoryResponseStore(maxResponses = 16)
+        val bodies = mutableMapOf("a" to "a-v1", "b" to "b-v1", "c" to "c-v1")
+        val transport = ScriptedTransport { request -> okResponse(request, body = bodies.getValue(request.target)) }
+        val output = CollectingOutput<String>("output")
+        val pipeline = testPipeline(
+            "paged",
+            bodyExtractor(),
+            clock,
+            transport = transport,
+            discoveries = listOf(seeds("a", "b", "c")),
+            outputs = listOf(output to OutputRequirement.REQUIRED),
+        )
+        val engine = testEngine(
+            listOf(pipeline),
+            clock,
+            responseStore = store,
+            options = EngineRuntimeOptions(workerCount = 1),
+        )
+        try {
+            assertEquals(RunStatus.COMPLETED, engine.runOnce().status)
+            bodies["a"] = "a-v2"
+            assertEquals(RunStatus.COMPLETED, engine.runOnce().status)
+            val networkCalls = transport.calls.size
+            output.batches.clear()
+
+            val pages = mutableListOf<List<String>>()
+            var cursor: ResponseReference? = null
+            do {
+                val page = engine.replay(pipeline.replay(ResponseReplayQuery.ByPipelineId("paged", after = cursor), limit = 2))
+                assertEquals(RunStatus.COMPLETED, page.status)
+                pages += output.values()
+                output.batches.clear()
+                cursor = page.lastReference
+            } while (page.responsesRead == 2L)
+            assertEquals(
+                listOf(listOf("a-v1", "b-v1"), listOf("c-v1", "a-v2"), listOf("b-v1", "c-v1"), emptyList()),
+                pages,
+                "Every stored version is replayed exactly once in store order",
+            )
+
+            val latest = engine.replay(
+                pipeline.replay(
+                    ResponseReplayQuery.ByPipelineId("paged", versions = ResponseReplayVersions.LATEST_PER_TARGET),
+                    limit = 8,
+                ),
+            )
+            assertEquals(3, latest.responsesRead)
+            assertEquals(listOf("a-v2", "b-v1", "c-v1"), output.values().sorted())
+            assertEquals(networkCalls, transport.calls.size, "Replay makes no network calls")
         } finally {
             engine.shutdown()
         }

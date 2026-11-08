@@ -152,4 +152,21 @@ public sealed interface DiscoveryEmission {
         public val response: CrawlResponse,
         override val checkpoint: DiscoveryCheckpointCandidate? = null,
     ) : DiscoveryEmission
+
+    /**
+     * Advances a [ResumableDiscovery] checkpoint without creating work.
+     *
+     * Emissions are processed in order, so every earlier emission has already
+     * been accepted, suppressed, or rejected when this marker is handled. Use
+     * it after a region that produced no new work (for example a page whose
+     * items were all filtered or already known), so a resumed walk does not
+     * repeat that region. The marker is not applied when an earlier emission of
+     * the same walk was rejected or deferred by recrawl policy, so a resumed walk
+     * revisits that item. The marker counts toward the engine's discovery
+     * emission bounds but is not reported to budget policies as a work
+     * candidate. It is a configuration error for a non-resumable discovery.
+     */
+    public data class Checkpoint(
+        override val checkpoint: DiscoveryCheckpointCandidate,
+    ) : DiscoveryEmission
 }
