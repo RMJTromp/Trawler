@@ -37,9 +37,12 @@ host application.
 **Settled item failures.** The engine distinguishes a *settled item failure*
 from a blocking failure. A work item is settled when the retry policy
 returns `DoNotRetry`, the failure classifier marks the failure as not
-retryable by default, the failing stage is item-level (transport `work`,
-`extraction`, extraction/follow-up/response-metadata bounds, or
-`validation:*`), and the terminal `Failed` transition is accepted.
+retryable by default, the failure is item-level (the exact exception raised
+by the transport call, tracked by identity rather than by wrapping so callers
+still see the original type; or stage `extraction`,
+extraction/follow-up/response-metadata bounds, or `validation:*`), and the
+terminal `Failed` transition is accepted. Other exceptions on the generic
+`work` path are blocking.
 Exhausted transient failures, response-capture and response-store failures,
 required-output failures, attempt-start failures, and lease or state-store
 failures remain blocking. A run with settled failures and no blocking
@@ -60,7 +63,7 @@ recommended companion to a long backfill.
 **Checkpoint markers.** `DiscoveryEmission.Checkpoint` advances a resumable
 discovery's checkpoint with no work item. Emissions are handled in order, so
 earlier work has already been accepted or suppressed. A marker after a
-rejected emission of the same walk is not applied. Markers count toward the
+rejected or recrawl-deferred emission of the same walk is not applied. Markers count toward the
 per-discovery emission bound but are not budget work candidates.
 
 **Paged replay.** `ResponseReplayQuery.ByPipelineId` gains an exclusive

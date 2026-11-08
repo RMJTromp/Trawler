@@ -6,11 +6,15 @@ import com.rmjtromp.trawler.discovery.DiscoveryCheckpointCodec
 import com.rmjtromp.trawler.discovery.DiscoveryEmission
 import com.rmjtromp.trawler.event.CrawlerEventType
 import com.rmjtromp.trawler.model.CrawlRequest
+import com.rmjtromp.trawler.model.RequestContext
 import com.rmjtromp.trawler.policy.BudgetDecision
 import com.rmjtromp.trawler.policy.BudgetObservation
 import com.rmjtromp.trawler.policy.BudgetSnapshot
 import com.rmjtromp.trawler.policy.BuiltInPolicies
 import com.rmjtromp.trawler.policy.CrawlBudgetPolicy
+import com.rmjtromp.trawler.policy.RecrawlDecision
+import com.rmjtromp.trawler.policy.RecrawlPolicy
+import com.rmjtromp.trawler.policy.ResourceHistory
 import com.rmjtromp.trawler.state.CheckpointPayload
 import com.rmjtromp.trawler.state.DiscoveryCheckpointCodecDescriptor
 import com.rmjtromp.trawler.state.EnqueueResult
@@ -125,7 +129,46 @@ class EngineRuntimeCheckpointMarkerTest {
             assertEquals(false, stored.completed)
             assertEquals(listOf("page-1"), state.checkpointWrites.map { String(it.payload.toByteArray()) })
             val warnings = events.details(CrawlerEventType.CAPABILITY_WARNING)
-            assertTrue("checkpoint-marker-after-rejection:pages" in warnings, "$warnings")
+            assertTrue("checkpoint-marker-after-held-back-emission:pages" in warnings, "$warnings")
+        } finally {
+            engine.shutdown()
+        }
+    }
+
+    @Test
+    fun `a marker after a recrawl-deferred emission is not applied so the deferred visit is not skipped`() = runTest {
+        val state = HookedStateStore(clock)
+        val deferring = object : RecrawlPolicy {
+            override val id: String = "defer-one"
+            override fun decide(request: CrawlRequest, history: ResourceHistory, context: RequestContext): RecrawlDecision =
+                if (request.target == "deferred") {
+                    RecrawlDecision.Deferred(clock.current.plusSeconds(60), "cooldown")
+                } else {
+                    RecrawlDecision.Eligible
+                }
+        }
+        val events = EventLog()
+        val discovery = ResumableTestDiscovery("pages", codec) {
+            listOf(
+                DiscoveryEmission.Request(CrawlRequest("accepted"), candidate("page-1")),
+                DiscoveryEmission.Request(CrawlRequest("deferred")),
+                DiscoveryEmission.Checkpoint(candidate("page-2")),
+            )
+        }
+        val pipeline = testPipeline(
+            "deferral",
+            bodyExtractor(),
+            clock,
+            policies = BuiltInPolicies.ordinary(clock = clock).copy(recrawl = deferring),
+            discoveries = listOf(discovery),
+        )
+        val engine = testEngine(listOf(pipeline), clock, state = state, observers = listOf(events))
+        try {
+            assertEquals(RunStatus.ABANDONED, engine.runOnce().status)
+            val stored = assertNotNull(state.delegate.load("deferral", "pages"))
+            assertEquals(CheckpointPayload.from("page-1".toByteArray()), stored.payload)
+            val warnings = events.details(CrawlerEventType.CAPABILITY_WARNING)
+            assertTrue("checkpoint-marker-after-held-back-emission:pages" in warnings, "$warnings")
         } finally {
             engine.shutdown()
         }

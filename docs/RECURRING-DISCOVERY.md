@@ -139,9 +139,11 @@ record that progress. Emissions are handled in order, so every earlier
 emission has already been accepted, suppressed, or rejected. The marker uses
 the store's checkpoint compare-and-set directly (the atomic enqueue path is
 not needed, because no work is enqueued). It is not applied if an earlier
-emission of the same walk was rejected, so the resumed walk revisits the
-rejected item; the run is abandoned with a
-`checkpoint-marker-after-rejection:<discovery>` warning. A lost
+emission of the same walk was rejected or deferred by the recrawl policy
+(`RecrawlDecision.Deferred`), so the resumed walk revisits that item; the run
+is abandoned with a `checkpoint-marker-after-held-back-emission:<discovery>`
+warning. Intentional suppression (recrawl rejection, scope, deduplication, an
+already-active duplicate) does not hold markers back. A lost
 compare-and-set reloads progress and abandons the run, exactly like an
 item-attached checkpoint. Markers count toward
 `maxDiscoveryEmissionsPerDiscovery` but are not counted as discovery emissions
@@ -185,9 +187,12 @@ completion the engine separates such failures into two kinds. A failure is
 
 - the retry policy returned `DoNotRetry`;
 - the failure classifier returned `retryableByDefault = false`;
-- the stage is item-level: transport/execution (`work`), `extraction`,
-  `extraction-bound`, `follow-up-bound`, `response-metadata-bound`, or
-  `validation:*`;
+- the failure is item-level: the exact exception raised by the transport's
+  `execute` call (reported under stage `work`), or a failure at stage
+  `extraction`, `extraction-bound`, `follow-up-bound`,
+  `response-metadata-bound`, or `validation:*`. Any other exception on the
+  generic `work` path (middleware, pacing, lease or attempt bookkeeping) is
+  blocking;
 - the terminal `Failed` transition was accepted by the state store.
 
 Every other terminal failure is blocking, including exhausted transient

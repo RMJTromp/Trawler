@@ -1208,6 +1208,9 @@ private sealed interface WorkAcceptance {
 
     data object Suppressed : WorkAcceptance
 
+    /** Not admitted now but still owed a visit; progress must not pass it. */
+    data object Deferred : WorkAcceptance
+
     data object Rejected : WorkAcceptance
 }
 
@@ -1223,15 +1226,15 @@ private class DiscoveryProgress(
     var failed: Boolean = false
     var incrementalWindow: com.rmjtromp.trawler.policy.IncrementalBoundaryPolicy.Window? = null
 
-    /** Set when an emission of this walk was rejected; later checkpoint markers must not skip it. */
-    var emissionRejected: Boolean = false
+    /** Set when an emission of this walk was rejected or deferred; later checkpoint markers must not skip it. */
+    var emissionHeldBack: Boolean = false
 }
 
 /**
  * Applies a [DiscoveryEmission.Checkpoint] marker. Earlier emissions were
  * handled sequentially, so advancing here cannot skip accepted work. A marker
- * after a rejected emission is not applied, so the resumed walk revisits the
- * rejected item; a compare-and-set conflict reloads progress and abandons the
+ * after a rejected or recrawl-deferred emission is not applied, so the
+ * resumed walk revisits that item; a compare-and-set conflict reloads progress and abandons the
  * run exactly like an item-attached checkpoint.
  */
 private suspend fun advanceCheckpointMarker(
@@ -1252,11 +1255,11 @@ private suspend fun advanceCheckpointMarker(
     require(candidate.strategyId == resumable.checkpointCodec.strategyId) {
         "Discovery checkpoint candidate strategy does not match its discovery codec"
     }
-    if (progress.emissionRejected) {
+    if (progress.emissionHeldBack) {
         counters.abandoned.set(true)
         context.event(
             CrawlerEventType.CAPABILITY_WARNING,
-            detail = "checkpoint-marker-after-rejection:${progress.discoveryId}",
+            detail = "checkpoint-marker-after-held-back-emission:${progress.discoveryId}",
         )
         return
     }
@@ -1566,7 +1569,9 @@ internal suspend fun <T : Any> executeTypedPipeline(
                                 emission.checkpoint,
                                 progress,
                             )
-                            if (acceptance == WorkAcceptance.Rejected) progress.emissionRejected = true
+                            if (acceptance == WorkAcceptance.Rejected || acceptance == WorkAcceptance.Deferred) {
+                                progress.emissionHeldBack = true
+                            }
                         }
                     progress.reachedNaturalEnd = true
                     context.event(CrawlerEventType.DISCOVERY_COMPLETED, detail = discovery.id)
@@ -2103,7 +2108,7 @@ private suspend fun <T : Any> acceptWork(
                     CrawlerEventType.REQUEST_FAILED,
                     detail = "recrawl-deferred:${recrawl.reason ?: "policy"}",
                 )
-                return WorkAcceptance.Suppressed
+                return WorkAcceptance.Deferred
             }
 
             is RecrawlDecision.Rejected -> {
@@ -2383,6 +2388,7 @@ private suspend fun <T : Any> processLeasedWork(
         pipelineId = context.pipelineId,
         requestId = work.workItemId.value,
     )
+    val transportFailure = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
     when (val scope = pipeline.policies.scope.evaluate(work.request, RequestContext(baseCrawler, work.request))) {
         ScopeDecision.Allowed -> Unit
         is ScopeDecision.Rejected -> {
@@ -2443,7 +2449,7 @@ private suspend fun <T : Any> processLeasedWork(
         context.event(CrawlerEventType.REQUEST_STARTED, crawler, work)
         val existing = responseMutex.withLock { responses.remove(work.workItemId) }
         val executed = existing?.let { ExecutedResponse(it, null) }
-            ?: executeWorkRequest(pipeline, context, work.request, crawler)
+            ?: executeWorkRequest(pipeline, context, work.request, crawler, transportFailure)
         val currentResponse = executed.response
         pipeline.policies.pacing.observe(currentResponse, RequestContext(crawler, work.request))
         val storedReference = executed.storedReference ?: if (context.responseStore != null) {
@@ -2559,7 +2565,17 @@ private suspend fun <T : Any> processLeasedWork(
         ) {
             return
         }
-        handleWorkFailure(pipeline, context, counters, work, attempt, failure.stage, failure.original, baseCrawler)
+        handleWorkFailure(
+            pipeline,
+            context,
+            counters,
+            work,
+            attempt,
+            failure.stage,
+            failure.original,
+            baseCrawler,
+            itemLevel = isItemLevelStage(failure.stage),
+        )
     } catch (error: Throwable) {
         val attemptFinished = attempt?.let {
             context.attemptStore.finishAttempt(work, it, AttemptOutcome.FAILED)
@@ -2575,7 +2591,17 @@ private suspend fun <T : Any> processLeasedWork(
         ) {
             return
         }
-        handleWorkFailure(pipeline, context, counters, work, attempt, "work", error, baseCrawler)
+        handleWorkFailure(
+            pipeline,
+            context,
+            counters,
+            work,
+            attempt,
+            "work",
+            error,
+            baseCrawler,
+            itemLevel = error === transportFailure.get(),
+        )
     } finally {
         pacing?.release()
         permit?.release()
@@ -2839,6 +2865,7 @@ private suspend fun <T : Any> handleWorkFailure(
     stage: String,
     error: Throwable,
     crawler: CrawlerContext,
+    itemLevel: Boolean,
 ) {
     counters.failure(stage, error, terminal = false)
     val attemptSummary = AttemptSummary(
@@ -2888,7 +2915,7 @@ private suspend fun <T : Any> handleWorkFailure(
         }
 
         RetryDecision.DoNotRetry -> {
-            val settled = !classification.retryableByDefault && isItemLevelStage(stage)
+            val settled = !classification.retryableByDefault && itemLevel
             counters.terminalFailure.set(true)
             if (!settled) counters.blockingFailure.set(true)
             if (recordLeaseMutationFailure(
@@ -2925,13 +2952,13 @@ private suspend fun <T : Any> handleWorkFailure(
 }
 
 /**
- * Stages whose permanent failure describes the item itself rather than the
- * engine, its stores, or a required output. Only these can become settled
- * item failures for harvest completion.
+ * Named stages whose permanent failure describes the item itself rather than
+ * the engine, its stores, or a required output. The generic `work` stage is
+ * item-level only for the exact throwable raised by the transport, which the
+ * caller tracks separately; every other `work` failure blocks.
  */
 private fun isItemLevelStage(stage: String): Boolean =
-    stage == "work" ||
-        stage == "extraction" ||
+    stage == "extraction" ||
         stage == "extraction-bound" ||
         stage == "follow-up-bound" ||
         stage == "response-metadata-bound" ||
@@ -3002,11 +3029,13 @@ private suspend fun <T : Any> executeWorkRequest(
     context: PipelineExecutionContext,
     request: CrawlRequest,
     crawler: CrawlerContext,
+    transportFailure: java.util.concurrent.atomic.AtomicReference<Throwable?>,
 ): ExecutedResponse = executeThroughMiddleware(
     pipeline,
     context,
     request,
     RequestContext(crawler, request),
+    transportFailure,
 )
 
 private suspend fun <T : Any> executeThroughMiddleware(
@@ -3014,6 +3043,7 @@ private suspend fun <T : Any> executeThroughMiddleware(
     context: PipelineExecutionContext,
     request: CrawlRequest,
     suppliedContext: RequestContext,
+    transportFailure: java.util.concurrent.atomic.AtomicReference<Throwable?>? = null,
 ): ExecutedResponse {
     val requestWithMetadata = request.withRuntimeAttributes(context, suppliedContext.crawler.requestId)
     validateRequestBounds(requestWithMetadata, context.configuration.runtimeOptions)
@@ -3046,7 +3076,15 @@ private suspend fun <T : Any> executeThroughMiddleware(
     }
     val terminal = RequestExecutor { nextRequest, nextRequestContext ->
         val transport: Transport = pipeline.transportRouter.select(nextRequest, nextRequestContext)
-        val raw = transport.execute(nextRequest)
+        val raw = try {
+            transport.execute(nextRequest)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Throwable) {
+            // Recorded by identity, not wrapped, so middleware and discovery see the original type.
+            transportFailure?.set(error)
+            throw error
+        }
         val processed = responseHandler.handle(
             raw.withRuntimeAttributes(context, nextRequestContext.crawler.requestId),
             ResponseContext(nextRequestContext.crawler, nextRequest, raw),

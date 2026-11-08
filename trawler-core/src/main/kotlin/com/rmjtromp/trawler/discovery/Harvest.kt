@@ -102,10 +102,11 @@ public enum class HarvestRunOutcome {
     /**
      * The run itself completed and every work item reached a terminal state,
      * but at least one item failed permanently at an item-level stage. Only
-     * failures classified as not retryable by default, raised by transport,
-     * extraction, response bounds, or validation, are settled. Exhausted
-     * transient failures, response-store and capture-policy failures,
-     * required-output failures, and state-store failures remain [FAILED].
+     * failures classified as not retryable by default and raised by the
+     * transport call itself, extraction, response bounds, or validation are
+     * settled. Exhausted transient failures, any other failure on the generic
+     * work path, response-store and capture-policy failures, required-output
+     * failures, and state-store failures remain [FAILED].
      * The pipeline run status is still reported as failed; this outcome only
      * lets a strategy that opted in commit harvest progress.
      */

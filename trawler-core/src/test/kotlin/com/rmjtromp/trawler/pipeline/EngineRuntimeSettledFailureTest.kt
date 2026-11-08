@@ -12,10 +12,14 @@ import com.rmjtromp.trawler.discovery.SettledItemFailurePolicy
 import com.rmjtromp.trawler.discovery.WatermarkHarvestStrategy
 import com.rmjtromp.trawler.event.CrawlerEventType
 import com.rmjtromp.trawler.model.CrawlRequest
+import com.rmjtromp.trawler.model.CrawlResponse
+import com.rmjtromp.trawler.model.RequestContext
 import com.rmjtromp.trawler.policy.BuiltInPolicies
 import com.rmjtromp.trawler.policy.FailureClassification
 import com.rmjtromp.trawler.policy.FailureClassifier
 import com.rmjtromp.trawler.policy.FailureContext
+import com.rmjtromp.trawler.policy.PacingReservation
+import com.rmjtromp.trawler.policy.RequestPacingPolicy
 import com.rmjtromp.trawler.state.CheckpointPayload
 import com.rmjtromp.trawler.state.DiscoveryCheckpointCodecDescriptor
 import java.nio.ByteBuffer
@@ -57,6 +61,23 @@ class EngineRuntimeSettledFailureTest {
         assertNull(blocked.state.delegate.loadHarvestState("settled", "watermark"))
         assertEquals(false, assertNotNull(blocked.state.delegate.load("settled", "feed")).completed)
         assertTrue("harvest-incomplete:watermark boundary is not settled" in blocked.warnings, "${blocked.warnings}")
+    }
+
+    @Test
+    fun `a permanent transport failure settles while other generic work-stage failures block`() = runTest {
+        val transport = settledCase(SettledItemFailurePolicy.ALLOWS_COMPLETION, BadItem.PERMANENT_TRANSPORT)
+        assertEquals("work", transport.run.failures.single().stage)
+        assertEquals(HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES, transport.completions.single().runOutcome)
+        assertNotNull(transport.state.delegate.loadHarvestState("settled", "watermark"))
+
+        val nonTransport = settledCase(SettledItemFailurePolicy.ALLOWS_COMPLETION, BadItem.NON_TRANSPORT_WORK)
+        assertEquals("work", nonTransport.run.failures.single().stage)
+        assertEquals(
+            HarvestRunOutcome.FAILED,
+            nonTransport.completions.single().runOutcome,
+            "A non-retryable failure outside the transport is not attributable to the item",
+        )
+        assertNull(nonTransport.state.delegate.loadHarvestState("settled", "watermark"))
     }
 
     @Test
@@ -123,7 +144,13 @@ class EngineRuntimeSettledFailureTest {
         }
     }
 
-    private enum class BadItem { PERMANENT_EXTRACTION, TRANSIENT_TRANSPORT, REQUIRED_OUTPUT }
+    private enum class BadItem {
+        PERMANENT_EXTRACTION,
+        PERMANENT_TRANSPORT,
+        TRANSIENT_TRANSPORT,
+        NON_TRANSPORT_WORK,
+        REQUIRED_OUTPUT,
+    }
 
     private class TransientTestException : RuntimeException("temporarily unavailable")
 
@@ -161,6 +188,7 @@ class EngineRuntimeSettledFailureTest {
         }
         val transport = ScriptedTransport { request ->
             if (bad == BadItem.TRANSIENT_TRANSPORT && request.target == "bad") throw TransientTestException()
+            if (bad == BadItem.PERMANENT_TRANSPORT && request.target == "bad") throw IllegalArgumentException("unsupported target")
             okResponse(request)
         }
         val extractor = LambdaExtractor<String>("extractor") { response, _ ->
@@ -188,7 +216,7 @@ class EngineRuntimeSettledFailureTest {
             extractor,
             clock,
             transport = transport,
-            policies = BuiltInPolicies.ordinary(clock = clock).copy(failureClassifier = classifier),
+            policies = BuiltInPolicies.ordinary(clock = clock).copy(failureClassifier = classifier, pacing = pacing(bad)),
             discoveries = listOf(discovery),
             outputs = listOf(output to OutputRequirement.REQUIRED),
             harvest = recording,
@@ -206,6 +234,19 @@ class EngineRuntimeSettledFailureTest {
             )
         } finally {
             engine.shutdown()
+        }
+    }
+
+    /** Pacing observation runs on the work path outside the transport call. */
+    private fun pacing(bad: BadItem): RequestPacingPolicy = object : RequestPacingPolicy {
+        override val id: String = "test-pacing"
+        override suspend fun acquire(request: CrawlRequest, context: RequestContext): PacingReservation =
+            PacingReservation { }
+
+        override fun observe(response: CrawlResponse, context: RequestContext) {
+            if (bad == BadItem.NON_TRANSPORT_WORK && response.request.target == "bad") {
+                throw IllegalStateException("pacing state unavailable")
+            }
         }
     }
 

@@ -160,8 +160,9 @@ public sealed interface DiscoveryEmission {
      * been accepted, suppressed, or rejected when this marker is handled. Use
      * it after a region that produced no new work (for example a page whose
      * items were all filtered or already known), so a resumed walk does not
-     * repeat that region. A rejected earlier emission stops the walk before the
-     * marker is reached. The marker counts toward the engine's discovery
+     * repeat that region. The marker is not applied when an earlier emission of
+     * the same walk was rejected or deferred by recrawl policy, so a resumed walk
+     * revisits that item. The marker counts toward the engine's discovery
      * emission bounds but is not reported to budget policies as a work
      * candidate. It is a configuration error for a non-resumable discovery.
      */
