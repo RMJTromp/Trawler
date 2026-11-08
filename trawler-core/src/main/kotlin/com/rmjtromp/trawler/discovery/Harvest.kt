@@ -64,7 +64,16 @@ public sealed interface HarvestAdmission {
     }
 }
 
-/** Conditions evaluated before historical coverage can be committed. */
+/**
+ * Conditions evaluated before historical coverage can be committed.
+ *
+ * [completionPredicatePassed] is true only for [HarvestRunOutcome.COMPLETED].
+ * [settledItemFailures] counts work items that reached a terminal failed
+ * state in this run through a permanent, item-level failure; it is non-zero
+ * only for [HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES].
+ * [incrementalWindow] is the most conservative window supplied to this run's
+ * resumable discoveries, or `null` when the strategy supplied none.
+ */
 public data class HarvestCompletionContext(
     public val discoveryReachedNaturalEnd: Boolean,
     public val checkpointWorkSettled: Boolean,
@@ -73,19 +82,69 @@ public data class HarvestCompletionContext(
     public val completionPredicatePassed: Boolean,
     public val now: Instant,
     public val previousState: HarvestState? = null,
+    public val settledItemFailures: Long = 0,
+    public val incrementalWindow: IncrementalBoundaryPolicy.Window? = null,
 ) {
     init {
         require(generationWorkOpen >= 0) { "Generation work count must not be negative" }
+        require(settledItemFailures >= 0) { "Settled item failure count must not be negative" }
+        require(settledItemFailures == 0L || runOutcome == HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES) {
+            "Settled item failures require the settled-failure run outcome"
+        }
     }
 }
 
 /** Run outcome visible to harvest completion, without exposing pipeline values. */
 public enum class HarvestRunOutcome {
+    /** Every discovered item succeeded or was intentionally ignored, dropped, or suppressed. */
     COMPLETED,
+
+    /**
+     * The run itself completed and every work item reached a terminal state,
+     * but at least one item failed permanently at an item-level stage. Only
+     * failures classified as not retryable by default, raised by transport,
+     * extraction, response bounds, or validation, are settled. Exhausted
+     * transient failures, response-store and capture-policy failures,
+     * required-output failures, and state-store failures remain [FAILED].
+     * The pipeline run status is still reported as failed; this outcome only
+     * lets a strategy that opted in commit harvest progress.
+     */
+    COMPLETED_WITH_SETTLED_ITEM_FAILURES,
     ABANDONED,
     FAILED,
     CANCELLED,
 }
+
+/**
+ * Explicit choice for whether settled item failures may commit harvest progress.
+ *
+ * The built-in strategies default to [BLOCKS_COMPLETION]. Selecting
+ * [ALLOWS_COMPLETION] means a permanently failed item does not prevent a
+ * cursor walk, watermark, or historical phase from completing; the host is
+ * then responsible for recording and revisiting those items, because the
+ * next incremental window will not rediscover them. It requires a failure
+ * classifier that marks transient failures as retryable by default, such as
+ * the web adapter classifier; the core default classifier marks every
+ * failure as non-retryable.
+ */
+public enum class SettledItemFailurePolicy {
+    BLOCKS_COMPLETION,
+    ALLOWS_COMPLETION,
+}
+
+/** True when the run reached a terminal state this strategy may commit. */
+private fun HarvestCompletionContext.runSettledFor(policy: SettledItemFailurePolicy): Boolean =
+    (runOutcome == HarvestRunOutcome.COMPLETED && completionPredicatePassed) ||
+        (runOutcome == HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES &&
+            policy == SettledItemFailurePolicy.ALLOWS_COMPLETION)
+
+/**
+ * Boundary covered by this run. A watermark must advance only to the end of
+ * the window the discovery searched, never to the completion time: changes
+ * made while the run processed its work lie outside that window.
+ */
+private fun HarvestCompletionContext.coveredBoundary(): Instant =
+    incrementalWindow?.endExclusive ?: now
 
 /** Expected harvest completion decisions. */
 public sealed interface HarvestCompletion {
@@ -139,6 +198,7 @@ public object StatelessHarvestStrategy : HarvestStrategy {
 /** Cursor state is resumable but does not claim historical completion semantics. */
 public class CursorHarvestStrategy(
     override val id: String = "cursor",
+    public val settledItemFailures: SettledItemFailurePolicy = SettledItemFailurePolicy.BLOCKS_COMPLETION,
 ) : HarvestStrategy {
     override val mode: HarvestMode = HarvestMode.CURSOR
 
@@ -147,11 +207,10 @@ public class CursorHarvestStrategy(
     }
 
     override fun complete(context: HarvestCompletionContext): HarvestCompletion =
-        if (context.runOutcome == HarvestRunOutcome.COMPLETED &&
+        if (context.runSettledFor(settledItemFailures) &&
             context.discoveryReachedNaturalEnd &&
             context.checkpointWorkSettled &&
-            context.generationWorkOpen == 0 &&
-            context.completionPredicatePassed
+            context.generationWorkOpen == 0
         ) {
             HarvestCompletion.Commit(null)
         } else {
@@ -159,10 +218,19 @@ public class CursorHarvestStrategy(
         }
 }
 
-/** Watermark state is resumable and uses an explicit boundary policy. */
+/**
+ * Watermark state is resumable and uses an explicit boundary policy.
+ *
+ * A committed boundary is the exclusive end of the window supplied to this
+ * run's discovery, so the next window starts where this one stopped searching
+ * (minus the policy overlap) regardless of how long the run took to process
+ * its work. A settled item failure commits only when [settledItemFailures]
+ * allows it.
+ */
 public class WatermarkHarvestStrategy(
     public val boundaryPolicy: IncrementalBoundaryPolicy,
     override val id: String = "watermark",
+    public val settledItemFailures: SettledItemFailurePolicy = SettledItemFailurePolicy.BLOCKS_COMPLETION,
 ) : HarvestStrategy {
     override val mode: HarvestMode = HarvestMode.WATERMARK
     private val boundaryCodec = InstantBoundaryHarvestStateCodec(id)
@@ -175,14 +243,13 @@ public class WatermarkHarvestStrategy(
     }
 
     override fun complete(context: HarvestCompletionContext): HarvestCompletion =
-        if (context.runOutcome == HarvestRunOutcome.COMPLETED &&
+        if (context.runSettledFor(settledItemFailures) &&
             context.discoveryReachedNaturalEnd &&
             context.checkpointWorkSettled &&
-            context.generationWorkOpen == 0 &&
-            context.completionPredicatePassed
+            context.generationWorkOpen == 0
         ) {
             HarvestCompletion.Commit(
-                boundaryCodec.candidate(context.now, historicalComplete = false),
+                boundaryCodec.candidate(context.coveredBoundary(), historicalComplete = false),
             )
         } else {
             HarvestCompletion.Incomplete("watermark boundary is not settled")
@@ -195,11 +262,20 @@ public class WatermarkHarvestStrategy(
 /**
  * Historical coverage is committed only after every required condition is
  * true. A failed, cancelled, abandoned, incomplete, or open-work run can
- * never mark historical coverage complete.
+ * never mark historical coverage complete; settled item failures may commit
+ * only when [settledItemFailures] allows it.
+ *
+ * Incremental runs commit the end of the window they searched. The historical
+ * phase has no window, so its completion records the completion time; items
+ * changed while a long, multi-run historical walk was in progress are covered
+ * only if the discovery's own ordering reaches them. Run a separate
+ * [WatermarkHarvestStrategy] pipeline beside a long backfill when that gap
+ * matters.
  */
 public class HistoricalThenIncrementalHarvestStrategy(
     public val boundaryPolicy: IncrementalBoundaryPolicy,
     override val id: String = "historical-then-incremental",
+    public val settledItemFailures: SettledItemFailurePolicy = SettledItemFailurePolicy.BLOCKS_COMPLETION,
 ) : HarvestStrategy {
     override val mode: HarvestMode = HarvestMode.HISTORICAL_THEN_INCREMENTAL
     private val boundaryCodec = InstantBoundaryHarvestStateCodec(id)
@@ -215,11 +291,10 @@ public class HistoricalThenIncrementalHarvestStrategy(
         if (context.discoveryReachedNaturalEnd &&
             context.checkpointWorkSettled &&
             context.generationWorkOpen == 0 &&
-            context.runOutcome == HarvestRunOutcome.COMPLETED &&
-            context.completionPredicatePassed
+            context.runSettledFor(settledItemFailures)
         ) {
             HarvestCompletion.Commit(
-                boundaryCodec.candidate(context.now, historicalComplete = true),
+                boundaryCodec.candidate(context.coveredBoundary(), historicalComplete = true),
             )
         } else {
             HarvestCompletion.Incomplete("historical coverage completion conditions are not met")

@@ -35,11 +35,14 @@ Core owns the contracts and operational coordination:
 - `ResumableDiscovery` and `DiscoveryCheckpointCodec` own checkpoint meaning,
   codec ID/version, and migration decisions;
 - `DiscoveryEmission` carries an optional `DiscoveryCheckpointCandidate`;
+  `DiscoveryEmission.Checkpoint` carries one without creating work;
 - `DiscoveryCheckpointStore` owns revisioned compare-and-set storage;
 - `AtomicEnqueueAndCheckpointStore` declares an adapter transaction boundary;
 - `CheckpointQuarantineStore` retains incompatible checkpoint bytes;
 - `HarvestStrategy` owns recurring mode, admission, completion, and optional
   `HarvestStateCodec` interpretation;
+- `SettledItemFailurePolicy` is the built-in strategies' explicit choice of
+  whether settled item failures may commit harvest progress;
 - `DiscoveryAdmissionPolicy` owns backlog admission;
 - `IncrementalBoundaryPolicy` owns deterministic half-open overlap windows;
 - `HarvestStateStore` and `HarvestStateQuarantineStore` own optional opaque
@@ -78,7 +81,17 @@ require a separate harvest-state codec. `WatermarkHarvestStrategy` and
 `HistoricalThenIncrementalHarvestStrategy` use an extension-owned, bounded
 instant boundary codec. A watermark window is `(lastBoundary - overlap, now)`;
 historical-then-incremental uses no window until historical completion is
-committed. `FixedOverlapBoundaryPolicy` is deterministic for an injected clock.
+committed. A committed watermark is the exclusive end of the window the run's
+discovery searched, not the run's completion time, so changes made while the
+run processed its work fall inside the next window regardless of run length.
+The historical phase has no window, so historical completion records its
+completion time. `FixedOverlapBoundaryPolicy` is deterministic for an
+injected clock.
+
+`CursorHarvestStrategy`, `WatermarkHarvestStrategy`, and
+`HistoricalThenIncrementalHarvestStrategy` accept
+`settledItemFailures: SettledItemFailurePolicy`, defaulting to
+`BLOCKS_COMPLETION`. See [Settled item failures](#settled-item-failures).
 
 Non-stateless strategies that provide a harvest-state codec require a
 `HarvestStateStore`. A resumable discovery always requires a checkpoint-capable
@@ -120,11 +133,29 @@ opaque bytes and reason before core installs an empty current-codec state.
 Compare-and-set revision conflicts fail deterministically rather than allowing
 a stale writer to overwrite progress.
 
+A discovery that produced no new work for a region, for example because it
+filtered items it already knows, emits `DiscoveryEmission.Checkpoint` to
+record that progress. Emissions are handled in order, so every earlier
+emission has already been accepted, suppressed, or rejected. The marker uses
+the store's checkpoint compare-and-set directly (the atomic enqueue path is
+not needed, because no work is enqueued). It is not applied if an earlier
+emission of the same walk was rejected, so the resumed walk revisits the
+rejected item; the run is abandoned with a
+`checkpoint-marker-after-rejection:<discovery>` warning. A lost
+compare-and-set reloads progress and abandons the run, exactly like an
+item-attached checkpoint. Markers count toward
+`maxDiscoveryEmissionsPerDiscovery` but are not counted as discovery emissions
+in run results or reported to budget policies as work candidates. A marker
+from a non-resumable discovery, or with a foreign codec or strategy, fails
+that discovery. A checkpoint attached to a suppressed item still does not
+advance; follow suppressed items with a marker when that progress matters.
+
 Checkpoint `completed` is set only after the relevant discovery reaches its
-natural end, open generation work is settled, the run is completed, and the
-selected harvest strategy returns `Commit`. Budget exhaustion, cancellation,
-failure, admission deferral, an open backlog, or a completion predicate that
-fails leaves the checkpoint resumable and historical coverage incomplete.
+natural end, open generation work is settled, the run is completed (with or
+without settled item failures), and the selected harvest strategy returns
+`Commit`. Budget exhaustion, cancellation, blocking failure, admission
+deferral, an open backlog, or a strategy that declines leaves the checkpoint
+resumable and historical coverage incomplete.
 
 ## Harvest and pipeline state
 
@@ -142,8 +173,43 @@ conflict leaves the run abandoned and does not silently claim completion.
 
 - every resumable discovery reached its natural end;
 - no generated work remains open;
-- the run outcome is `COMPLETED`;
-- the strategy completion predicate passes.
+- the run outcome is `COMPLETED` (and the completion predicate passes), or it
+  is `COMPLETED_WITH_SETTLED_ITEM_FAILURES` and the strategy was constructed
+  with `SettledItemFailurePolicy.ALLOWS_COMPLETION`.
+
+### Settled item failures
+
+A work item that fails terminally makes the pipeline run `FAILED`. For harvest
+completion the engine separates such failures into two kinds. A failure is
+*settled* only when all of these hold:
+
+- the retry policy returned `DoNotRetry`;
+- the failure classifier returned `retryableByDefault = false`;
+- the stage is item-level: transport/execution (`work`), `extraction`,
+  `extraction-bound`, `follow-up-bound`, `response-metadata-bound`, or
+  `validation:*`;
+- the terminal `Failed` transition was accepted by the state store.
+
+Every other terminal failure is blocking, including exhausted transient
+failures, `response-policy`, `response-store`, required `output:*` failures,
+`attempt-start`, lease and state-store failures, discovery failures, and
+pipeline failures. The harvest run outcome is `FAILED` for any blocking
+failure, `ABANDONED` for any abandonment, otherwise
+`COMPLETED_WITH_SETTLED_ITEM_FAILURES` when at least one item settled, and
+`COMPLETED` otherwise. `HarvestCompletionContext.settledItemFailures` carries
+the count and `completionPredicatePassed` remains true only for `COMPLETED`.
+The engine's commit gate accepts both completed outcomes; the strategy
+decides.
+
+Opting in with `ALLOWS_COMPLETION` means a settled item will not be rediscovered
+by the next incremental window. The host must record such items itself (the
+run result and events identify them) and revisit them if needed. Settlement
+depends on the classifier: `DefaultFailureClassifier` marks every failure
+non-retryable, so web pipelines should use `DefaultWebFailureClassifier` or
+`FlareSolverrFailureClassifier`, which mark timeouts, transport failures, and
+service unavailability as retryable. Expected item outcomes such as a deleted
+page are usually better modeled as `ExtractionResult.Ignore`, which is not a
+failure at all.
 
 The built-in health and eligibility state is operational metadata only. It
 contains no response body, produced value, request payload, or domain record.
@@ -224,6 +290,16 @@ ordering, cursor resume, and cancellation. Core unit tests cover recurring
 admission, queue-watermark hysteresis, harvest completion truth tables, and
 overlap windows. Durable PostgreSQL recovery and Ktor transport integration
 remain planned in [`TEST-MATRIX.md`](TEST-MATRIX.md).
+
+Checkpoint markers are covered for the in-memory non-atomic and atomic store
+paths, rejection ordering, lost compare-and-set, foreign codecs,
+non-resumable discoveries, and the per-discovery bound
+(`EngineRuntimeCheckpointMarkerTest`). Settled item failures are covered for
+opt-in and default strategies, exhausted transient and required-output
+failures, the engine commit gate, and a watermark run whose work outlasts the
+overlap (`EngineRuntimeSettledFailureTest`, `DiscoveryHarvestTest`). Markers
+use the existing checkpoint compare-and-set contract, which the PostgreSQL
+adapter tests directly; there is no engine-level PostgreSQL marker test.
 
 The in-memory implementation is process-local and its recurring state and
 quarantine history are finite. `QueueWatermark` hysteresis is held by the

@@ -134,12 +134,25 @@ public class FileResponseStore(
     override suspend fun replay(query: ResponseReplayQuery, limit: Int, pipelineId: String?): List<StoredResponse> = onFileDispatcher {
         require(limit > 0) { "Replay limit must be positive" }
         require(pipelineId == null || pipelineId.isNotBlank()) { "Replay pipeline ID must not be blank" }
-        entries.values.asSequence()
+        val owned = entries.values.asSequence()
             .sortedBy(FileEntry::sequence)
             .filter { entry -> (pipelineId == null || entry.pipelineId == pipelineId) && matches(entry, query) }
-            .take(limit)
-            .map(::decode)
-            .toList()
+        val selected = when (query) {
+            is ResponseReplayQuery.ByPipelineId -> {
+                val afterSequence = query.after?.let(::sequenceOf)
+                val latestByTarget = if (query.versions == ResponseReplayVersions.LATEST_PER_TARGET) {
+                    owned.associate { it.target to it.sequence }
+                } else {
+                    null
+                }
+                owned
+                    .filter { afterSequence == null || it.sequence > afterSequence }
+                    .filter { latestByTarget == null || latestByTarget[it.target] == it.sequence }
+            }
+
+            else -> owned
+        }
+        selected.take(limit).map(::decode).toList()
     }
 
     override suspend fun history(requestId: String, limit: Int): List<StoredResponse> = onFileDispatcher {
@@ -337,7 +350,15 @@ public class FileResponseStore(
     private fun temporaryPath(slot: Int): Path =
         root.resolve("response-${slot.toString().padStart(8, '0')}.tmp")
 
-    private fun referenceFor(sequence: Long): String = "file-response-$sequence"
+    private fun referenceFor(sequence: Long): String = "$REFERENCE_PREFIX$sequence"
+
+    /** References embed the store sequence, so a pruned cursor still orders correctly. */
+    private fun sequenceOf(reference: ResponseReference): Long =
+        reference.value.removePrefix(REFERENCE_PREFIX)
+            .takeIf { reference.value.startsWith(REFERENCE_PREFIX) }
+            ?.toLongOrNull()
+            ?.takeIf { it > 0 }
+            ?: throw IllegalArgumentException("Replay cursor was not issued by file response store '$id'")
 
     private data class FileEntry(
         val sequence: Long,
@@ -350,7 +371,7 @@ public class FileResponseStore(
         val payloadSize: Int,
     ) {
         val reference: ResponseReference
-            get() = ResponseReference("file-response-$sequence")
+            get() = ResponseReference("$REFERENCE_PREFIX$sequence")
     }
 
     private data class ReadRecord(
@@ -369,6 +390,7 @@ public class FileResponseStore(
     }
 
     private companion object {
+        const val REFERENCE_PREFIX: String = "file-response-"
         const val MAGIC: Int = 0x5452_4652
         const val FORMAT_VERSION: Int = 1
         const val MAX_IDENTIFIER_BYTES: Int = 255

@@ -6,6 +6,7 @@ import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.model.CrawlResponse
 import com.rmjtromp.trawler.model.Headers
 import com.rmjtromp.trawler.model.ResponseBody
+import com.rmjtromp.trawler.model.ResponseReference
 import java.io.EOFException
 import java.nio.ByteBuffer
 import java.nio.file.Files
@@ -123,6 +124,47 @@ class FileResponseStoreIT {
         assertNull(store.find(ResponseLookup.ByReference(third)))
         assertNotNull(store.find(ResponseLookup.ByReference(fourth)))
         store.close()
+    }
+
+    @Test
+    fun `pipeline replay pages by cursor, selects latest versions, and survives reopening and pruning`() = runTest {
+        val registry = ResponseCodecRegistry(listOf(BodyCodec()))
+        val store = FileResponseStore(root = root, codecs = registry, maxResponses = 8)
+        val oldA = store.put(response("a", byteArrayOf(1), receivedAt = Instant.EPOCH))!!
+        val onlyB = store.put(response("b", byteArrayOf(2), receivedAt = Instant.EPOCH.plusSeconds(1)))!!
+        store.put(response("a", byteArrayOf(3), pipelineId = "other", receivedAt = Instant.EPOCH.plusSeconds(2)))!!
+        val newA = store.put(response("a", byteArrayOf(4), receivedAt = Instant.EPOCH.plusSeconds(3)))!!
+        store.close()
+
+        val reopened = FileResponseStore(root = root, codecs = registry, maxResponses = 8)
+        try {
+            val all = ResponseReplayQuery.ByPipelineId("pipeline")
+            val page1 = reopened.replay(all, limit = 2, pipelineId = "pipeline")
+            assertEquals(listOf(oldA, onlyB), page1.map { it.reference })
+            assertEquals(
+                listOf(newA),
+                reopened.replay(all.copy(after = page1.last().reference), limit = 2, pipelineId = "pipeline")
+                    .map { it.reference },
+            )
+            val latest = all.copy(versions = ResponseReplayVersions.LATEST_PER_TARGET)
+            assertEquals(listOf(onlyB, newA), reopened.replay(latest, limit = 8).map { it.reference })
+            assertEquals(listOf(onlyB), reopened.replay(latest, limit = 1).map { it.reference })
+
+            assertEquals(1L, reopened.evictBefore(Instant.EPOCH.plusSeconds(1)))
+            assertEquals(
+                listOf(onlyB, newA),
+                reopened.replay(all.copy(after = oldA), limit = 8).map { it.reference },
+                "A pruned cursor still orders by the sequence it encodes",
+            )
+            assertEquals(
+                "Replay cursor was not issued by file response store 'file-responses'",
+                assertFailsWith<IllegalArgumentException> {
+                    reopened.replay(all.copy(after = ResponseReference("memory-response-1")), limit = 1)
+                }.message,
+            )
+        } finally {
+            reopened.close()
+        }
     }
 
     @Test

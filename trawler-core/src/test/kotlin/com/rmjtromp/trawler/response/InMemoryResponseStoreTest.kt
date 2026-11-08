@@ -59,6 +59,83 @@ class InMemoryResponseStoreTest {
     }
 
     @Test
+    fun `pipeline replay pages with an exclusive cursor that survives pruning of the cursor response`() = runTest {
+        val store = InMemoryResponseStore(maxResponses = 8)
+        val first = store.put(response("a", "pipeline", Instant.EPOCH))!!
+        store.put(response("other", "other-pipeline", Instant.EPOCH))!!
+        val second = store.put(response("b", "pipeline", Instant.EPOCH.plusSeconds(10)))!!
+        val third = store.put(response("c", "pipeline", Instant.EPOCH.plusSeconds(20)))!!
+
+        val page1 = store.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 2, pipelineId = "pipeline")
+        assertEquals(listOf(first, second), page1.map { it.reference })
+        val page2 = store.replay(
+            ResponseReplayQuery.ByPipelineId("pipeline", after = page1.last().reference),
+            limit = 2,
+            pipelineId = "pipeline",
+        )
+        assertEquals(listOf(third), page2.map { it.reference })
+        assertEquals(
+            emptyList(),
+            store.replay(ResponseReplayQuery.ByPipelineId("pipeline", after = third), limit = 2, pipelineId = "pipeline"),
+        )
+
+        assertEquals(2L, store.evictBefore(Instant.EPOCH.plusSeconds(5)))
+        assertEquals(
+            listOf(third),
+            store.replay(ResponseReplayQuery.ByPipelineId("pipeline", after = second), limit = 2).map { it.reference },
+        )
+        assertEquals(
+            listOf(second, third),
+            store.replay(ResponseReplayQuery.ByPipelineId("pipeline", after = first), limit = 2).map { it.reference },
+            "A pruned cursor still orders by the sequence it encodes",
+        )
+    }
+
+    @Test
+    fun `latest-per-target replay skips superseded responses and composes with the cursor and limit`() = runTest {
+        val store = InMemoryResponseStore(maxResponses = 8)
+        val oldA = store.put(response("a", "pipeline", Instant.EPOCH))!!
+        val onlyB = store.put(response("b", "pipeline", Instant.EPOCH))!!
+        val otherA = store.put(response("a", "other-pipeline", Instant.EPOCH))!!
+        val newA = store.put(response("a", "pipeline", Instant.EPOCH))!!
+        val onlyC = store.put(response("c", "pipeline", Instant.EPOCH))!!
+
+        val latest = ResponseReplayQuery.ByPipelineId("pipeline", versions = ResponseReplayVersions.LATEST_PER_TARGET)
+        assertEquals(listOf(onlyB, newA, onlyC), store.replay(latest, limit = 8).map { it.reference })
+        assertEquals(listOf(onlyB), store.replay(latest, limit = 1).map { it.reference }, "Superseded rows do not consume the limit")
+        assertEquals(
+            listOf(newA, onlyC),
+            store.replay(latest.copy(after = onlyB), limit = 8).map { it.reference },
+        )
+        assertEquals(
+            listOf(oldA, onlyB, newA, onlyC),
+            store.replay(ResponseReplayQuery.ByPipelineId("pipeline"), limit = 8).map { it.reference },
+        )
+        assertEquals(
+            listOf(otherA),
+            store.replay(latest.copy(pipelineId = "other-pipeline"), limit = 8).map { it.reference },
+            "Latest-version selection is scoped to the selected pipeline",
+        )
+    }
+
+    @Test
+    fun `pipeline replay rejects cursors this store did not issue`() = runTest {
+        val store = InMemoryResponseStore()
+        store.put(response("a", "pipeline", Instant.EPOCH))
+        listOf("file-response-1", "memory-response-", "memory-response-0", "memory-response-x").forEach { value ->
+            assertEquals(
+                "Replay cursor was not issued by in-memory response store 'memory-responses'",
+                assertFailsWith<IllegalArgumentException>(value) {
+                    store.replay(
+                        ResponseReplayQuery.ByPipelineId("pipeline", after = com.rmjtromp.trawler.model.ResponseReference(value)),
+                        limit = 1,
+                    )
+                }.message,
+            )
+        }
+    }
+
+    @Test
     fun `eviction and pruning use an exclusive age cutoff and bounded protected deletion`() = runTest {
         assertFailsWith<IllegalArgumentException> { InMemoryResponseStore(maxResponses = 0) }
         assertFailsWith<IllegalArgumentException> { InMemoryResponseStore(maxBodyBytes = 0) }

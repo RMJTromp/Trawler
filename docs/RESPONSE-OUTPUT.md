@@ -143,6 +143,35 @@ contains bounded failure summaries. Cancellation propagates through the
 typed pipeline and stops extension/output work under the owning structured
 scope.
 
+### Paged and latest-version replay
+
+`ResponseReplayQuery.ByPipelineId(pipelineId, after, versions)` reprocesses
+a pipeline's history larger than one bounded replay:
+
+- results are in ascending store order (the order the store accepted them);
+- `after` is an exclusive keyset cursor holding a reference issued by the same
+  store. A store rejects a reference it cannot order with
+  `IllegalArgumentException`. The built-in stores encode their sequence in the
+  reference (`memory-response-N`, `file-response-N`, `postgres-response-N`),
+  so a cursor whose own response was pruned still orders correctly;
+- `versions = ALL` (default) replays every retained response;
+  `LATEST_PER_TARGET` replays only the newest retained response for each
+  request target within the pipeline. Superseded responses do not consume the
+  limit. Selection is evaluated when each page is read, so a target that gains
+  a newer response between pages is replayed again on a later page;
+- ownership, cursor, and version selection are applied before the limit.
+
+`ReplayResult.lastReference` is the last response, in store order, that
+finished processing successfully or with a recorded failure. A response
+interrupted by a budget stop is excluded, so the next page replays it again.
+To walk a whole history, replay with `after = lastReference` until a page
+returns fewer responses than its limit. Per-response failures do not stop a
+page; the caller decides whether to continue past a `FAILED` page. Each page
+is a separate replay operation, serialized with ordinary runs, and outputs see
+at-least-once delivery for a page interrupted between delivery and the next
+cursor. Custom `ResponseReplayStore` implementations must honor the ordering,
+cursor, and version contract for `ByPipelineId`.
+
 ## PostgreSQL implementation
 
 `trawler-postgres` keeps response and output data outside the operational state
@@ -295,6 +324,16 @@ fresh fencing tokens, stale completion, and the documented duplicate window.
 Their source compiles and Failsafe discovers it; execution remains dependent
 on a Docker-compatible Testcontainers runtime.
 
+Paged and latest-version replay is covered for the in-memory, file
+(including a reopened store), and PostgreSQL stores: exclusive cursors,
+superseded rows not consuming the limit, cursor composition with version
+selection, pipeline scoping of latest versions, pruned cursors, and rejection
+of foreign cursors (`InMemoryResponseStoreTest`, `FileResponseStoreIT`,
+`PostgresResponseStoreIT`, the latter run against PostgreSQL 16 via
+Testcontainers). `EngineRuntimeReplayTest` walks a recrawled history in
+bounded pages through the engine with no network calls and checks
+`lastReference` after stage failures and budget stops.
+
 ## Limitations
 
 - File stores do not provide multi-process fencing or a cross-store lineage
@@ -303,4 +342,7 @@ on a Docker-compatible Testcontainers runtime.
   delivery; idempotency remains caller/destination-owned.
 - Replay requires the selected response store to retain a compatible caller
   codec and does not replay extractor follow-up jobs.
+- Latest-version replay compares exact request targets; two targets that
+  canonicalize to the same resource are distinct unless the caller stores
+  them under one target.
 - There is no durable operational-event history in this phase.

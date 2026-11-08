@@ -1101,6 +1101,12 @@ private class PipelineCounters(
     val failuresCount = AtomicLong(0)
     val abandoned = AtomicBoolean(false)
     val terminalFailure = AtomicBoolean(false)
+
+    /** A terminal failure that is not a settled item failure; it always blocks harvest progress. */
+    val blockingFailure = AtomicBoolean(false)
+
+    /** Work items that ended in a permanent item-level failure this run. */
+    val settledItemFailures = AtomicLong(0)
     private val failureMutex = Mutex()
     private val failures = mutableListOf<RunFailure>()
 
@@ -1126,7 +1132,10 @@ private class PipelineCounters(
 
     suspend fun failure(stage: String, error: Throwable, terminal: Boolean) {
         failuresCount.incrementAndGet()
-        if (terminal) terminalFailure.set(true)
+        if (terminal) {
+            terminalFailure.set(true)
+            blockingFailure.set(true)
+        }
         failureMutex.withLock {
             if (failures.size < maxFailureRecords) failures += RunFailure(stage, error)
         }
@@ -1212,6 +1221,67 @@ private class DiscoveryProgress(
     var reachedNaturalEnd: Boolean = false
     var deferred: Boolean = false
     var failed: Boolean = false
+    var incrementalWindow: com.rmjtromp.trawler.policy.IncrementalBoundaryPolicy.Window? = null
+
+    /** Set when an emission of this walk was rejected; later checkpoint markers must not skip it. */
+    var emissionRejected: Boolean = false
+}
+
+/**
+ * Applies a [DiscoveryEmission.Checkpoint] marker. Earlier emissions were
+ * handled sequentially, so advancing here cannot skip accepted work. A marker
+ * after a rejected emission is not applied, so the resumed walk revisits the
+ * rejected item; a compare-and-set conflict reloads progress and abandons the
+ * run exactly like an item-attached checkpoint.
+ */
+private suspend fun advanceCheckpointMarker(
+    context: PipelineExecutionContext,
+    counters: PipelineCounters,
+    candidate: com.rmjtromp.trawler.discovery.DiscoveryCheckpointCandidate,
+    progress: DiscoveryProgress,
+) {
+    val options = context.configuration.runtimeOptions
+    require(candidate.payload.size <= options.maxCheckpointPayloadBytes) {
+        "Discovery checkpoint exceeds the configured payload bound"
+    }
+    val resumable = progress.resumable
+        ?: throw IllegalStateException("Checkpoint marker requires a resumable discovery")
+    require(candidate.descriptor == resumable.checkpointCodec.descriptor) {
+        "Discovery checkpoint candidate codec does not match its discovery codec"
+    }
+    require(candidate.strategyId == resumable.checkpointCodec.strategyId) {
+        "Discovery checkpoint candidate strategy does not match its discovery codec"
+    }
+    if (progress.emissionRejected) {
+        counters.abandoned.set(true)
+        context.event(
+            CrawlerEventType.CAPABILITY_WARNING,
+            detail = "checkpoint-marker-after-rejection:${progress.discoveryId}",
+        )
+        return
+    }
+    val store = progress.checkpointStore
+        ?: throw IllegalStateException("Checkpoint store disappeared during discovery")
+    val next = DiscoveryCheckpoint(
+        revision = (progress.checkpoint?.revision ?: -1L) + 1L,
+        codecId = candidate.descriptor.id,
+        codecVersion = candidate.descriptor.version,
+        payload = candidate.payload,
+        generationId = candidate.generationId,
+        strategyId = candidate.strategyId,
+        completed = false,
+    )
+    if (store.compareAndSet(context.pipelineId, progress.discoveryId, progress.checkpoint?.revision, next)) {
+        progress.checkpoint = next
+        context.event(CrawlerEventType.DISCOVERY_CHECKPOINTED, detail = progress.discoveryId)
+    } else {
+        counters.abandoned.set(true)
+        progress.checkpoint = store.load(context.pipelineId, progress.discoveryId)
+        context.event(
+            CrawlerEventType.CAPABILITY_WARNING,
+            detail = "checkpoint-revision-conflict:${progress.discoveryId}",
+        )
+    }
 }
 
 internal suspend fun <T : Any> executeTypedReplay(
@@ -1223,6 +1293,7 @@ internal suspend fun <T : Any> executeTypedReplay(
     val counters = PipelineCounters(context.configuration.runtimeOptions.maxQueueSize)
     val pipelineExtensions = mutableListOf<ReplayLifecycle>()
     var cancelled = false
+    var lastReference: com.rmjtromp.trawler.model.ResponseReference? = null
     context.event(CrawlerEventType.PIPELINE_RUN_STARTED, detail = "replay")
     try {
         pipeline.extensions.filterIsInstance<ReplayLifecycle>()
@@ -1250,6 +1321,7 @@ internal suspend fun <T : Any> executeTypedReplay(
                     work = null,
                     storedReference = stored.reference,
                 )
+                lastReference = stored.reference
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (budget: BudgetReached) {
@@ -1257,8 +1329,10 @@ internal suspend fun <T : Any> executeTypedReplay(
                 counters.failure("replay-budget", budget, terminal = false)
                 break
             } catch (failure: StageFailure) {
+                lastReference = stored.reference
                 counters.failure("replay:${failure.stage}", failure.original, terminal = true)
             } catch (error: Throwable) {
+                lastReference = stored.reference
                 counters.failure("replay", error, terminal = true)
             }
         }
@@ -1299,6 +1373,7 @@ internal suspend fun <T : Any> executeTypedReplay(
         failures = counters.failureSnapshot(),
         startedAt = startedAt,
         completedAt = completedAt,
+        lastReference = lastReference,
     )
     context.event(
         when (status) {
@@ -1393,6 +1468,7 @@ internal suspend fun <T : Any> executeTypedPipeline(
                         now = context.configuration.clock.now(),
                     )
                     val harvestWindow = pipeline.harvestStrategy.window(harvestContext)
+                    progress.incrementalWindow = harvestWindow
                     val harvestAdmission = pipeline.harvestStrategy.admit(
                         harvestContext.copy(incrementalWindow = harvestWindow),
                     )
@@ -1457,6 +1533,15 @@ internal suspend fun <T : Any> executeTypedPipeline(
                                 throw BudgetReached("discovery-per-discovery-bound")
                             }
                             emissionsForDiscovery++
+                            val (request, existingResponse) = when (emission) {
+                                is DiscoveryEmission.Checkpoint -> {
+                                    advanceCheckpointMarker(context, counters, emission.checkpoint, progress)
+                                    return@collect
+                                }
+
+                                is DiscoveryEmission.Request -> emission.request to null
+                                is DiscoveryEmission.ExistingResponse -> emission.request to emission.response
+                            }
                             if (counters.discoveryEmissions.get() >=
                                 context.configuration.runtimeOptions.maxDiscoveryEmissionsPerRun
                             ) {
@@ -1470,31 +1555,18 @@ internal suspend fun <T : Any> executeTypedPipeline(
                                 BudgetObservation.DiscoveryEmitted(1),
                             )
                             context.event(CrawlerEventType.DISCOVERY_EMITTED, detail = discovery.id)
-                            when (emission) {
-                                is DiscoveryEmission.Request -> acceptWork(
-                                    pipeline,
-                                    context,
-                                    counters,
-                                    responses,
-                                    responseMutex,
-                                    emission.request,
-                                    null,
-                                    emission.checkpoint,
-                                    progress,
-                                )
-
-                                is DiscoveryEmission.ExistingResponse -> acceptWork(
-                                    pipeline,
-                                    context,
-                                    counters,
-                                    responses,
-                                    responseMutex,
-                                    emission.request,
-                                    emission.response,
-                                    emission.checkpoint,
-                                    progress,
-                                )
-                            }
+                            val acceptance = acceptWork(
+                                pipeline,
+                                context,
+                                counters,
+                                responses,
+                                responseMutex,
+                                request,
+                                existingResponse,
+                                emission.checkpoint,
+                                progress,
+                            )
+                            if (acceptance == WorkAcceptance.Rejected) progress.emissionRejected = true
                         }
                     progress.reachedNaturalEnd = true
                     context.event(CrawlerEventType.DISCOVERY_COMPLETED, detail = discovery.id)
@@ -1824,9 +1896,12 @@ private suspend fun <T : Any> finalizeDiscoveryProgress(
     openWork: Int,
     previousState: HarvestState?,
 ) {
+    val settledItemFailures = counters.settledItemFailures.get()
     val outcome = when {
-        counters.terminalFailure.get() -> HarvestRunOutcome.FAILED
+        counters.blockingFailure.get() -> HarvestRunOutcome.FAILED
         counters.abandoned.get() -> HarvestRunOutcome.ABANDONED
+        settledItemFailures > 0 -> HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES
+        counters.terminalFailure.get() -> HarvestRunOutcome.FAILED
         else -> HarvestRunOutcome.COMPLETED
     }
     val resumable = progress.filter { it.resumable != null }
@@ -1842,6 +1917,12 @@ private suspend fun <T : Any> finalizeDiscoveryProgress(
             completionPredicatePassed = outcome == HarvestRunOutcome.COMPLETED,
             now = context.configuration.clock.now(),
             previousState = previousState,
+            settledItemFailures = if (outcome == HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES) {
+                settledItemFailures
+            } else {
+                0
+            },
+            incrementalWindow = resumable.mapNotNull { it.incrementalWindow }.minByOrNull { it.endExclusive },
         ),
     )
     when (completion) {
@@ -1851,7 +1932,10 @@ private suspend fun <T : Any> finalizeDiscoveryProgress(
         )
 
         is HarvestCompletion.Commit -> {
-            val commitAllowed = outcome == HarvestRunOutcome.COMPLETED &&
+            val commitAllowed = (
+                outcome == HarvestRunOutcome.COMPLETED ||
+                    outcome == HarvestRunOutcome.COMPLETED_WITH_SETTLED_ITEM_FAILURES
+                ) &&
                 openWork == 0 &&
                 resumable.all { it.reachedNaturalEnd && !it.deferred && !it.failed }
             if (!commitAllowed) {
@@ -2804,7 +2888,9 @@ private suspend fun <T : Any> handleWorkFailure(
         }
 
         RetryDecision.DoNotRetry -> {
+            val settled = !classification.retryableByDefault && isItemLevelStage(stage)
             counters.terminalFailure.set(true)
+            if (!settled) counters.blockingFailure.set(true)
             if (recordLeaseMutationFailure(
                     context = context,
                     counters = counters,
@@ -2816,6 +2902,7 @@ private suspend fun <T : Any> handleWorkFailure(
             ) {
                 return
             }
+            if (settled) counters.settledItemFailures.incrementAndGet()
             context.event(CrawlerEventType.REQUEST_FAILED, crawler, work, stage)
         }
 
@@ -2836,6 +2923,19 @@ private suspend fun <T : Any> handleWorkFailure(
         }
     }
 }
+
+/**
+ * Stages whose permanent failure describes the item itself rather than the
+ * engine, its stores, or a required output. Only these can become settled
+ * item failures for harvest completion.
+ */
+private fun isItemLevelStage(stage: String): Boolean =
+    stage == "work" ||
+        stage == "extraction" ||
+        stage == "extraction-bound" ||
+        stage == "follow-up-bound" ||
+        stage == "response-metadata-bound" ||
+        stage.startsWith("validation:")
 
 /**
  * Prevents a stale or rejected lease mutation from being reported as a

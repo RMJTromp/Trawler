@@ -18,6 +18,7 @@ import com.rmjtromp.trawler.response.ResponseCodecDescriptor
 import com.rmjtromp.trawler.response.ResponseCodecRegistry
 import com.rmjtromp.trawler.response.ResponseLookup
 import com.rmjtromp.trawler.response.ResponseReplayQuery
+import com.rmjtromp.trawler.response.ResponseReplayVersions
 import com.rmjtromp.trawler.response.ResponseRetentionRequest
 import java.sql.Connection
 import java.sql.DriverManager
@@ -99,6 +100,59 @@ class PostgresResponseStoreIT {
                     pipelineId = "owner",
                 ).map { it.reference },
             )
+        } finally {
+            store.stop(stopContext())
+        }
+    }
+
+    @Test
+    fun `pipeline replay pages by sequence cursor and selects the latest version per target before the limit`(): Unit = runBlocking {
+        val schema = nextSchema()
+        val store = store(schema)
+        store.start(startContext())
+        try {
+            val oldA = assertNotNull(store.put(response("a", pipelineId = "p", body = byteArrayOf(1))))
+            val onlyB = assertNotNull(store.put(response("b", pipelineId = "p", body = byteArrayOf(2))))
+            val otherA = assertNotNull(store.put(response("a", pipelineId = "other", body = byteArrayOf(3))))
+            val newA = assertNotNull(store.put(response("a", pipelineId = "p", body = byteArrayOf(4))))
+            val all = ResponseReplayQuery.ByPipelineId("p")
+
+            val page1 = store.replay(all, limit = 2, pipelineId = "p")
+            assertEquals(listOf(oldA, onlyB), page1.map { it.reference })
+            assertEquals(
+                listOf(newA),
+                store.replay(all.copy(after = page1.last().reference), limit = 2, pipelineId = "p").map { it.reference },
+            )
+            assertEquals(emptyList(), store.replay(all.copy(after = newA), limit = 2, pipelineId = "p"))
+
+            val latest = all.copy(versions = ResponseReplayVersions.LATEST_PER_TARGET)
+            assertEquals(listOf(onlyB, newA), store.replay(latest, limit = 8, pipelineId = "p").map { it.reference })
+            assertEquals(listOf(onlyB), store.replay(latest, limit = 1, pipelineId = "p").map { it.reference })
+            assertEquals(
+                listOf(newA),
+                store.replay(latest.copy(after = onlyB), limit = 8, pipelineId = "p").map { it.reference },
+            )
+            assertEquals(
+                listOf(otherA),
+                store.replay(latest.copy(pipelineId = "other"), limit = 8, pipelineId = "other").map { it.reference },
+                "Latest-version selection is scoped to the owning pipeline",
+            )
+
+            val pruned = store.prune(ResponseRetentionRequest(Instant.parse("2027-01-01T00:00:00Z"), maxEntries = 1))
+            assertEquals(1L, pruned.deleted)
+            assertEquals(
+                listOf(onlyB, newA),
+                store.replay(all.copy(after = oldA), limit = 8, pipelineId = "p").map { it.reference },
+                "A pruned cursor still orders by the sequence it encodes",
+            )
+            listOf("memory-response-1", "postgres-response-x", "postgres-response-0").forEach { foreign ->
+                assertEquals(
+                    "Replay cursor was not issued by PostgreSQL response store 'it-$schema'",
+                    assertFailsWith<IllegalArgumentException>(foreign) {
+                        store.replay(all.copy(after = ResponseReference(foreign)), limit = 1, pipelineId = "p")
+                    }.message,
+                )
+            }
         } finally {
             store.stop(stopContext())
         }

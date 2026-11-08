@@ -62,7 +62,7 @@ public class InMemoryResponseStore(
             val oldest = entries.entries.firstOrNull()?.key ?: break
             entries.remove(oldest)
         }
-        val reference = ResponseReference("memory-response-${++nextReference}")
+        val reference = ResponseReference("$REFERENCE_PREFIX${++nextReference}")
         entries[reference] = StoredResponse(reference, response)
         reference
     }
@@ -83,10 +83,25 @@ public class InMemoryResponseStore(
     override suspend fun replay(query: ResponseReplayQuery, limit: Int, pipelineId: String?): List<StoredResponse> = mutex.withLock {
         require(limit > 0) { "Replay limit must be positive" }
         require(pipelineId == null || pipelineId.isNotBlank()) { "Replay pipeline ID must not be blank" }
-        entries.values.asSequence()
+        val owned = entries.values.asSequence()
             .filter { stored -> (pipelineId == null || stored.pipelineId == pipelineId) && matches(stored, query) }
-            .take(limit)
-            .toList()
+        when (query) {
+            is ResponseReplayQuery.ByPipelineId -> {
+                val afterSequence = query.after?.let(::sequenceOf)
+                val latestByTarget = if (query.versions == ResponseReplayVersions.LATEST_PER_TARGET) {
+                    owned.associate { it.response.request.target to it.reference }
+                } else {
+                    null
+                }
+                owned
+                    .filter { afterSequence == null || sequenceOf(it.reference) > afterSequence }
+                    .filter { latestByTarget == null || latestByTarget[it.response.request.target] == it.reference }
+                    .take(limit)
+                    .toList()
+            }
+
+            else -> owned.take(limit).toList()
+        }
     }
 
     override suspend fun history(requestId: String, limit: Int): List<StoredResponse> = mutex.withLock {
@@ -130,7 +145,17 @@ public class InMemoryResponseStore(
             stored.response.request.attributes[PIPELINE_ID_ATTRIBUTE] == query.pipelineId
     }
 
+    /** References are issued from a monotonic counter, so their suffix is the store order. */
+    private fun sequenceOf(reference: ResponseReference): Long =
+        reference.value.removePrefix(REFERENCE_PREFIX)
+            .takeIf { reference.value.startsWith(REFERENCE_PREFIX) }
+            ?.toLongOrNull()
+            ?.takeIf { it > 0 }
+            ?: throw IllegalArgumentException("Replay cursor was not issued by in-memory response store '$id'")
+
     public companion object {
+        private const val REFERENCE_PREFIX: String = "memory-response-"
+
         /** Internal metadata names used only when the engine supplies them. */
         public const val REQUEST_ID_ATTRIBUTE: String = "trawler.request-id"
         public const val PIPELINE_ID_ATTRIBUTE: String = "trawler.pipeline-id"
