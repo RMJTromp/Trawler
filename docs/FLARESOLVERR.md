@@ -4,7 +4,7 @@
 >
 > **Owner:** `trawler-flaresolverr`
 >
-> **Since:** 0.1.0-SNAPSHOT, unreleased
+> **Since:** 1.0.0
 
 ## Purpose
 

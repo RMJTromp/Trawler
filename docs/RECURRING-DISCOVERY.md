@@ -4,7 +4,7 @@
 >
 > **Owner:** `trawler-core`, with RSS/Atom/sitemap implementations in `trawler-web` and durable state in `trawler-postgres`
 >
-> **Since:** 0.1.0-SNAPSHOT
+> **Since:** 1.0.0
 
 ## Purpose
 

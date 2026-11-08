@@ -6,7 +6,7 @@
 > implementations; `trawler-postgres` for PostgreSQL response, output, and
 > outbox adapters.
 >
-> **Since:** 0.1.0-SNAPSHOT
+> **Since:** 1.0.0
 
 ## Purpose
 
