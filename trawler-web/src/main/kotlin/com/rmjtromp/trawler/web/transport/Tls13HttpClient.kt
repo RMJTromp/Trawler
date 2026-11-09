@@ -50,14 +50,16 @@ internal class Tls13Exchange(
 )
 
 /**
- * Transport-owned JDK `java.net.http` client used only for hosts explicitly
- * selected by [KtorTransportConfig.tls13Hosts].
+ * Transport-owned JDK `java.net.http` client used for hosts explicitly selected
+ * by [KtorTransportConfig.tls13Hosts] and for every host when
+ * [KtorTransportConfig.proxy] is set.
  *
- * This class exists because Ktor's own CIO TLS stops at TLS 1.2 and Ktor's
- * Java engine neither closes its JDK client nor enforces socket inactivity.
- * It mirrors the CIO path's HTTP/1.1, no-redirect, no-cookie-store,
- * no-decompression configuration and its direct or proxied routing; [KtorTransport] keeps
- * owning every policy, redirect, cookie, and content-decoding decision.
+ * This class exists because Ktor's own CIO TLS stops at TLS 1.2 and writes
+ * absolute-form requests inside CONNECT tunnels, and Ktor's Java engine neither
+ * closes its JDK client nor enforces socket inactivity. It mirrors the CIO path's
+ * HTTP/1.1, no-redirect, no-cookie-store, no-decompression configuration and
+ * negotiates the best TLS version the server offers, 1.2 or 1.3. [KtorTransport]
+ * keeps owning every policy, redirect, cookie, and content-decoding decision.
  *
  * Instances are coroutine-safe. [exchange] is cancellable, aborts the
  * underlying exchange on cancellation, and never retries a failed exchange
@@ -241,7 +243,7 @@ internal const val JDK_RETRY_LIMIT_PROPERTY = "jdk.httpclient.redirects.retrylim
  */
 internal fun requireNoHiddenJdkRetries() {
     check(System.getProperty(JDK_RETRY_LIMIT_PROPERTY)?.trim() == "1") {
-        "KtorTransportConfig.tls13Hosts requires the JVM option -D$JDK_RETRY_LIMIT_PROPERTY=1 " +
+        "KtorTransportConfig.tls13Hosts and proxy require the JVM option -D$JDK_RETRY_LIMIT_PROPERTY=1 " +
             "so the JDK HTTP client cannot retry requests outside engine attempt accounting"
     }
 }
@@ -253,7 +255,7 @@ internal fun requireNoHiddenJdkRetries() {
  */
 internal fun requireShutdownCapability(client: Any): AutoCloseable =
     client as? AutoCloseable ?: throw IllegalStateException(
-        "KtorTransportConfig.tls13Hosts requires a Java 21 or newer runtime for deterministic client shutdown",
+        "KtorTransportConfig.tls13Hosts and proxy require a Java 21 or newer runtime for deterministic client shutdown",
     )
 
 private fun isAdapterBoundFailure(error: Throwable): Boolean =
@@ -272,7 +274,7 @@ private class DispatchObservingPublisher(
 }
 
 /** Bounds exchanges the way CIO bounds its total and per-route connections. */
-internal class ConnectionLimiter(maxTotal: Int, private val maxPerOrigin: Int) {
+private class ConnectionLimiter(maxTotal: Int, private val maxPerOrigin: Int) {
     private class OriginEntry(permits: Int) {
         val semaphore = Semaphore(permits)
         var users = 0

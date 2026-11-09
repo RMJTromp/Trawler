@@ -1,7 +1,6 @@
 package com.rmjtromp.trawler.web.transport
 
 import java.net.InetSocketAddress
-import java.net.Proxy
 import java.net.URI
 import java.net.URISyntaxException
 
@@ -42,12 +41,10 @@ public data class WebProxy(public val url: String) {
     }
 
     /**
-     * The address is left unresolved so that no client performs a DNS or
+     * The address is left unresolved so that the client performs no DNS or
      * reverse lookup when it is built; each connection resolves [host] itself.
      */
     internal fun socketAddress(): InetSocketAddress = InetSocketAddress.createUnresolved(host, port)
-
-    internal fun javaProxy(): Proxy = Proxy(Proxy.Type.HTTP, socketAddress())
 
     private companion object {
         const val MAX_PORT = 65_535

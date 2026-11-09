@@ -2,7 +2,7 @@
 
 Trawler is a generic Kotlin library for composing typed scraping pipelines.
 
-> **Project status:** The current `1.3.0` release includes the `trawler-core`, `trawler-web`, `trawler-postgres`, and `trawler-flaresolverr` artifacts. Core provides typed pipeline composition, bounded execution, scheduling, discovery coordination, response storage and replay, typed outputs, and replaceable policies. The optional web artifact provides Ktor/CIO transport, an opt-in per-host JDK client path for servers that require TLS 1.3, an opt-in fail-closed forward HTTP proxy that FlareSolverr's browser can share, web policies, and bounded XML discovery. The optional PostgreSQL artifact provides durable operational state, fenced leases, recurring discovery state, response/output history, outbox delivery, and retention. The optional FlareSolverr artifact provides an opt-in FlareSolverr transport and solve-then-reuse challenge clearance for web pipelines. The artifacts are implemented but unreleased; specialized integrations such as browser, telemetry, WARC/object storage, and external delivery/scheduling are not included in the current distribution.
+> **Project status:** The current `1.3.1` release includes the `trawler-core`, `trawler-web`, `trawler-postgres`, and `trawler-flaresolverr` artifacts. Core provides typed pipeline composition, bounded execution, scheduling, discovery coordination, response storage and replay, typed outputs, and replaceable policies. The optional web artifact provides Ktor/CIO transport, an opt-in per-host JDK client path for servers that require TLS 1.3, an opt-in fail-closed forward HTTP proxy that FlareSolverr's browser can share, web policies, and bounded XML discovery. The optional PostgreSQL artifact provides durable operational state, fenced leases, recurring discovery state, response/output history, outbox delivery, and retention. The optional FlareSolverr artifact provides an opt-in FlareSolverr transport and solve-then-reuse challenge clearance for web pipelines. The artifacts are implemented but unreleased; specialized integrations such as browser, telemetry, WARC/object storage, and external delivery/scheduling are not included in the current distribution.
 
 The governing product rule is:
 
@@ -331,7 +331,7 @@ module boundaries and implemented capabilities.
 
 ## Using Trawler with Maven
 
-The current published version is `1.3.0`. Add the RMJTromp Maven
+The current published version is `1.3.1`. Add the RMJTromp Maven
 repository to your project:
 
 ```xml
@@ -351,7 +351,7 @@ Optionally import the BOM so every Trawler artifact uses one version:
         <dependency>
             <groupId>com.rmjtromp.trawler</groupId>
             <artifactId>trawler-bom</artifactId>
-            <version>1.3.0</version>
+            <version>1.3.1</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>
@@ -369,7 +369,7 @@ Add the core library:
 <dependency>
     <groupId>com.rmjtromp.trawler</groupId>
     <artifactId>trawler-core</artifactId>
-    <version>1.3.0</version>
+    <version>1.3.1</version>
 </dependency>
 ```
 
@@ -379,20 +379,20 @@ Add these optional adapters only when needed:
 <dependency>
     <groupId>com.rmjtromp.trawler</groupId>
     <artifactId>trawler-web</artifactId>
-    <version>1.3.0</version>
+    <version>1.3.1</version>
 </dependency>
 
 <dependency>
     <groupId>com.rmjtromp.trawler</groupId>
     <artifactId>trawler-postgres</artifactId>
-    <version>1.3.0</version>
+    <version>1.3.1</version>
 </dependency>
 
 <!-- Requires a separately operated FlareSolverr v3 service; brings in trawler-web. -->
 <dependency>
     <groupId>com.rmjtromp.trawler</groupId>
     <artifactId>trawler-flaresolverr</artifactId>
-    <version>1.3.0</version>
+    <version>1.3.1</version>
 </dependency>
 ```
 

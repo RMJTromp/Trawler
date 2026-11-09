@@ -22,7 +22,6 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.http.HttpStatusCode
-import io.ktor.http.cio.ParserException
 import java.io.EOFException
 import java.io.IOException
 import java.net.ConnectException
@@ -160,16 +159,12 @@ class WebProxyTest {
             NoRouteToHostException("no route"),
             SocketException("Connection reset"),
             ProtocolException("Invalid status line"),
-            ParserException("Unsupported HTTP version"),
             NumberFormatException("For input string: \"invalid\""),
             IOException("parsing HTTP/1.1 status line, receiving [HTTP/1.]"),
-            EOFException("Unexpected end of stream after reading 7 characters"),
             UnknownHostException("proxy.internal"),
             UnresolvedAddressException(),
             SocketTimeoutException("Socket timeout has expired"),
             HttpRequestTimeoutException("https://example.test/", 1_000L),
-            IOException("Can not establish tunnel connection"),
-            EOFException("Failed to parse CONNECT response: unexpected EOF"),
             IOException("HTTP/1.1 header parser received no bytes"),
             RuntimeException("wrapper", ConnectException("Connection refused")),
         )
@@ -207,10 +202,14 @@ class WebProxyTest {
     }
 
     @Test
-    fun `only a configured proxy removes the fragment from the target`() {
+    fun `only a configured proxy removes the fragment and encodes non-ASCII targets`() {
         val target = "http://example.test/page?a=1#section"
-        assertEquals("http://example.test/page?a=1", KtorTransportConfig(proxy = WebProxy("http://1.2.3.4:8")).wireTarget(target))
+        val proxied = KtorTransportConfig(proxy = WebProxy("http://1.2.3.4:8"))
+        assertEquals("http://example.test/page?a=1", proxied.wireTarget(target))
         assertEquals(target, KtorTransportConfig().wireTarget(target))
+        assertEquals("https://example.test/caf%C3%A9", proxied.wireTarget("https://example.test/caf\u00e9"))
+        assertEquals("http://example.test:8080/", proxied.wireTarget("http://example.test:8080"))
+        assertEquals("http://example.test/?x=1", proxied.wireTarget("http://example.test?x=1#top"))
     }
 
     @Test

@@ -124,9 +124,7 @@ public class UnsupportedWebContentEncodingException(
  * or timed out the connection, closed or stalled it before a tunnel existed, or
  * rejected the request. The request never falls back to a direct connection.
  *
- * @property connectStatus Status the proxy answered with, or `null` when it gave
- * none or the client discarded it. Ktor CIO discards CONNECT statuses, so a
- * rejected HTTPS tunnel on the CIO path always reports `null`.
+ * @property connectStatus Status the proxy answered with, or `null` when it gave none.
  */
 public class WebProxyFailureException(
     public val connectStatus: Int?,

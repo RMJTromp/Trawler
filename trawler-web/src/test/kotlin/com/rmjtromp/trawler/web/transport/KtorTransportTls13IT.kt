@@ -683,14 +683,17 @@ class KtorTransportTls13IT {
     }
 
     @Test
-    fun `configured hosts fail before any client exists unless JDK retries are disabled`() {
+    fun `configured hosts and proxies fail before any client exists unless JDK retries are disabled`() {
         val previous = System.clearProperty(JDK_RETRY_LIMIT_PROPERTY)
         val threadsBefore = jdkClientThreads()
         try {
-            val failure = assertFailsWith<IllegalStateException> {
-                KtorTransport.create(KtorTransportConfig(tls13Hosts = setOf("localhost")), policies())
+            listOf(
+                KtorTransportConfig(tls13Hosts = setOf("localhost")),
+                KtorTransportConfig(proxy = WebProxy("http://127.0.0.1:8888")),
+            ).forEach { configuration ->
+                val failure = assertFailsWith<IllegalStateException> { KtorTransport.create(configuration, policies()) }
+                assertTrue(failure.message.orEmpty().contains("-D$JDK_RETRY_LIMIT_PROPERTY=1"))
             }
-            assertTrue(failure.message.orEmpty().contains("-D$JDK_RETRY_LIMIT_PROPERTY=1"))
             assertTrue((jdkClientThreads() - threadsBefore).isEmpty())
             KtorTransport.create(KtorTransportConfig(), policies()).close()
         } finally {
@@ -706,14 +709,19 @@ class KtorTransportTls13IT {
     }
 
     @Test
-    fun `publicWeb owns and closes the JDK client when hosts are configured`(): Unit = runBounded {
-        val threadsBefore = jdkClientThreads()
-        val transport = KtorTransport.publicWeb(KtorTransportConfig(tls13Hosts = setOf("example.test")))
-        val started = jdkClientThreads() - threadsBefore
-        transport.close()
-        started.forEach { thread ->
-            thread.join(TEST_BUDGET_MILLIS)
-            assertFalse(thread.isAlive, "${thread.name} survived close")
+    fun `publicWeb owns and closes the JDK client when hosts or a proxy are configured`(): Unit = runBounded {
+        listOf(
+            KtorTransportConfig(tls13Hosts = setOf("example.test")),
+            KtorTransportConfig(proxy = WebProxy("http://127.0.0.1:8888")),
+        ).forEach { configuration ->
+            val threadsBefore = jdkClientThreads()
+            val transport = KtorTransport.publicWeb(configuration)
+            val started = jdkClientThreads() - threadsBefore
+            transport.close()
+            started.forEach { thread ->
+                thread.join(TEST_BUDGET_MILLIS)
+                assertFalse(thread.isAlive, "${thread.name} survived close")
+            }
         }
     }
 

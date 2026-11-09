@@ -29,13 +29,16 @@ import java.util.Locale
  * `java.net.http` client, which can negotiate TLS 1.3. Every other host keeps
  * the CIO path, which offers at most TLS 1.2. Matching is per request and per
  * redirect hop, including robots fetches; subdomains are not implied. Empty by
- * default, in which case no JDK client is created. A non-empty set requires a
- * Java 21 or newer runtime so the client can be shut down deterministically.
+ * default, in which case no JDK client is created unless [proxy] is set. A non-empty set requires a
+ * Java 21 or newer runtime and the JVM option
+ * `-Djdk.httpclient.redirects.retrylimit=1`; both are checked at construction.
  * @property proxy Forward proxy every request of this transport leaves through,
- * on both clients and for every redirect hop and robots fetch. A request whose
- * proxy fails throws [com.rmjtromp.trawler.web.policy.WebProxyFailureException]
- * and is never retried directly. `null` leaves routing as it was without this
- * option. JVM proxy properties and environment variables never populate this field.
+ * for every redirect hop and robots fetch. With a proxy set, every host uses the
+ * JDK client, which negotiates TLS 1.2 or 1.3 and has the same runtime
+ * requirements as [tls13Hosts]. A request whose proxy fails throws
+ * [com.rmjtromp.trawler.web.policy.WebProxyFailureException] and is never retried
+ * directly. `null` leaves routing as it was without this option. JVM proxy
+ * properties and environment variables never populate this field.
  */
 public data class KtorTransportConfig(
     public val id: String = "ktor-cio",

@@ -9,8 +9,8 @@
 ## Purpose
 
 `trawler-web` supplies the optional HTTP execution boundary for Trawler. It
-adapts Ktor CIO requests and responses (and, for explicitly selected hosts, JDK
-`java.net.http` exchanges) to the core `Transport` contract and
+adapts Ktor CIO requests and responses (and, for explicitly selected hosts and
+all proxied requests, JDK `java.net.http` exchanges) to the core `Transport` contract and
 assembles replaceable public-web policies for destination safety, robots,
 redirects, cookies, origin concurrency, pacing, and HTTP classification.
 
@@ -45,8 +45,8 @@ surface. No Ktor type is imported by or exposed from `trawler-core`.
 
 ## Configuration
 
-`KtorTransport.publicWeb()` creates one CIO client, one bounded JDK DNS
-resolver, and the public-web policy preset. Register the transport as an
+`KtorTransport.publicWeb()` creates one CIO client (a JDK client instead when
+`proxy` is set), one bounded JDK DNS resolver, and the public-web policy preset. Register the transport as an
 engine-owned `ExtensionLifecycle` when the engine owns its resources:
 
 ```kotlin
@@ -192,13 +192,13 @@ KtorTransport.create(
 
 Selection applies to any scheme on a listed host and is evaluated for every
 request and redirect hop, including robots fetches. All three factories honor
-it. With an empty set no JDK client, thread, or executor exists and CIO
+it. With an empty set and no `proxy`, no JDK client, thread, or executor exists and CIO
 behavior is unchanged. `trawler-flaresolverr` keeps its own CIO client.
 
 ### Required runtime
 
-A non-empty set requires both of the following. Each is checked when the
-transport is constructed, before any client exists, and fails with an
+A non-empty set, or a non-null `proxy`, requires both of the following. Each is
+checked when the transport is constructed, before any client exists, and fails with an
 `IllegalStateException` rather than weakening a guarantee:
 
 - **Java 21 or newer.** `HttpClient` only became closable in Java 21; on Java
@@ -228,7 +228,7 @@ and does not know which client ran a hop.
 | Connection bounds | Exchanges are limited to `maxClientConnections` and `maxConnectionsPerOrigin`; waiting counts against the per-hop request timeout. |
 | Cancellation | Cancels the JDK exchange with `cancel(true)`, closing its connection. |
 | Cookies | The JDK cookie store is unset; the shared session owns cookies. |
-| Proxy | With `proxy` unset the JDK path is always direct and the JVM default `ProxySelector` is not consulted. Ktor CIO does consult that selector when no proxy is configured, so the two paths differ there. See [Forward proxy](#forward-proxy). |
+| Proxy | With `proxy` unset the JDK path is always direct and the JVM default `ProxySelector` is not consulted. Ktor CIO does consult that selector when no proxy is configured, so the two paths differ there. With `proxy` set, every host uses this path. See [Forward proxy](#forward-proxy). |
 | Lifecycle | `stop`/`close` abort in-flight exchanges (callers see `IOException`) and shut down the JDK client and its bounded adapter-owned executor. |
 | Credentials | Same redirect stripping; hostname verification and the JVM default trust store apply; no JDK client logging is enabled by the transport. |
 
@@ -245,14 +245,14 @@ or `EOFException`) and are classified `web-transport-failure`, retryable.
 
 ## Forward proxy
 
-> **Since:** 1.3.0
+> **Since:** 1.3.0. Since 1.3.1 every proxied request uses the JDK client.
 
 ### Purpose and non-goals
 
 `KtorTransportConfig.proxy` sends every request of a transport through one
-forward proxy, so an origin never sees the host's address. It applies to both
-clients and to every page hop, redirect hop, and robots fetch. If the proxy
-cannot carry a request, the request fails and is never sent directly.
+forward proxy, so an origin never sees the host's address. It applies to every
+page hop, redirect hop, and robots fetch. If the proxy cannot carry a request,
+the request fails and is never sent directly.
 
 Proxy authentication, SOCKS, HTTPS to the proxy, per-host proxies, rotation,
 PAC files, and egress-IP verification are out of scope.
@@ -276,9 +276,11 @@ KtorTransport.publicWeb(
 )
 ```
 
-`create` and `publicWeb` honor the setting. `fromClient` rejects a non-null
-`proxy` with `IllegalArgumentException`, because a proxy cannot be added to an
-already built client and requests would otherwise leave directly. JVM proxy
+`create` and `publicWeb` honor the setting and need the [required runtime](#required-runtime)
+of the JDK client: construction fails with `IllegalStateException` without Java 21
+or `-Djdk.httpclient.redirects.retrylimit=1`. `fromClient` rejects a non-null
+`proxy` with `IllegalArgumentException`, because proxied requests could not use
+the supplied client. JVM proxy
 properties and environment variables never select this proxy, and a configured
 proxy never consults the JVM default `ProxySelector`. Requests using any spelling
 of the `CONNECT` method, or a target containing user-info, are refused before
@@ -288,24 +290,56 @@ not sent.
 
 ### Routing and policies
 
-HTTPS targets use a `CONNECT` tunnel; plain HTTP targets are sent to the proxy
-in absolute form. The proxy address is operator configuration like the
+With a proxy set, no Ktor CIO client exists: every host uses the JDK client.
+CIO writes an absolute-form request line inside HTTPS tunnels (Ktor 3.5.1,
+`Endpoint.kt` and `utils.kt`, with no option to change it), and real servers
+answer that with 404s, broken redirects, 406s, or dropped connections.
+
+HTTPS targets use a `CONNECT` tunnel and an origin-form request line inside it;
+plain HTTP targets are sent to the proxy in absolute form. The JDK client offers
+TLS 1.2 and 1.3 to every host and pins neither, so `tls13Hosts` adds nothing while
+a proxy is set and sites offering only TLS 1.2 keep working. The proxy address is operator configuration like the
 FlareSolverr endpoint, so the destination policy does not check it. Destination,
 robots, pacing, cookie, and redirect policies still run per hop against the real
-target. Neither client retries through the proxy or falls back to a direct
+target. The client neither retries through the proxy nor falls back to a direct
 connection.
 
 ### Concurrency, limits, and pooling
 
-Ktor CIO treats the proxy as the single route for every origin, so its
-per-route limit would become a limit across all origins. With a proxy set, the
-transport enforces `maxClientConnections` and `maxConnectionsPerOrigin` itself
-on the CIO path and sets CIO's per-route limit to the client total. Waiting for
-a slot counts against the per-hop request timeout, as on the JDK path. CIO opens
-one connection per request; the JDK client pools HTTPS tunnels per destination,
-so a tunnel never carries a different origin's traffic. Plain HTTP on the JDK
-path may reuse one connection to the proxy across origins, which is ordinary
-forward-proxy behavior because each request names its full target.
+`maxClientConnections` and `maxConnectionsPerOrigin` bound in-flight exchanges,
+and waiting for a slot counts against the per-hop request timeout. The JDK client
+pools HTTPS tunnels per destination, so a tunnel never carries a different
+origin's traffic. Plain HTTP may reuse one connection to the proxy across origins,
+which is ordinary forward-proxy behavior because each request names its full
+target. Idle pooled connections are not counted against these limits; the JDK
+closes them after its keep-alive timeout.
+
+### Differences from direct CIO requests
+
+A proxied request carries the same request line and header values as a direct
+CIO request, with the exceptions below; decompression and every body and header
+limit are shared code.
+
+- A non-ASCII target is percent-encoded as UTF-8, where CIO writes raw UTF-8 bytes.
+  An empty path is sent as `/`.
+- A non-ASCII request header value fails with `IllegalArgumentException` before
+  anything is sent, because the JDK client would replace each such character
+  with `?`. CIO writes raw UTF-8 bytes.
+- Request headers are sent in the JDK client's own order, which sorts them by
+  name, not in CIO's order. Origins that fingerprint header order can see the
+  difference.
+- A method without a body, such as `DELETE`, carries no `Content-Length`, where
+  CIO sends `Content-Length: 0`.
+- Repeated request headers are sent as separate lines instead of CIO's joined line.
+- Request headers whose names start with `Proxy-` are not sent to the site inside
+  an HTTPS tunnel.
+- An `Expect` or `Upgrade` request header fails with `IllegalArgumentException`
+  before anything is sent.
+- Response header names reach `CrawlResponse.headers` as the JDK reports them, not
+  as the server wrote them, and in the JDK's order. Header lookup is
+  case-insensitive, so only code iterating `entries` can notice.
+- The JDK's parser and its `jdk.tls.disabledAlgorithms` apply, so a server that CIO
+  tolerated with a malformed response or a legacy cipher can fail here.
 
 ### Failures
 
@@ -315,19 +349,19 @@ holds the proxy's status where available and `cause` holds the client's original
 exception. A proxy failure during a robots fetch propagates the same way and is
 not cached as a robots outcome.
 
-| Condition | CIO observed | JDK observed | `connectStatus` |
-|---|---|---|---|
-| Proxy refuses the connection | `ConnectException` | `ConnectException` | `null` |
-| TCP connect to the proxy times out | `ConnectTimeoutException` | `HttpConnectTimeoutException`, mapped to `ConnectTimeoutException` | `null` |
-| CONNECT rejected (not 407) | `IOException("Can not establish tunnel connection")` | `IOException("Tunnel failed, got: N")` | CIO `null`; JDK `N` |
-| CONNECT answered 407 | Same as above | Synthetic 407 response | CIO `null`; JDK `407` |
-| Proxy closes before answering CONNECT | `EOFException` | `IOException` (no bytes) | `null` |
-| Proxy resets the connection | `SocketException` | `SocketException` or the no-bytes `IOException` | `null` |
-| Proxy cuts off its CONNECT answer | `EOFException` (`Unexpected end of stream ...`) | `IOException` (`parsing HTTP/1.1 ...`) | `null` |
-| Proxy answers CONNECT with garbage | `ParserException` | `ProtocolException` | `null` |
-| Proxy accepts but never answers | `SocketTimeoutException` at `socketTimeout` | Inactivity or request timeout | `null` |
-| Total chain timeout during connection setup | Ordinary timeout as cause | Ordinary timeout as cause | `null` |
-| Proxy answers 407 to plain HTTP | Response status | Response status | `407` |
+| Condition | Observed | `connectStatus` |
+|---|---|---|
+| Proxy refuses the connection | `ConnectException` | `null` |
+| TCP connect to the proxy times out | `HttpConnectTimeoutException`, mapped to `ConnectTimeoutException` | `null` |
+| CONNECT rejected (not 407) | `IOException("Tunnel failed, got: N")` | `N` |
+| CONNECT answered 407 | Synthetic 407 response | `407` |
+| Proxy closes before answering CONNECT | `IOException` (no bytes) | `null` |
+| Proxy resets the connection | `SocketException` or the no-bytes `IOException` | `null` |
+| Proxy cuts off its CONNECT answer | `IOException` (`parsing HTTP/1.1 ...`) | `null` |
+| Proxy answers CONNECT with garbage | `ProtocolException` | `null` |
+| Proxy accepts but never answers | Inactivity or request timeout | `null` |
+| Total chain timeout during connection setup | Ordinary timeout as cause | `null` |
+| Proxy answers 407 to plain HTTP | Response status | `407` |
 
 A 407 inside an established tunnel is the site's own response and stays an
 ordinary `CrawlResponse`. Other failures after the tunnel exists, such as TLS
@@ -339,32 +373,24 @@ exchanges without reporting them as proxy failures.
 ### Security
 
 The destination safety check still resolves DNS on the host, while the proxy
-resolves the target itself. DNS lookups for targets therefore still leave from
-the host, and the two answers can differ. On the CIO path this also happens for
-every HTTPS hop regardless of the destination policy, because Ktor resolves the
-target locally to name the TLS peer. The proxy host's firewall must block
+resolves the target itself, so a policy that resolves targets makes DNS lookups
+leave from the host and the two answers can differ. The JDK client itself does
+not resolve targets when proxying. The proxy host's firewall must block
 access to its own private network, because the destination policy cannot.
 `WebProxy` cannot hold credentials, so none can reach logs or events through it.
 
 ### Limitations
 
-- Ktor CIO discards the CONNECT status, so a rejected tunnel on the CIO path
-  reports `connectStatus = null`; only the JDK path reports the status.
-- Ktor CIO accepts any 2xx or 3xx answer to CONNECT as success. A 3xx then fails
-  as a TLS error, still without reaching the origin directly.
 - Plain HTTP errors produced by the proxy (for example a 502) cannot be told
   apart from the origin's and stay ordinary responses. Only HTTPS tunnel
   failures and 407 answers are typed.
 - A CONNECT status such as 502 can mean the proxy could not reach the site; the
   failure is still typed as a proxy failure.
 - A TLS handshake that stalls or is reset behind a working tunnel is reported as
-  a proxy failure on both clients, because neither exposes the moment the tunnel
-  is ready.
-- If TLS setup is cut off, Ktor CIO's engine can reconnect by itself until the
-  per-hop timeout or another failure ends the request. This happens with or
-  without a proxy and cannot be configured. Each attempt goes through the proxy,
-  but these attempts are not visible to engine attempt accounting, and if the
-  per-hop timeout ends the loop the request is reported as a proxy failure.
+  a proxy failure, because the JDK client does not expose the moment the tunnel
+  is ready. A connection closed cleanly during that handshake is an ordinary TLS
+  failure instead, even when the proxy closed it after accepting CONNECT, for
+  example after a 200 answer with an invalid `Content-Length`.
 - A host whose name contains an underscore cannot be used, because `java.net.URI`
   does not parse it as a host.
 - Ktor CIO consults the JVM default `ProxySelector` when `proxy` is `null`. That
@@ -509,9 +535,10 @@ deterministic timeout exception and outer cancellation paths are covered.
 `KtorTransportTls13IT` drives the JDK path against loopback servers restricted
 to TLS 1.3 and also proves the default CIO path is refused by them, on Java 21
 and the build JDK.
-`KtorTransportProxyIT` runs both clients through a loopback forward proxy that
-records CONNECT and absolute-form targets, and proves each origin was reached
-only through it.
+`KtorTransportProxyIT` runs listed and unlisted hosts through a loopback forward
+proxy that records CONNECT and absolute-form targets, proves each origin was
+reached only through it, and reads raw request lines at a TLS origin behind the
+tunnel.
 MockEngine ownership and the remaining matrix are recorded in
 [`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md).
 

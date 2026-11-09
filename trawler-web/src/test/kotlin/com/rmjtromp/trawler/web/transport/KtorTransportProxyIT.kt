@@ -14,6 +14,8 @@ import com.rmjtromp.trawler.web.policy.DefaultRetryAfterPolicy
 import com.rmjtromp.trawler.web.policy.NoRobotsPolicy
 import com.rmjtromp.trawler.web.policy.RobotsPolicy
 import com.rmjtromp.trawler.web.policy.WebProxyFailureException
+import com.rmjtromp.trawler.web.policy.WebResponseHeadersTooLargeException
+import com.rmjtromp.trawler.web.policy.WebResponseTooLargeException
 import com.rmjtromp.trawler.web.session.NoCookieSession
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
@@ -43,8 +45,11 @@ import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.GZIPOutputStream
 import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.TrustManagerFactory
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import kotlin.test.assertContentEquals
@@ -71,16 +76,19 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 
 /**
- * Loopback tests for [KtorTransportConfig.proxy] on both clients. A fixture
- * forward proxy records every CONNECT and absolute-form request and sits in
- * front of loopback origins, whose accepted peers prove nothing bypassed it.
+ * Loopback tests for [KtorTransportConfig.proxy]. A fixture forward proxy records
+ * every CONNECT and absolute-form request and sits in front of loopback origins,
+ * whose accepted peers prove nothing bypassed it.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class KtorTransportProxyIT {
-    /** Selects a client: CIO offers TLS 1.2 at most, so each origin matches its client. */
+    /**
+     * Whether the target host is listed in `tls13Hosts`. With a proxy both use the
+     * JDK client; without one an unlisted host uses CIO, which stops at TLS 1.2.
+     */
     enum class ClientPath(val tlsProtocol: String, val tls13Hosts: Set<String>) {
-        CIO("TLSv1.2", emptySet()),
-        JDK("TLSv1.3", setOf("localhost")),
+        UNLISTED("TLSv1.2", emptySet()),
+        LISTED("TLSv1.3", setOf("localhost")),
     }
 
     private lateinit var keyDirectory: Path
@@ -292,8 +300,7 @@ class KtorTransportProxyIT {
                             transport.execute(CrawlRequest(origin.url("/page")))
                         }
 
-                        val expected = if (path == ClientPath.JDK) status else null
-                        assertEquals(expected, failure.connectStatus, "status $status")
+                        assertEquals(status, failure.connectStatus, "status $status")
                         assertEquals(listOf(origin.authority), proxy.connectTargets, "one attempt only")
                         assertEquals(0, origin.connections.get())
                     }
@@ -544,17 +551,26 @@ class KtorTransportProxyIT {
         }
     }
 
-    @Test
-    fun `CIO reports an invalid CONNECT content length as a proxy failure`(): Unit = runBounded {
-        HttpsOrigin(ClientPath.CIO) { it.respond(200, "must-not-be-reached") }.use { origin ->
-            FixtureProxy(ProxyBehavior.Raw("HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n\r\n")).use { proxy ->
-                transport(ClientPath.CIO, proxy).use { transport ->
-                    assertFailsWith<WebProxyFailureException> {
-                        transport.execute(CrawlRequest(origin.url("/page")))
+    @ParameterizedTest
+    @EnumSource(ClientPath::class)
+    fun `an invalid CONNECT content length never reaches the origin`(path: ClientPath): Unit = runBounded {
+        HttpsOrigin(path) { it.respond(200, "must-not-be-reached") }.use { origin ->
+            for (status in listOf(200, 407)) {
+                val answer = "HTTP/1.1 $status Proxy\r\nContent-Length: invalid\r\n\r\n"
+                FixtureProxy(ProxyBehavior.Raw(answer)).use { proxy ->
+                    transport(path, proxy).use { transport ->
+                        val failure = runCatching { transport.execute(CrawlRequest(origin.url("/page"))) }
+                            .exceptionOrNull()
+                        if (status == 200) {
+                            // The JDK accepts the tunnel; the proxy then closes during the TLS handshake.
+                            assertIs<SSLHandshakeException>(failure)
+                        } else {
+                            assertIs<WebProxyFailureException>(failure)
+                        }
                     }
-                    assertEquals(0, origin.connections.get())
                 }
             }
+            assertEquals(0, origin.connections.get())
         }
     }
 
@@ -589,8 +605,7 @@ class KtorTransportProxyIT {
 
                     assertNotNull(failure)
                     assertFalse(failure is WebProxyFailureException, "misattributed: $failure")
-                    // CIO may reconnect by itself when TLS setup is cut off, always through the proxy.
-                    assertEquals(setOf("localhost:${origin.port}"), proxy.connectTargets.toSet())
+                    assertEquals(listOf("localhost:${origin.port}"), proxy.connectTargets, "one attempt only")
                 }
             }
         }
@@ -768,6 +783,156 @@ class KtorTransportProxyIT {
         }
     }
 
+    @ParameterizedTest
+    @EnumSource(ClientPath::class)
+    fun `HTTPS requests inside the tunnel use origin form and the site's host`(path: ClientPath): Unit = runBounded {
+        RawTlsOrigin(path.tlsProtocol).use { origin ->
+            FixtureProxy().use { proxy ->
+                transport(path, proxy).use { transport ->
+                    val headers = Headers.of(Header("X-Custom", "present"), Header("Proxy-Custom", "present"))
+                    assertEquals(200, transport.execute(CrawlRequest(origin.url("/path?q=1"), headers = headers)).statusCode)
+
+                    val head = origin.heads.single()
+                    assertEquals("GET /path?q=1 HTTP/1.1", head.requestLine)
+                    assertEquals(listOf(origin.authority), head.values("host"))
+                    assertEquals(listOf("present"), head.values("x-custom"))
+                    assertTrue(head.values("proxy-custom").isEmpty(), "documented: Proxy-* stays out of tunnels")
+                    assertEquals(listOf(origin.authority), proxy.connectTargets)
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(ClientPath::class)
+    fun `plain HTTP sends absolute form to the proxy and the origin sees a correct request`(
+        path: ClientPath,
+    ): Unit = runBounded {
+        PlainOrigin { it.respond(200, "plain") }.use { origin ->
+            FixtureProxy().use { proxy ->
+                transport(path, proxy).use { transport ->
+                    assertEquals(200, transport.execute(CrawlRequest(origin.url("/path?q=1"))).statusCode)
+
+                    assertEquals(listOf("GET ${origin.url("/path?q=1")} HTTP/1.1"), proxy.requestLines)
+                    val recorded = origin.requests.single()
+                    assertEquals("/path?q=1", recorded.target)
+                    assertEquals(listOf(origin.authority), recorded.headers["host"])
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `an origin offering one TLS version works through the proxy whether or not it is listed`(): Unit = runBounded {
+        for (protocol in listOf("TLSv1.2", "TLSv1.3")) {
+            for (listedHosts in listOf(emptySet(), setOf("localhost"))) {
+                HttpsOrigin(protocol) { it.respond(200, "negotiated") }.use { origin ->
+                    FixtureProxy().use { proxy ->
+                        val configuration = configuration(ClientPath.UNLISTED, WebProxy(proxy.url))
+                            .copy(tls13Hosts = listedHosts)
+                        transportWith(configuration).use { transport ->
+                            val response = transport.execute(CrawlRequest(origin.url("/page")))
+
+                            assertEquals("negotiated", response.body.toByteArray().decodeToString(), protocol)
+                            assertEquals(protocol, origin.tlsProtocols.single())
+                            assertOnlyProxyReachedOrigin(proxy, origin)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `proxied requests match direct CIO on the wire`(): Unit = runBounded {
+        RawTlsOrigin("TLSv1.2").use { origin ->
+            FixtureProxy().use { proxy ->
+                val directTransport = transportWith(KtorTransportConfig())
+                val proxiedTransport = transport(ClientPath.UNLISTED, proxy)
+                directTransport.use { direct ->
+                    proxiedTransport.use { proxied ->
+                        for (target in listOf("", "/plain?q=1", "/a%20b?x=%2F&y=1")) {
+                            direct.execute(CrawlRequest(origin.url(target)))
+                            val expected = origin.heads.last()
+                            proxied.execute(CrawlRequest(origin.url(target)))
+                            val actual = origin.heads.last()
+
+                            assertEquals(expected.requestLine, actual.requestLine, target)
+                            assertEquals(expected.comparableHeaders(), actual.comparableHeaders(), target)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(ClientPath::class)
+    fun `non-ASCII targets are percent-encoded for both schemes`(path: ClientPath): Unit = runBounded {
+        val target = "/caf\u00e9?q=\u00fc"
+        val encoded = "/caf%C3%A9?q=%C3%BC"
+        RawTlsOrigin(path.tlsProtocol).use { secure ->
+            PlainOrigin { it.respond(200, "plain") }.use { plain ->
+                FixtureProxy().use { proxy ->
+                    transport(path, proxy).use { transport ->
+                        transport.execute(CrawlRequest(secure.url(target)))
+                        transport.execute(CrawlRequest(plain.url(target)))
+
+                        assertEquals("GET $encoded HTTP/1.1", secure.heads.single().requestLine)
+                        assertEquals(listOf("GET ${plain.url(encoded)} HTTP/1.1"), proxy.requestLines)
+                        assertEquals(encoded, plain.requests.single().target)
+                    }
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(ClientPath::class)
+    fun `proxied responses keep their decoding and limits`(path: ClientPath): Unit = runBounded {
+        val text = "z".repeat(4_096)
+        val gzipped = ByteArrayOutputStream()
+            .also { bytes -> GZIPOutputStream(bytes).use { it.write(text.toByteArray()) } }
+            .toByteArray()
+        HttpsOrigin(path) { exchange ->
+            exchange.responseHeaders.add("Content-Encoding", "gzip")
+            exchange.sendResponseHeaders(200, gzipped.size.toLong())
+            exchange.responseBody.write(gzipped)
+            exchange.close()
+        }.use { origin ->
+            FixtureProxy().use { proxy ->
+                val base = configuration(path, WebProxy(proxy.url))
+                val request = CrawlRequest(origin.url("/page"))
+                transportWith(base).use { assertEquals(text, it.execute(request).body.toByteArray().decodeToString()) }
+                transportWith(base.copy(maxCompressedBodyBytes = gzipped.size - 1)).use { transport ->
+                    assertEquals("compressed", assertFailsWith<WebResponseTooLargeException> { transport.execute(request) }.limitKind)
+                }
+                transportWith(base.copy(maxDecompressedBodyBytes = text.length - 1)).use { transport ->
+                    assertEquals("decompressed", assertFailsWith<WebResponseTooLargeException> { transport.execute(request) }.limitKind)
+                }
+                transportWith(base.copy(maxResponseHeaders = 1)).use { transport ->
+                    assertFailsWith<WebResponseHeadersTooLargeException> { transport.execute(request) }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `headers the JDK client forbids or would corrupt fail before reaching the proxy`(): Unit = runBounded {
+        PlainOrigin { it.respond(200, "must-not-be-reached") }.use { origin ->
+            FixtureProxy().use { proxy ->
+                transport(ClientPath.UNLISTED, proxy).use { transport ->
+                    for (header in listOf(Header("Expect", "100-continue"), Header("X-Label", "caf\u00e9"))) {
+                        assertFailsWith<IllegalArgumentException>(header.name) {
+                            transport.execute(CrawlRequest(origin.url("/page"), headers = Headers.of(header)))
+                        }
+                    }
+                    assertEquals(0, proxy.accepted.get())
+                }
+            }
+        }
+    }
+
     private fun assertOnlyProxyReachedOrigin(proxy: FixtureProxy, origin: RecordingOrigin) {
         assertTrue(origin.peerPorts.isNotEmpty(), "origin saw no request")
         assertTrue(proxy.outboundPorts.keys.containsAll(origin.peerPorts), "a connection bypassed the proxy")
@@ -863,6 +1028,7 @@ class KtorTransportProxyIT {
 
     private class RecordedRequest(
         val method: String,
+        val target: String,
         val path: String,
         val headers: Map<String, List<String>>,
         val body: ByteArray,
@@ -891,6 +1057,7 @@ class KtorTransportProxyIT {
                     (exchange as? com.sun.net.httpserver.HttpsExchange)?.let { tlsProtocols += it.sslSession.protocol }
                     requests += RecordedRequest(
                         method = exchange.requestMethod,
+                        target = exchange.requestURI.toString(),
                         path = exchange.requestURI.path,
                         headers = exchange.requestHeaders.entries.associate { (name, values) ->
                             name.lowercase() to values.toList()
@@ -914,16 +1081,18 @@ class KtorTransportProxyIT {
     }
 
     private inner class HttpsOrigin(
-        path: ClientPath,
+        tlsProtocol: String,
         handler: (HttpExchange) -> Unit,
     ) : RecordingOrigin(handler) {
+        constructor(path: ClientPath, handler: (HttpExchange) -> Unit) : this(path.tlsProtocol, handler)
+
         override val scheme: String = "https"
         override val server: HttpsServer =
             HttpsServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0).apply {
                 httpsConfigurator = object : HttpsConfigurator(serverContext) {
                     override fun configure(parameters: HttpsParameters) {
                         val ssl = serverContext.defaultSSLParameters
-                        ssl.protocols = arrayOf(path.tlsProtocol)
+                        ssl.protocols = arrayOf(tlsProtocol)
                         parameters.setSSLParameters(ssl)
                     }
                 }
@@ -941,6 +1110,55 @@ class KtorTransportProxyIT {
 
         init {
             start(server)
+        }
+    }
+
+    private class RawHead(text: String) {
+        val requestLine: String = text.substringBefore("\r\n")
+
+        val headers: List<Pair<String, String>> = text.substringAfter("\r\n").trim().lines().map { line ->
+            line.substringBefore(':').trim().lowercase() to line.substringAfter(':').trim()
+        }
+
+        fun values(name: String): List<String> = headers.filter { it.first == name }.map { it.second }
+
+        /** Header order is a documented difference between the clients, so it is ignored. */
+        fun comparableHeaders(): List<Pair<String, String>> = headers.sortedBy { it.first }
+    }
+
+    /** TLS origin that keeps each request head byte for byte, which `HttpServer` normalizes away. */
+    private inner class RawTlsOrigin(tlsProtocol: String) : AutoCloseable {
+        val heads = CopyOnWriteArrayList<RawHead>()
+        private val socket = (
+            serverContext.serverSocketFactory.createServerSocket(0, 8, InetAddress.getLoopbackAddress()) as SSLServerSocket
+            ).apply { enabledProtocols = arrayOf(tlsProtocol) }
+        private val acceptor = Thread {
+            try {
+                while (true) socket.accept().use(::serve)
+            } catch (_: IOException) {
+                // close() ends the accept loop.
+            }
+        }.apply { isDaemon = true; start() }
+
+        val authority: String get() = "localhost:${socket.localPort}"
+
+        fun url(target: String): String = "https://$authority$target"
+
+        private fun serve(client: Socket) {
+            try {
+                heads += RawHead(readRequestHead(client.getInputStream()) ?: return)
+                client.getOutputStream().apply {
+                    write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".toByteArray())
+                    flush()
+                }
+            } catch (_: IOException) {
+                // A failed handshake must not stop the accept loop.
+            }
+        }
+
+        override fun close() {
+            socket.close()
+            acceptor.join(CLOSE_MILLIS)
         }
     }
 
@@ -1005,6 +1223,9 @@ class KtorTransportProxyIT {
 
         val connectTargets = CopyOnWriteArrayList<String>()
         val absoluteTargets = CopyOnWriteArrayList<String>()
+
+        /** Request line of every request sent to the proxy itself, CONNECT excluded. */
+        val requestLines = CopyOnWriteArrayList<String>()
         val accepted = AtomicInteger()
 
         /** Local port of each upstream socket, mapped to the authority it reaches. */
@@ -1041,10 +1262,15 @@ class KtorTransportProxyIT {
             client.use {
                 try {
                     val input = client.getInputStream()
-                    val head = readHead(input) ?: return
+                    val head = readRequestHead(input) ?: return
                     val requestLine = head.substringBefore("\r\n")
                     val (method, target) = requestLine.split(' ')
-                    if (method == "CONNECT") connectTargets += target else absoluteTargets += target
+                    if (method == "CONNECT") {
+                        connectTargets += target
+                    } else {
+                        absoluteTargets += target
+                        requestLines += requestLine
+                    }
                     requestSeen.countDown()
                     when (val current = behavior) {
                         ProxyBehavior.Forward -> forward(client, input, head, method, target)
@@ -1130,20 +1356,6 @@ class KtorTransportProxyIT {
             }
         }
 
-        private fun readHead(input: InputStream): String? {
-            val head = ByteArrayOutputStream()
-            while (head.size() < MAX_HEAD_BYTES) {
-                val next = input.read()
-                if (next == -1) return null
-                head.write(next)
-                val bytes = head.toByteArray()
-                if (bytes.size >= 4 && String(bytes, bytes.size - 4, 4, Charsets.ISO_8859_1) == "\r\n\r\n") {
-                    return String(bytes, Charsets.ISO_8859_1)
-                }
-            }
-            throw IOException("Request head exceeds fixture bound")
-        }
-
         override fun close() {
             listener.close()
             openSockets.forEach { runCatching { it.close() } }
@@ -1157,5 +1369,19 @@ class KtorTransportProxyIT {
         const val CLOSE_MILLIS = 2_000L
         const val WAIT_SECONDS = 10L
         const val MAX_HEAD_BYTES = 64 * 1024
+
+        fun readRequestHead(input: InputStream): String? {
+            val head = ByteArrayOutputStream()
+            while (head.size() < MAX_HEAD_BYTES) {
+                val next = input.read()
+                if (next == -1) return null
+                head.write(next)
+                val bytes = head.toByteArray()
+                if (bytes.size >= 4 && String(bytes, bytes.size - 4, 4, Charsets.ISO_8859_1) == "\r\n\r\n") {
+                    return String(bytes, Charsets.ISO_8859_1)
+                }
+            }
+            throw IOException("Request head exceeds fixture bound")
+        }
     }
 }
