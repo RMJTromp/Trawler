@@ -4,7 +4,9 @@ import com.rmjtromp.trawler.flaresolverr.challenge.ChallengeKind
 import com.rmjtromp.trawler.flaresolverr.challenge.ChallengeResolutionRequest
 import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.web.policy.AllowAllWebDestinationPolicy
+import com.rmjtromp.trawler.web.transport.KtorTransportConfig
 import com.rmjtromp.trawler.web.transport.WebOrigin
+import com.rmjtromp.trawler.web.transport.WebProxy
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
@@ -119,6 +121,30 @@ class FlareSolverrCioIT {
             resolver.close()
             assertEquals("loop-token", clearance.cookies.single().value)
             assertEquals(JsonPrimitive(true), server.commands.single()["returnOnlyCookies"])
+        }
+    }
+
+    @Test
+    fun `a shared proxy reaches the browser while the service connection stays direct`(): Unit = runBlocking {
+        // Nothing listens on this port, so a service call routed through the proxy could not succeed.
+        val closedPort = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
+        val proxyUrl = "http://127.0.0.1:$closedPort"
+        val transport = KtorTransportConfig(proxy = WebProxy(proxyUrl))
+        LoopbackFlareSolverr { _, exchange ->
+            exchange.json(okRoot(solution(response = null, cookies = cookies(cookie("cf_clearance", "loop-token")))))
+        }.use { server ->
+            val resolver = FlareSolverrChallengeResolver.create(
+                FlareSolverrResolverConfig(service(server.endpoint).withProxyOf(transport)),
+                AllowAllWebDestinationPolicy,
+            )
+            val clearance = resolver.resolve(
+                ChallengeResolutionRequest(WebOrigin.fromTarget(SITE), "$SITE/", ChallengeKind.CLOUDFLARE),
+            )
+            resolver.close()
+
+            assertEquals("loop-token", clearance.cookies.single().value)
+            val command = server.commands.single()
+            assertEquals(JsonPrimitive(proxyUrl), command["proxy"]?.jsonObject?.get("url"))
         }
     }
 

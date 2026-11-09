@@ -20,6 +20,7 @@ import com.rmjtromp.trawler.web.policy.RobotsPolicy
 import com.rmjtromp.trawler.web.policy.RobotsUnavailableException
 import com.rmjtromp.trawler.web.policy.UnsupportedWebContentEncodingException
 import com.rmjtromp.trawler.web.policy.WebPolicyRejectedException
+import com.rmjtromp.trawler.web.policy.WebProxyFailureException
 import com.rmjtromp.trawler.web.policy.WebResponseHeaderValueTooLargeException
 import com.rmjtromp.trawler.web.policy.WebResponseHeaderNameTooLargeException
 import com.rmjtromp.trawler.web.policy.WebResponseHeadersTooLargeException
@@ -39,6 +40,8 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.readAvailable
@@ -62,6 +65,8 @@ import java.util.zip.InflaterInputStream
  * for classification and the core retry policy remains engine-visible.
  * Hosts in [KtorTransportConfig.tls13Hosts] are executed by a transport-owned
  * JDK client under the same per-hop policies; every other host uses CIO.
+ * With [KtorTransportConfig.proxy] set, both clients send every hop through
+ * that proxy and a proxy failure surfaces as [WebProxyFailureException].
  */
 public class KtorTransport private constructor(
     private val client: HttpClient,
@@ -75,6 +80,11 @@ public class KtorTransport private constructor(
 
     private val closed = AtomicBoolean(false)
     private val resources: List<AutoCloseable> = Collections.unmodifiableList(ownedResources.toList())
+
+    // CIO counts its per-route limit against the proxy, so per-origin limits move here.
+    private val proxiedCioLimiter: ConnectionLimiter? = configuration.proxy?.let {
+        ConnectionLimiter(configuration.maxClientConnections, configuration.maxConnectionsPerOrigin)
+    }
 
     override suspend fun start(context: ExtensionStartContext) {
         check(!closed.get()) { "Ktor transport is closed" }
@@ -92,9 +102,13 @@ public class KtorTransport private constructor(
         val totalTimeoutMillis = configuration.totalRequestTimeout.toMillis()
         // A TimeoutCancellationException would look like caller cancellation to the engine,
         // so an expired chain timeout is reported as an ordinary, classifiable timeout failure.
+        val chain = configuration.proxy?.let { ProxyChain() }
         return withTimeoutOrNull(totalTimeoutMillis) {
-            executeRedirectChain(request)
-        } ?: throw HttpRequestTimeoutException(request.target, totalTimeoutMillis)
+            if (chain == null) executeRedirectChain(request) else withContext(chain) { executeRedirectChain(request) }
+        } ?: run {
+            val timeout = HttpRequestTimeoutException(request.target, totalTimeoutMillis)
+            throw if (chain?.currentHop?.isConnecting == true) WebProxyFailureException(null, timeout) else timeout
+        }
     }
 
     /**
@@ -229,49 +243,90 @@ public class KtorTransport private constructor(
         val requestBody = request.body
         validateRequestTarget(request)
         validateRequestHeaders(request.headers)
-        tls13ClientFor(request)?.let { selected ->
-            return executeTls13Hop(
-                selected,
-                request,
-                configuration.maxCompressedBodyBytes,
-                configuration.maxDecompressedBodyBytes,
-            )
-        }
-        return client.prepareRequest {
-            url(request.target)
-            method = HttpMethod(request.method.value)
-            headers {
-                request.headers.entries.forEach { header ->
-                    if (!isRestrictedRequestHeader(header.name)) append(header.name, header.value)
+        return guardProxyHop { hop ->
+            tls13ClientFor(request)?.let { selected ->
+                return@guardProxyHop executeTls13Hop(
+                    selected,
+                    request,
+                    configuration.maxCompressedBodyBytes,
+                    configuration.maxDecompressedBodyBytes,
+                    hop,
+                )
+            }
+            withProxiedCioPermits(request, hop) {
+                client.prepareRequest {
+                    url(configuration.wireTarget(request.target))
+                    method = HttpMethod(request.method.value)
+                    headers {
+                        request.headers.entries.forEach { header ->
+                            if (!isRestrictedRequestHeader(header.name)) append(header.name, header.value)
+                        }
+                    }
+                    if (requestBody != null) {
+                        setBody(requestBody.toByteArray())
+                        if (request.headers[HttpHeaders.ContentType].isEmpty()) {
+                            contentType(ContentType.Application.OctetStream)
+                        }
+                    }
+                    timeout {
+                        requestTimeoutMillis = configuration.requestTimeout.toMillis()
+                        connectTimeoutMillis = configuration.connectTimeout.toMillis()
+                        socketTimeoutMillis = configuration.socketTimeout.toMillis()
+                    }
+                    hop?.let { attributes.put(ProxyHopAttribute, it) }
+                }.execute { response ->
+                    configuration.proxyRejection(request.target, response.status.value)?.let { throw it }
+                    val coreHeaders = copyHeaders(response.headers)
+                    val body = readBody(
+                        response = response,
+                        maxCompressedBytes = configuration.maxCompressedBodyBytes,
+                        maxDecompressedBytes = configuration.maxDecompressedBodyBytes,
+                    )
+                    CrawlResponse(
+                        request = request,
+                        statusCode = response.status.value,
+                        headers = coreHeaders,
+                        body = ResponseBody.from(body),
+                        receivedAt = clock.now(),
+                        finalTarget = request.target,
+                    )
                 }
             }
-            if (requestBody != null) {
-                setBody(requestBody.toByteArray())
-                if (request.headers[HttpHeaders.ContentType].isEmpty()) {
-                    contentType(ContentType.Application.OctetStream)
-                }
-            }
-            timeout {
-                requestTimeoutMillis = configuration.requestTimeout.toMillis()
-                connectTimeoutMillis = configuration.connectTimeout.toMillis()
-                socketTimeoutMillis = configuration.socketTimeout.toMillis()
-            }
-        }.execute { response ->
-            val coreHeaders = copyHeaders(response.headers)
-            val body = readBody(
-                response = response,
-                maxCompressedBytes = configuration.maxCompressedBodyBytes,
-                maxDecompressedBytes = configuration.maxDecompressedBodyBytes,
-            )
-            CrawlResponse(
-                request = request,
-                statusCode = response.status.value,
-                headers = coreHeaders,
-                body = ResponseBody.from(body),
-                receivedAt = clock.now(),
-                finalTarget = request.target,
-            )
         }
+    }
+
+    /** Runs one hop and reports a proxy-caused failure as a [WebProxyFailureException]. */
+    private suspend fun guardProxyHop(block: suspend (ProxyHop?) -> CrawlResponse): CrawlResponse {
+        if (configuration.proxy == null) return block(null)
+        val hop = ProxyHop()
+        val chain = currentCoroutineContext()[ProxyChain]
+        chain?.currentHop = hop
+        return try {
+            block(hop)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            // A finished hop must not take the blame for a later chain timeout.
+            chain?.currentHop = null
+            // Closing the transport aborts in-flight hops, which says nothing about the proxy.
+            throw (if (closed.get()) null else proxyFailureOf(error, hop)) ?: error
+        }
+    }
+
+    /** Waiting for a permit counts against the per-hop timeout, as on the JDK path. */
+    private suspend fun withProxiedCioPermits(
+        request: CrawlRequest,
+        hop: ProxyHop?,
+        block: suspend () -> CrawlResponse,
+    ): CrawlResponse {
+        val limiter = proxiedCioLimiter ?: return block()
+        val timeoutMillis = configuration.requestTimeout.toMillis()
+        return withTimeoutOrNull(timeoutMillis) {
+            limiter.withPermits(WebOrigin.fromTarget(request.target)) {
+                hop?.connecting()
+                block()
+            }
+        } ?: throw HttpRequestTimeoutException(request.target, timeoutMillis)
     }
 
     private fun decorateResponse(response: CrawlResponse, history: RedirectHistory): CrawlResponse {
@@ -318,6 +373,8 @@ public class KtorTransport private constructor(
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (proxyFailure: WebProxyFailureException) {
+            throw proxyFailure
         } catch (error: Throwable) {
             RobotsFetchResult.Unavailable("robots-fetch-failed:${error::class.simpleName ?: "failure"}")
         } finally {
@@ -329,33 +386,39 @@ public class KtorTransport private constructor(
     private suspend fun executeSingleHop(request: CrawlRequest, maxBodyBytes: Int): CrawlResponse {
         validateRequestTarget(request)
         validateRequestHeaders(request.headers)
-        tls13ClientFor(request)?.let { selected ->
-            return executeTls13Hop(selected, request, maxBodyBytes, maxBodyBytes)
-        }
-        return client.prepareRequest {
-            url(request.target)
-            method = HttpMethod(request.method.value)
-            headers {
-                request.headers.entries.forEach { header ->
-                    if (!isRestrictedRequestHeader(header.name)) append(header.name, header.value)
+        return guardProxyHop { hop ->
+            tls13ClientFor(request)?.let { selected ->
+                return@guardProxyHop executeTls13Hop(selected, request, maxBodyBytes, maxBodyBytes, hop)
+            }
+            withProxiedCioPermits(request, hop) {
+                client.prepareRequest {
+                    url(configuration.wireTarget(request.target))
+                    method = HttpMethod(request.method.value)
+                    headers {
+                        request.headers.entries.forEach { header ->
+                            if (!isRestrictedRequestHeader(header.name)) append(header.name, header.value)
+                        }
+                    }
+                    timeout {
+                        requestTimeoutMillis = configuration.requestTimeout.toMillis()
+                        connectTimeoutMillis = configuration.connectTimeout.toMillis()
+                        socketTimeoutMillis = configuration.socketTimeout.toMillis()
+                    }
+                    hop?.let { attributes.put(ProxyHopAttribute, it) }
+                }.execute { response ->
+                    configuration.proxyRejection(request.target, response.status.value)?.let { throw it }
+                    val coreHeaders = copyHeaders(response.headers)
+                    val body = readBody(response, maxBodyBytes, maxBodyBytes)
+                    CrawlResponse(
+                        request = request,
+                        statusCode = response.status.value,
+                        headers = coreHeaders,
+                        body = ResponseBody.from(body),
+                        receivedAt = clock.now(),
+                        finalTarget = request.target,
+                    )
                 }
             }
-            timeout {
-                requestTimeoutMillis = configuration.requestTimeout.toMillis()
-                connectTimeoutMillis = configuration.connectTimeout.toMillis()
-                socketTimeoutMillis = configuration.socketTimeout.toMillis()
-            }
-        }.execute { response ->
-            val coreHeaders = copyHeaders(response.headers)
-            val body = readBody(response, maxBodyBytes, maxBodyBytes)
-            CrawlResponse(
-                request = request,
-                statusCode = response.status.value,
-                headers = coreHeaders,
-                body = ResponseBody.from(body),
-                receivedAt = clock.now(),
-                finalTarget = request.target,
-            )
         }
     }
 
@@ -370,12 +433,14 @@ public class KtorTransport private constructor(
         request: CrawlRequest,
         maxCompressedBytes: Int,
         maxDecompressedBytes: Int,
+        proxyHop: ProxyHop?,
     ): CrawlResponse {
         val exchange = selected.exchange(
             request = request,
             headers = tls13RequestHeaders(request),
             maxCompressedBytes = maxCompressedBytes,
             adaptHeaders = { copyHeaderEntries(it.entries) },
+            proxyHop = proxyHop,
         )
         val body = decodeBody(
             raw = exchange.rawBody,
@@ -421,6 +486,15 @@ public class KtorTransport private constructor(
         }
         require(request.method.value.length <= configuration.maxMethodLength) {
             "HTTP request method exceeds configured limit of ${configuration.maxMethodLength} characters"
+        }
+        if (configuration.proxy != null) {
+            // The JDK client routes any spelling of CONNECT directly, past the configured proxy.
+            require(!request.method.value.equals("CONNECT", ignoreCase = true)) {
+                "HTTP CONNECT requests cannot be sent through the configured proxy"
+            }
+            require(URI(request.target).rawUserInfo == null) {
+                "HTTP request target must not contain user-info when a proxy is configured"
+            }
         }
     }
 
@@ -607,7 +681,9 @@ public class KtorTransport private constructor(
          * with redirects disabled, non-2xx responses inspectable, and the
          * configured timeout plugin installed or replaced. The caller's client
          * is closed only when [closeClient] is true; the derived client is
-         * always closed by this transport.
+         * always closed by this transport. A proxy cannot be applied to an
+         * already built client, so a [KtorTransportConfig.proxy] is rejected
+         * instead of letting requests leave directly.
          */
         public fun fromClient(
             client: HttpClient,
@@ -617,6 +693,9 @@ public class KtorTransport private constructor(
             closeClient: Boolean = false,
             ownedResources: List<AutoCloseable> = emptyList(),
         ): KtorTransport {
+            require(configuration.proxy == null) {
+                "KtorTransportConfig.proxy cannot be applied to a caller-owned client; use create or publicWeb"
+            }
             val controlledClient = client.config {
                 expectSuccess = false
                 followRedirects = false
@@ -654,8 +733,13 @@ public class KtorTransport private constructor(
                 endpoint.maxConnectionsPerRoute = configuration.maxConnectionsPerOrigin
                 endpoint.connectTimeout = configuration.connectTimeout.toMillis()
                 endpoint.socketTimeout = configuration.socketTimeout.toMillis()
+                configuration.proxy?.let { webProxy ->
+                    proxy = webProxy.javaProxy()
+                    // Every origin shares the proxy's route; the transport enforces the per-origin limit.
+                    endpoint.maxConnectionsPerRoute = configuration.maxClientConnections
+                }
             }
-        }
+        }.also { if (configuration.proxy != null) observeProxyHopDispatch(it) }
     }
 
     private val robotsFetcher: com.rmjtromp.trawler.web.policy.RobotsFetcher

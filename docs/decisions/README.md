@@ -53,5 +53,6 @@ Routine implementation details inside an already-approved boundary do not need a
 | [ADR-0010](0010-settled-failures-checkpoint-markers-paged-replay.md) | Accepted | Let opted-in harvests progress past settled item failures, commit watermarks at the searched window end, advance checkpoints without work, and page pipeline replay by store cursor. |
 | [ADR-0011](0011-per-host-tls13-jdk-client.md) | Accepted | Reach TLS 1.3-only hosts through an explicitly selected, transport-owned JDK client, keeping CIO for all others and refusing runtimes where a CIO guarantee cannot be kept. |
 | [ADR-0012](0012-overlapping-runs-over-disjoint-pipelines.md) | Accepted | Admit engine runs over disjoint pipeline selections concurrently; overlapping runs and replay wait in arrival order. |
+| [ADR-0013](0013-forward-proxy-fails-closed.md) | Accepted | Route every `trawler-web` request through one explicit forward proxy, fail closed, and report proxy failures with a distinct type. |
 
 `PLAN.md` remains the full architecture authority. These ADRs preserve its most consequential decisions in compact form.

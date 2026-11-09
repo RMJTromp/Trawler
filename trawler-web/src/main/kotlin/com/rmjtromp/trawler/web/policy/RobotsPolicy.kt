@@ -177,6 +177,9 @@ public class CachingRobotsPolicy(
             fetcher.fetch(origin, configuration.userAgent)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (proxyFailure: WebProxyFailureException) {
+            // A proxy outage says nothing about the site's rules and must not be cached as if it did.
+            throw proxyFailure
         } catch (error: Exception) {
             RobotsFetchResult.Unavailable("robots-fetch-failed:${error::class.simpleName ?: "failure"}")
         }

@@ -45,6 +45,7 @@ public object DefaultWebFailureClassifier : FailureClassifier {
         is PacingWaitExceededException -> FailureClassification("web-pacing-bound", true)
         is RedirectLimitExceededException -> FailureClassification("web-redirect-limit", false)
         is InvalidWebRedirectException -> FailureClassification("web-invalid-redirect", false)
+        is WebProxyFailureException -> FailureClassification("web-proxy-failure", true, error.connectStatus?.toString())
         is ConnectTimeoutException -> FailureClassification("http-connect-timeout", true)
         is SocketTimeoutException -> FailureClassification("http-socket-timeout", true)
         is HttpRequestTimeoutException -> FailureClassification("http-request-timeout", true)

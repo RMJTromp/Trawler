@@ -113,7 +113,7 @@ origin, plus the browser User-Agent, are stored there for that origin.
 | `connectTimeout` | 10 s | Ktor connect timeout to the service. |
 | `maxServiceResponseBytes` | 16 MiB | Raw JSON bound, checked by `Content-Length` and while streaming. |
 | `maxConcurrentCalls` | 2 | 1–64 in-flight calls per consumer (each call drives a browser). |
-| `proxy` | `null` | `FlareSolverrProxy(url, username?, password?)`; scheme `http`, `socks4`, or `socks5`; credentials only via the fields, never URL user-info. |
+| `proxy` | `null` | `FlareSolverrProxy(url, username?, password?)`; scheme `http`, `socks4`, or `socks5`; credentials only via the fields, never URL user-info. `withProxyOf(transportConfig)` sets it from `KtorTransportConfig.proxy`, so one definition serves both. |
 
 `FlareSolverrTransportConfig` defaults: `id = "flaresolverr"`, no sessions,
 target ≤ 16 KiB, POST body ≤ 64 KiB, ≤ 64 request cookies, response body
@@ -339,7 +339,14 @@ FlareSolverr. Mode A makes no delivery claim beyond core's; FlareSolverr
 - **Egress binding:** Cloudflare binds clearance to the User-Agent and,
   normally, to the client IP. FlareSolverr and `KtorTransport` must share the
   same egress IP/proxy for reuse to work; the adapter cannot enforce this.
-  `FlareSolverrProxy` configures only FlareSolverr's browser.
+  Define the proxy once on `KtorTransportConfig` and call
+  `FlareSolverrServiceConfig.withProxyOf` to share it. Omitting that call leaves
+  the browser on its own network path. `FlareSolverrProxy` configures only
+  FlareSolverr's browser: it is never applied to Trawler's connection to the
+  service (as for any Ktor CIO client without a proxy, a JVM-wide
+  `ProxySelector` still affects that connection), the address must be reachable from FlareSolverr's network (a loopback address
+  means the FlareSolverr container itself), and a browser proxy failure
+  surfaces as a FlareSolverr error rather than `WebProxyFailureException`.
 - **Destination safety:** the initial target must be `http`/`https`
   (enforced regardless of policy, so FlareSolverr's browser is never sent to
   `file:`/`data:` URLs) and is evaluated by the mandatory

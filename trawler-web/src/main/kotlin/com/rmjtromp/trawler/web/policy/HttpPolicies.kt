@@ -1,6 +1,7 @@
 package com.rmjtromp.trawler.web.policy
 
 import com.rmjtromp.trawler.model.CrawlResponse
+import java.io.IOException
 import java.time.Duration
 import java.time.Instant
 import java.time.format.DateTimeFormatter
@@ -117,6 +118,23 @@ public class WebResponseHeaderNameTooLargeException(
 public class UnsupportedWebContentEncodingException(
     public val encoding: String,
 ) : IllegalStateException("Unsupported HTTP content encoding '$encoding'")
+
+/**
+ * Raised when the configured forward proxy cannot carry a request: it refused
+ * or timed out the connection, closed or stalled it before a tunnel existed, or
+ * rejected the request. The request never falls back to a direct connection.
+ *
+ * @property connectStatus Status the proxy answered with, or `null` when it gave
+ * none or the client discarded it. Ktor CIO discards CONNECT statuses, so a
+ * rejected HTTPS tunnel on the CIO path always reports `null`.
+ */
+public class WebProxyFailureException(
+    public val connectStatus: Int?,
+    cause: Throwable?,
+) : IOException(
+    if (connectStatus == null) "Forward proxy failed" else "Forward proxy answered with status $connectStatus",
+    cause,
+)
 
 /** Raised when a web destination or redirect is rejected by a policy. */
 public class WebPolicyRejectedException(

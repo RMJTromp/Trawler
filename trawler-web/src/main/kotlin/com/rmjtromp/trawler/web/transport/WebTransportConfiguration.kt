@@ -31,6 +31,11 @@ import java.util.Locale
  * redirect hop, including robots fetches; subdomains are not implied. Empty by
  * default, in which case no JDK client is created. A non-empty set requires a
  * Java 21 or newer runtime so the client can be shut down deterministically.
+ * @property proxy Forward proxy every request of this transport leaves through,
+ * on both clients and for every redirect hop and robots fetch. A request whose
+ * proxy fails throws [com.rmjtromp.trawler.web.policy.WebProxyFailureException]
+ * and is never retried directly. `null` leaves routing as it was without this
+ * option. JVM proxy properties and environment variables never populate this field.
  */
 public data class KtorTransportConfig(
     public val id: String = "ktor-cio",
@@ -54,6 +59,7 @@ public data class KtorTransportConfig(
     public val maxConnectionsPerOrigin: Int = 8,
     public val userAgent: String = "TrawlerBot/0.1",
     public val tls13Hosts: Set<String> = emptySet(),
+    public val proxy: WebProxy? = null,
 ) {
     /** Lowercase bare hostnames in the form [WebOrigin.host] reports them. */
     internal val normalizedTls13Hosts: Set<String> =

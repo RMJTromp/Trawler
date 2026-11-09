@@ -1,5 +1,6 @@
 package com.rmjtromp.trawler.flaresolverr
 
+import com.rmjtromp.trawler.web.transport.KtorTransportConfig
 import java.net.URI
 import java.time.Duration
 import java.util.Locale
@@ -106,6 +107,17 @@ public data class FlareSolverrServiceConfig(
             "FlareSolverr concurrent call bound must be between 1 and $MAX_CONCURRENT_CALLS"
         }
     }
+
+    /**
+     * Returns this configuration with FlareSolverr's browser set to the forward
+     * proxy of [transport], or to none when [transport] has none, so one proxy
+     * definition serves both and clearance cookies stay bound to one egress IP.
+     * Only the browser's traffic is affected: this proxy is never applied to
+     * Trawler's connection to [endpoint], which keeps its existing routing. The
+     * address must be reachable from FlareSolverr's network.
+     */
+    public fun withProxyOf(transport: KtorTransportConfig): FlareSolverrServiceConfig =
+        copy(proxy = transport.proxy?.let { FlareSolverrProxy(it.url) })
 
     /** Trawler-side bound for one `request.get`/`request.post` call. */
     internal val solveCallTimeout: Duration

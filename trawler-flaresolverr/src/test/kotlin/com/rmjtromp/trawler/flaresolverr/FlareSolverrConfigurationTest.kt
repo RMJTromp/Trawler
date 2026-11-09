@@ -1,5 +1,7 @@
 package com.rmjtromp.trawler.flaresolverr
 
+import com.rmjtromp.trawler.web.transport.KtorTransportConfig
+import com.rmjtromp.trawler.web.transport.WebProxy
 import java.time.Duration
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -9,6 +11,24 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 
 class FlareSolverrConfigurationTest {
+    @Test
+    fun `service config takes the proxy defined on the transport config`() {
+        val transport = KtorTransportConfig(proxy = WebProxy("http://10.8.0.1:8888"))
+
+        val linked = serviceConfig().withProxyOf(transport)
+
+        assertEquals("http://10.8.0.1:8888", linked.proxy?.url)
+        assertFalse(checkNotNull(linked.proxy).hasCredentials)
+        assertEquals(serviceConfig().endpoint, linked.endpoint)
+    }
+
+    @Test
+    fun `a transport without a proxy leaves the browser without one`() {
+        val configured = serviceConfig(proxy = FlareSolverrProxy("http://stale.test:1"))
+
+        assertNull(configured.withProxyOf(KtorTransportConfig()).proxy)
+    }
+
     @Test
     fun `proxy validates scheme host user-info and credential pairing`() {
         listOf("http://proxy.test:8080", "socks4://proxy.test:1080", "SOCKS5://proxy.test").forEach {

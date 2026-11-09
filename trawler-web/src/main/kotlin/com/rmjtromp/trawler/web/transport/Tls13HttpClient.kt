@@ -3,6 +3,7 @@ package com.rmjtromp.trawler.web.transport
 import com.rmjtromp.trawler.model.CrawlRequest
 import com.rmjtromp.trawler.model.Header
 import com.rmjtromp.trawler.model.Headers
+import com.rmjtromp.trawler.web.policy.WebProxyFailureException
 import com.rmjtromp.trawler.web.policy.WebResponseHeaderNameTooLargeException
 import com.rmjtromp.trawler.web.policy.WebResponseHeaderValueTooLargeException
 import com.rmjtromp.trawler.web.policy.WebResponseHeadersTooLargeException
@@ -19,6 +20,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.ProxySelector
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.http.HttpClient
@@ -53,8 +55,8 @@ internal class Tls13Exchange(
  *
  * This class exists because Ktor's own CIO TLS stops at TLS 1.2 and Ktor's
  * Java engine neither closes its JDK client nor enforces socket inactivity.
- * It mirrors the CIO path's HTTP/1.1, direct-connection, no-redirect,
- * no-cookie-store, no-decompression configuration; [KtorTransport] keeps
+ * It mirrors the CIO path's HTTP/1.1, no-redirect, no-cookie-store,
+ * no-decompression configuration and its direct or proxied routing; [KtorTransport] keeps
  * owning every policy, redirect, cookie, and content-decoding decision.
  *
  * Instances are coroutine-safe. [exchange] is cancellable, aborts the
@@ -80,7 +82,7 @@ internal class Tls13HttpClient(
     private val client: HttpClient = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_1_1)
         .followRedirects(HttpClient.Redirect.NEVER)
-        .proxy(HttpClient.Builder.NO_PROXY)
+        .proxy(configuration.proxy?.let { ProxySelector.of(it.socketAddress()) } ?: HttpClient.Builder.NO_PROXY)
         .connectTimeout(configuration.connectTimeout)
         .executor(executor)
         .build()
@@ -101,11 +103,13 @@ internal class Tls13HttpClient(
         headers: List<Header>,
         maxCompressedBytes: Int,
         adaptHeaders: (Map<String, List<String>>) -> Headers,
+        proxyHop: ProxyHop?,
     ): Tls13Exchange {
         val timeoutMillis = configuration.requestTimeout.toMillis()
         return withTimeoutOrNull(timeoutMillis) {
             limiter.withPermits(WebOrigin.fromTarget(request.target)) {
-                perform(request, headers, maxCompressedBytes, adaptHeaders)
+                proxyHop?.connecting()
+                perform(request, headers, maxCompressedBytes, adaptHeaders, proxyHop)
             }
         } ?: throw HttpRequestTimeoutException(request.target, timeoutMillis)
     }
@@ -115,10 +119,13 @@ internal class Tls13HttpClient(
         headers: List<Header>,
         maxCompressedBytes: Int,
         adaptHeaders: (Map<String, List<String>>) -> Headers,
+        proxyHop: ProxyHop?,
     ): Tls13Exchange {
-        val outgoing = buildRequest(request, headers)
+        val outgoing = buildRequest(request, headers, proxyHop)
         val activity = Channel<Unit>(Channel.CONFLATED)
-        val handler = BoundedBodyHandler(maxCompressedBytes, activity, adaptHeaders)
+        val handler = BoundedBodyHandler(maxCompressedBytes, activity, adaptHeaders) { status ->
+            configuration.proxyRejection(request.target, status)
+        }
         check(!closed.get()) { "TLS 1.3 client is closed" }
         val future = client.sendAsync(outgoing, handler)
         inFlight += future
@@ -136,16 +143,21 @@ internal class Tls13HttpClient(
         } finally {
             inFlight -= future
         }
+        // The JDK client answers a CONNECT 407 with a synthetic response that skips the body handler.
+        if (handler.adaptedHeaders == null && response.statusCode() == PROXY_AUTHENTICATION_REQUIRED) {
+            throw WebProxyFailureException(PROXY_AUTHENTICATION_REQUIRED, null)
+        }
         return Tls13Exchange(response.statusCode(), checkNotNull(handler.adaptedHeaders), response.body())
     }
 
-    private fun buildRequest(request: CrawlRequest, headers: List<Header>): HttpRequest {
-        val builder = HttpRequest.newBuilder(URI(request.target))
+    private fun buildRequest(request: CrawlRequest, headers: List<Header>, proxyHop: ProxyHop?): HttpRequest {
+        val builder = HttpRequest.newBuilder(URI(configuration.wireTarget(request.target)))
         headers.forEach { builder.header(it.name, it.value) }
         val publisher = request.body
             ?.let { HttpRequest.BodyPublishers.ofByteArray(it.toByteArray()) }
             ?: HttpRequest.BodyPublishers.noBody()
-        return builder.method(request.method.value, publisher).build()
+        val observed = if (proxyHop == null) publisher else DispatchObservingPublisher(publisher, proxyHop)
+        return builder.method(request.method.value, observed).build()
     }
 
     /**
@@ -245,13 +257,22 @@ internal fun requireShutdownCapability(client: Any): AutoCloseable =
     )
 
 private fun isAdapterBoundFailure(error: Throwable): Boolean =
-    error is WebResponseTooLargeException ||
+    error is WebProxyFailureException ||
+        error is WebResponseTooLargeException ||
         error is WebResponseHeadersTooLargeException ||
         error is WebResponseHeaderNameTooLargeException ||
         error is WebResponseHeaderValueTooLargeException
 
+/** Sends the delegate unchanged and reports when the JDK client begins writing the request. */
+private class DispatchObservingPublisher(
+    private val delegate: HttpRequest.BodyPublisher,
+    private val hop: ProxyHop,
+) : HttpRequest.BodyPublisher by delegate {
+    override fun contentLength(): Long = delegate.contentLength().also { hop.dispatched() }
+}
+
 /** Bounds exchanges the way CIO bounds its total and per-route connections. */
-private class ConnectionLimiter(maxTotal: Int, private val maxPerOrigin: Int) {
+internal class ConnectionLimiter(maxTotal: Int, private val maxPerOrigin: Int) {
     private class OriginEntry(permits: Int) {
         val semaphore = Semaphore(permits)
         var users = 0
@@ -280,6 +301,7 @@ private class BoundedBodyHandler(
     private val maxBytes: Int,
     private val activity: Channel<Unit>,
     private val adaptHeaders: (Map<String, List<String>>) -> Headers,
+    private val statusRejection: (Int) -> Throwable?,
 ) : HttpResponse.BodyHandler<ByteArray> {
     @Volatile
     var adaptedHeaders: Headers? = null
@@ -288,12 +310,14 @@ private class BoundedBodyHandler(
     override fun apply(info: HttpResponse.ResponseInfo): HttpResponse.BodySubscriber<ByteArray> {
         activity.trySend(Unit)
         val rejection = try {
-            adaptedHeaders = adaptHeaders(info.headers().map())
-            val contentLength = info.headers().firstValue(HttpHeaders.ContentLength).orElse(null)?.toLongOrNull()
-            if (contentLength != null && contentLength > maxBytes.toLong()) {
-                WebResponseTooLargeException("compressed", maxBytes)
-            } else {
-                null
+            statusRejection(info.statusCode()) ?: run {
+                adaptedHeaders = adaptHeaders(info.headers().map())
+                val contentLength = info.headers().firstValue(HttpHeaders.ContentLength).orElse(null)?.toLongOrNull()
+                if (contentLength != null && contentLength > maxBytes.toLong()) {
+                    WebResponseTooLargeException("compressed", maxBytes)
+                } else {
+                    null
+                }
             }
         } catch (error: RuntimeException) {
             error
