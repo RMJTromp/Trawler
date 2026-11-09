@@ -45,6 +45,10 @@ core consumers do not inherit Ktor.
 | `org.jetbrains.kotlinx:kotlinx-coroutines-core` | `ktor.coroutines.version` in parent `pom.xml` (`1.11.0`) | Compile | `trawler-web` | Suspending bounded DNS dispatch, policy synchronization, pacing, and cancellation. | Ktor 3.5.1 is compiled against coroutines 1.11.0; the adapter keeps that binary-compatible runtime isolated from core's 1.10.2 dependency tree. |
 | `io.ktor:ktor-client-cio-jvm` | `ktor.version` in parent `pom.xml` (`3.5.1`) | Compile | `trawler-web` | One owned CIO HTTP client, request/response adaptation, timeout plugins, and byte-channel access. | A real HTTP transport is the current Phase 3 implementation need; JDK URL APIs do not provide the required replaceable Ktor client boundary and timeout/body behavior. |
 
+The per-host TLS 1.3 path added in 1.1.0 uses the JDK's `java.net.http` module
+and adds no Maven coordinate; Ktor's Java engine was rejected because it cannot
+close its JDK client (see [ADR-0011](decisions/0011-per-host-tls13-jdk-client.md)).
+
 The Phase 3/5 direct external technology dependency remains Ktor CIO. Ktor is Apache
 License 2.0, is pinned through one parent property, and is maintained in its
 upstream repository. The web adapter's direct coroutines version is an explicit

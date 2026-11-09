@@ -26,6 +26,26 @@ import org.junit.jupiter.api.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class WebTransportContractsTest {
     @Test
+    fun `tls13 hosts default to empty and normalize bare hostnames`() {
+        assertEquals(emptySet(), KtorTransportConfig().tls13Hosts)
+        assertEquals(emptySet(), KtorTransportConfig().normalizedTls13Hosts)
+        assertEquals(
+            setOf("ombudsman.aw", "::1", "2001:db8::2"),
+            KtorTransportConfig(tls13Hosts = setOf("Ombudsman.AW", "[::1]", "[2001:DB8::2]")).normalizedTls13Hosts,
+        )
+    }
+
+    @Test
+    fun `tls13 host entries must be bare hostnames`() {
+        listOf("", " ", "https://example.test", "example.test:443", "example.test/path", "user@example.test", "a b")
+            .forEach { entry ->
+                assertFailsWith<IllegalArgumentException>(entry) {
+                    KtorTransportConfig(tls13Hosts = setOf(entry))
+                }
+            }
+    }
+
+    @Test
     fun `web origin parsing rejects missing parts and preserves the URI cause`() {
         assertFailsWith<IllegalArgumentException> { WebOrigin("https", " ", 443) }
         assertFailsWith<IllegalArgumentException> { WebOrigin("https", "example.test", 65_536) }

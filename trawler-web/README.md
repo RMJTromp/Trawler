@@ -15,6 +15,11 @@ engine-owned lifecycle extension when the engine owns its client; use
 preset is opt-in and blocks loopback/private/metadata addresses. Internal
 targets require an explicit replacement destination policy.
 
+Ktor CIO offers at most TLS 1.2. Hosts listed in `KtorTransportConfig.tls13Hosts`
+(empty by default) run through a transport-owned JDK `java.net.http` client that
+can negotiate TLS 1.3, under the same per-hop policies; see the feature record
+for the required JVM option and runtime.
+
 `RssDiscovery`, `AtomDiscovery`, and `SitemapDiscovery` are resumable
 discoveries. They use JDK StAX/gzip, bounded XML documents, breadth-first
 sitemap recursion, and the engine-provided `RequestExecutor`; no parser or

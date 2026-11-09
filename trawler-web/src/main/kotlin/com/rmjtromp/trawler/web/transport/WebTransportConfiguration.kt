@@ -16,9 +16,22 @@ import com.rmjtromp.trawler.web.policy.RobotsPolicyConfig
 import com.rmjtromp.trawler.web.session.CookieSession
 import com.rmjtromp.trawler.web.session.CookieSessionConfig
 import com.rmjtromp.trawler.web.session.InMemoryCookieSession
+import java.net.URI
+import java.net.URISyntaxException
 import java.time.Duration
+import java.util.Locale
 
-/** Immutable Ktor transport bounds and timeout configuration. */
+/**
+ * Immutable Ktor transport bounds and timeout configuration.
+ *
+ * @property tls13Hosts Exact, case-insensitive hostnames (no scheme, port, or
+ * path; bracket IPv6 literals) whose requests use the transport-owned JDK
+ * `java.net.http` client, which can negotiate TLS 1.3. Every other host keeps
+ * the CIO path, which offers at most TLS 1.2. Matching is per request and per
+ * redirect hop, including robots fetches; subdomains are not implied. Empty by
+ * default, in which case no JDK client is created. A non-empty set requires a
+ * Java 21 or newer runtime so the client can be shut down deterministically.
+ */
 public data class KtorTransportConfig(
     public val id: String = "ktor-cio",
     public val connectTimeout: Duration = Duration.ofSeconds(10),
@@ -40,7 +53,12 @@ public data class KtorTransportConfig(
     public val maxClientConnections: Int = 64,
     public val maxConnectionsPerOrigin: Int = 8,
     public val userAgent: String = "TrawlerBot/0.1",
+    public val tls13Hosts: Set<String> = emptySet(),
 ) {
+    /** Lowercase bare hostnames in the form [WebOrigin.host] reports them. */
+    internal val normalizedTls13Hosts: Set<String> =
+        tls13Hosts.mapTo(LinkedHashSet(), ::normalizeTls13Host)
+
     init {
         require(id.isNotBlank()) { "Ktor transport ID must not be blank" }
         require(connectTimeout.isPositive()) { "Connect timeout must be positive" }
@@ -67,6 +85,18 @@ public data class KtorTransportConfig(
         require(maxConnectionsPerOrigin > 0) { "Per-origin connection bound must be positive" }
         require(userAgent.isNotBlank()) { "Transport user agent must not be blank" }
     }
+}
+
+private fun normalizeTls13Host(entry: String): String {
+    val parsedHost = try {
+        URI("https://$entry/").host
+    } catch (_: URISyntaxException) {
+        null
+    }
+    require(parsedHost != null && parsedHost.equals(entry, ignoreCase = true)) {
+        "TLS 1.3 host entries must be bare hostnames without scheme, port, or path: '$entry'"
+    }
+    return parsedHost.lowercase(Locale.ROOT).removePrefix("[").removeSuffix("]")
 }
 
 /** Immutable set of independently replaceable web transport policies. */

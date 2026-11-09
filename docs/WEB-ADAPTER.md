@@ -9,7 +9,8 @@
 ## Purpose
 
 `trawler-web` supplies the optional HTTP execution boundary for Trawler. It
-adapts Ktor CIO requests and responses to the core `Transport` contract and
+adapts Ktor CIO requests and responses (and, for explicitly selected hosts, JDK
+`java.net.http` exchanges) to the core `Transport` contract and
 assembles replaceable public-web policies for destination safety, robots,
 redirects, cookies, origin concurrency, pacing, and HTTP classification.
 
@@ -83,6 +84,7 @@ The public-web preset defaults are immutable and validated at construction:
 | Minimum origin delay | 250 ms | Merged with robots delay and `Retry-After`. |
 | Maximum pacing wait | 5 min | Longer server/robots waits fail visibly instead of being silently shortened. |
 | Cookie entries | 512 | In-memory, oldest-entry eviction. Domain matching follows RFC 6265: IP-literal hosts match only exactly, and `Max-Age` takes precedence over `Expires`. |
+| TLS 1.3 hosts (`tls13Hosts`) | Empty | Exact hostnames using the JDK path; see [Per-host TLS 1.3 path](#per-host-tls-13-path). |
 | Diagnostic header redaction | Authorization, proxy authorization, cookies, common API/cloud credential headers | Diagnostic copies redact values; execution headers remain unchanged. |
 
 `KtorTransport.create(configuration, policies)` accepts a complete
@@ -107,7 +109,8 @@ addresses.
 
 ## Transport lifecycle and cancellation
 
-The transport owns one client and closes it, together with resources supplied
+The transport owns one client (plus the JDK client when `tls13Hosts` is
+non-empty) and closes them, together with resources supplied
 by its factory, when `stop` or `close` is called. `start` performs no network
 work. Engine-owned registration gives startup/shutdown ordering; a shared
 caller-owned client must instead be closed by its owner.
@@ -152,6 +155,91 @@ inherited defaults preceding pipeline-local additions. Core response
 middleware runs in declared order after the final adapted response. The web
 module provides small opt-in header/attribute middleware helpers; it does not
 create a second Ktor interceptor chain or hide retries in middleware.
+
+## Per-host TLS 1.3 path
+
+> **Since:** 1.1.0
+
+### Purpose and non-goals
+
+Ktor's CIO TLS implementation offers at most TLS 1.2: `TLSVersion` stops at
+`TLS12` and the ClientHello sends no `supported_versions` extension, through
+Ktor 3.6.1. Servers that accept only TLS 1.3 therefore refuse every CIO
+handshake. `KtorTransportConfig.tls13Hosts` routes named hosts through a
+transport-owned JDK `java.net.http` client so those servers can be reached.
+The JDK client negotiates the best version the server offers, so a configured
+host may still use TLS 1.2 if that is all it supports.
+
+This is not TLS fallback or fingerprint management. It never selects a path by
+observing a failure, and a TLS failure on either path remains an ordinary
+visible failure for core retry accounting.
+
+### Configuration
+
+| Setting | Type | Default | Validation and behavior |
+|---|---|---|---|
+| `KtorTransportConfig.tls13Hosts` | `Set<String>` | `emptySet()` | Exact, case-insensitive hostnames; bracket IPv6 literals. Scheme, port, path, or user-info entries are rejected at construction. Subdomains are not implied. |
+
+```kotlin
+// Conceptual usage sketch; this document is not a compiled example source.
+KtorTransport.create(
+    configuration = KtorTransportConfig(tls13Hosts = setOf("ombudsman.aw", "dvg.aw")),
+    policies = policies,
+)
+```
+
+Selection applies to any scheme on a listed host and is evaluated for every
+request and redirect hop, including robots fetches. All three factories honor
+it. With an empty set no JDK client, thread, or executor exists and CIO
+behavior is unchanged. `trawler-flaresolverr` keeps its own CIO client.
+
+### Required runtime
+
+A non-empty set requires both of the following. Each is checked when the
+transport is constructed, before any client exists, and fails with an
+`IllegalStateException` rather than weakening a guarantee:
+
+- **Java 21 or newer.** `HttpClient` only became closable in Java 21; on Java
+  17 its selector thread and pooled sockets could not be released
+  deterministically.
+- **The JVM option `-Djdk.httpclient.redirects.retrylimit=1`.** By default the
+  JDK client transparently re-sends a GET or HEAD after an abrupt connection
+  or handshake failure (once on Java 21, up to five attempts on Java 26), which
+  would be a retry hidden from engine attempt accounting. The limit is JVM-wide
+  and read once by the JDK, so the host owns it; the library does not change it
+  behind other clients in the process.
+
+### Guarantees compared with the CIO path
+
+The transport's redirect loop, destination, robots, origin concurrency,
+pacing, cookie, redirect-header, classification, and diagnostic code is shared
+and does not know which client ran a hop.
+
+| Guarantee | JDK path behavior |
+|---|---|
+| Destination safety | Same per-hop policy. As on CIO, the connection resolves after the policy lookup, so this is revalidation and not address pinning. |
+| Redirects | The JDK client never follows redirects; the shared loop handles every hop. |
+| Retries | None in the transport; JDK re-sends are disabled by the required option. |
+| Body limits | Non-blocking subscriber cancels the stream at the compressed bound; `Content-Length` is rejected early; decompression shares the CIO decoder and bound. |
+| Headers | Same count/name/value bounds before the body is accepted. Same restricted-header filter and `User-Agent`, `Accept`, `Accept-Encoding`, and `Content-Type` defaults. |
+| Timeouts | Per-hop request and total-chain bounds as on CIO, connect via the JDK client, and socket inactivity measured between response bytes because the JDK has no such setting. Before the first response bytes the inactivity allowance also includes the connect timeout. |
+| Connection bounds | Exchanges are limited to `maxClientConnections` and `maxConnectionsPerOrigin`; waiting counts against the per-hop request timeout. |
+| Cancellation | Cancels the JDK exchange with `cancel(true)`, closing its connection. |
+| Cookies | The JDK cookie store is unset; the shared session owns cookies. |
+| Proxy | Direct, matching CIO; the JVM default `ProxySelector` is not consulted. |
+| Lifecycle | `stop`/`close` abort in-flight exchanges (callers see `IOException`) and shut down the JDK client and its bounded adapter-owned executor. |
+| Credentials | Same redirect stripping; hostname verification and the JVM default trust store apply; no JDK client logging is enabled by the transport. |
+
+The JDK client uses HTTP/1.1 only, as CIO does. Duplicate request headers are
+sent as separate lines instead of CIO's joined line. `Expect` and `Upgrade`
+are forbidden by the JDK client and fail visibly with
+`IllegalArgumentException` before anything is sent.
+
+### Failure categories
+
+Timeouts map to the same Ktor and JDK exception types the classifier already
+recognizes. TLS failures surface as `SSLException` subtypes (CIO: `TLSException`
+or `EOFException`) and are classified `web-transport-failure`, retryable.
 
 ## RSS, Atom, and sitemap discovery
 
@@ -261,6 +349,9 @@ Direct runtime dependencies are limited to:
   runtime graph;
 - `io.ktor:ktor-client-cio-jvm:3.5.1` for the one Ktor CIO client.
 
+The per-host TLS 1.3 path uses only the JDK's `java.net.http` module and adds
+no dependency.
+
 Ktor brings its required client, HTTP, network/TLS, serialization plumbing,
 Kotlinx I/O, and SLF4J API transitives. No Ktor retry, content-negotiation,
 Jackson, Jsoup, parser, database, browser, or telemetry backend is declared.
@@ -278,7 +369,7 @@ scans, deterministic `WebPolicyTest`, `PublicWebSafetyPolicyTest`,
 `RobotsPolicyTest`, `HttpOutcomePolicyTest`, `CookieSessionTest`,
 `CookieSessionRulesTest`, `XmlDiscoveryTest`, `XmlDiscoveryHostileInputTest`,
 `KtorTransportTest`, `KtorTransportSafetyTest`, `WebTransportContractsTest`,
-and `KtorTransportIT` suites, gated at 95% line / 90% branch coverage. The transport unit tests use
+`KtorTransportIT`, and `KtorTransportTls13IT` suites, gated at 95% line / 90% branch coverage. The transport unit tests use
 Ktor MockEngine; the CIO integration tests use only process-local loopback
 servers and no public website. Together they cover request/response metadata,
 body and header bounds, identity/gzip/deflate decoding, redirect method and
@@ -286,6 +377,9 @@ credential rules, policy re-entry, permit cleanup, client ownership,
 non-2xx inspection, and deterministic cancellation/failure paths. Underlying
 CIO socket timeout enforcement is not tested with wall-clock timing; the
 deterministic timeout exception and outer cancellation paths are covered.
+`KtorTransportTls13IT` drives the JDK path against loopback servers restricted
+to TLS 1.3 and also proves the default CIO path is refused by them, on Java 21
+and the build JDK.
 MockEngine ownership and the remaining matrix are recorded in
 [`TESTING.md`](TESTING.md) and [`TEST-MATRIX.md`](TEST-MATRIX.md).
 
@@ -293,6 +387,9 @@ MockEngine ownership and the remaining matrix are recorded in
 
 - The module is process-local; cookie and robots caches are not durable.
 - The public-web DNS check is revalidation, not address-pinned socket policy.
+- JDK-path connect timeout is not exercised (loopback cannot stall a connect
+  deterministically), and the TLS 1.3 path has not been run against a real
+  third-party server by the test suite.
 - The robots parser is intentionally bounded and does not claim complete
   support for every robots extension. Non-404 4xx robots responses are treated
   as unavailable (default `DENY`), which is stricter than RFC 9309, and robots

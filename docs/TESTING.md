@@ -205,14 +205,14 @@ the final aggregate owned by `trawler-coverage`:
   implementation module, writing the reactor report under
   `target/site/jacoco-aggregate/`.
 
-Coverage measured by the 2026-11-07 `mvn clean verify` run (Docker Engine 29,
+Coverage measured by the 2026-11-09 `mvn clean verify` run (Docker Engine 29,
 Testcontainers 1.21.4, `postgres:16.4-alpine`):
 
 | Module | Line | Branch | Tests (unit + IT) |
 |---|---:|---:|---:|
-| `trawler-core` | 98.9% | 95.9% | 318 + 27 |
-| `trawler-web` | 99.7% | 96.3% | 146 + 3 |
-| `trawler-postgres` | 99.2% | 95.1% | 20 + 69 |
+| `trawler-core` | 98.9% | 95.6% | 335 + 28 |
+| `trawler-web` | 99.5% | 95.4% | 148 + 32 |
+| `trawler-postgres` | 99.2% | 95.2% | 20 + 70 |
 | `trawler-flaresolverr` | 99.5% | 96.1% | 105 + 6 |
 
 The remaining uncovered code is defensive, race-only, or compiler-generated;

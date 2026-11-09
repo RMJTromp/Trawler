@@ -7,7 +7,7 @@
     <parent>
         <groupId>com.rmjtromp.trawler</groupId>
         <artifactId>trawler-parent</artifactId>
-        <version>1.0.0</version>
+        <version>1.1.0</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -64,6 +64,24 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <jdk.httpclient.redirects.retrylimit>1</jdk.httpclient.redirects.retrylimit>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <jdk.httpclient.redirects.retrylimit>1</jdk.httpclient.redirects.retrylimit>
+                    </systemPropertyVariables>
+                </configuration>
             </plugin>
         </plugins>
     </build>

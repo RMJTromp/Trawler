@@ -60,6 +60,8 @@ import java.util.zip.InflaterInputStream
  * and policies receive no client handle and therefore cannot create a hidden
  * network path. Retry is deliberately absent: non-2xx responses are returned
  * for classification and the core retry policy remains engine-visible.
+ * Hosts in [KtorTransportConfig.tls13Hosts] are executed by a transport-owned
+ * JDK client under the same per-hop policies; every other host uses CIO.
  */
 public class KtorTransport private constructor(
     private val client: HttpClient,
@@ -67,6 +69,7 @@ public class KtorTransport private constructor(
     private val policies: WebTransportPolicies,
     private val clock: Clock,
     ownedResources: List<AutoCloseable>,
+    private val tls13Client: Tls13HttpClient?,
 ) : com.rmjtromp.trawler.transport.Transport, ExtensionLifecycle, AutoCloseable {
     override val id: String = configuration.id
 
@@ -226,6 +229,14 @@ public class KtorTransport private constructor(
         val requestBody = request.body
         validateRequestTarget(request)
         validateRequestHeaders(request.headers)
+        tls13ClientFor(request)?.let { selected ->
+            return executeTls13Hop(
+                selected,
+                request,
+                configuration.maxCompressedBodyBytes,
+                configuration.maxDecompressedBodyBytes,
+            )
+        }
         return client.prepareRequest {
             url(request.target)
             method = HttpMethod(request.method.value)
@@ -318,6 +329,9 @@ public class KtorTransport private constructor(
     private suspend fun executeSingleHop(request: CrawlRequest, maxBodyBytes: Int): CrawlResponse {
         validateRequestTarget(request)
         validateRequestHeaders(request.headers)
+        tls13ClientFor(request)?.let { selected ->
+            return executeTls13Hop(selected, request, maxBodyBytes, maxBodyBytes)
+        }
         return client.prepareRequest {
             url(request.target)
             method = HttpMethod(request.method.value)
@@ -345,6 +359,50 @@ public class KtorTransport private constructor(
         }
     }
 
+    /** Selects the JDK path only for an explicitly configured destination host. */
+    private fun tls13ClientFor(request: CrawlRequest): Tls13HttpClient? =
+        tls13Client?.takeIf {
+            WebOrigin.fromTarget(request.target).host in configuration.normalizedTls13Hosts
+        }
+
+    private suspend fun executeTls13Hop(
+        selected: Tls13HttpClient,
+        request: CrawlRequest,
+        maxCompressedBytes: Int,
+        maxDecompressedBytes: Int,
+    ): CrawlResponse {
+        val exchange = selected.exchange(
+            request = request,
+            headers = tls13RequestHeaders(request),
+            maxCompressedBytes = maxCompressedBytes,
+            adaptHeaders = { copyHeaderEntries(it.entries) },
+        )
+        val body = decodeBody(
+            raw = exchange.rawBody,
+            contentEncoding = exchange.headers[HttpHeaders.ContentEncoding].firstOrNull(),
+            maxDecompressedBytes = maxDecompressedBytes,
+        )
+        return CrawlResponse(
+            request = request,
+            statusCode = exchange.statusCode,
+            headers = exchange.headers,
+            body = ResponseBody.from(body),
+            receivedAt = clock.now(),
+            finalTarget = request.target,
+        )
+    }
+
+    /** Applies the same restricted-header filter and defaults as the CIO path. */
+    private fun tls13RequestHeaders(request: CrawlRequest): List<Header> = buildList {
+        request.headers.entries.filterNotTo(this) { isRestrictedRequestHeader(it.name) }
+        if (request.body != null && request.headers[HttpHeaders.ContentType].isEmpty()) {
+            add(Header(HttpHeaders.ContentType, ContentType.Application.OctetStream.toString()))
+        }
+        if (request.headers[HttpHeaders.Accept].isEmpty()) {
+            add(Header(HttpHeaders.Accept, ContentType.Any.toString()))
+        }
+    }
+
     private fun validateRequestHeaders(headers: CoreHeaders) {
         require(headers.entries.size <= configuration.maxRequestHeaders) {
             "HTTP request headers exceed configured limit of ${configuration.maxRequestHeaders} entries"
@@ -369,9 +427,12 @@ public class KtorTransport private constructor(
     private fun isRestrictedRequestHeader(name: String): Boolean =
         RESTRICTED_REQUEST_HEADERS.any { it.equals(name, ignoreCase = true) }
 
-    private fun copyHeaders(headers: io.ktor.http.Headers): CoreHeaders {
+    private fun copyHeaders(headers: io.ktor.http.Headers): CoreHeaders =
+        copyHeaderEntries(headers.entries())
+
+    private fun copyHeaderEntries(headers: Iterable<Map.Entry<String, List<String>>>): CoreHeaders {
         val entries = ArrayList<Header>()
-        headers.forEach { name, values ->
+        headers.forEach { (name, values) ->
             if (name.length > configuration.maxHeaderNameLength) {
                 throw WebResponseHeaderNameTooLargeException(configuration.maxHeaderNameLength)
             }
@@ -398,7 +459,15 @@ public class KtorTransport private constructor(
             throw WebResponseTooLargeException("compressed", maxCompressedBytes)
         }
         val raw = readChannel(response.bodyAsChannel(), maxCompressedBytes)
-        val encoding = response.headers[HttpHeaders.ContentEncoding]
+        return decodeBody(raw, response.headers[HttpHeaders.ContentEncoding], maxDecompressedBytes)
+    }
+
+    private fun decodeBody(
+        raw: ByteArray,
+        contentEncoding: String?,
+        maxDecompressedBytes: Int,
+    ): ByteArray {
+        val encoding = contentEncoding
             ?.split(',')
             ?.map { it.trim().lowercase() }
             ?.filter { it.isNotEmpty() }
@@ -503,8 +572,9 @@ public class KtorTransport private constructor(
             policies: WebTransportPolicies,
             clock: Clock = SystemClock,
         ): KtorTransport {
+            val tls13Client = newTls13Client(configuration)
             val client = newClient(configuration)
-            return KtorTransport(client, configuration, policies, clock, listOf(client))
+            return KtorTransport(client, configuration, policies, clock, listOfNotNull(client, tls13Client), tls13Client)
         }
 
         /**
@@ -518,10 +588,18 @@ public class KtorTransport private constructor(
             preset: PublicWebPresetConfig = PublicWebPresetConfig(),
             clock: Clock = SystemClock,
         ): KtorTransport {
+            val tls13Client = newTls13Client(configuration)
             val resolver = JdkNetworkAddressResolver(maxParallelLookups = 4)
             val policies = WebPresets.publicWebPolicies(resolver, preset, clock)
             val client = newClient(configuration)
-            return KtorTransport(client, configuration, policies, clock, listOf(resolver, client))
+            return KtorTransport(
+                client,
+                configuration,
+                policies,
+                clock,
+                listOfNotNull(resolver, client, tls13Client),
+                tls13Client,
+            )
         }
 
         /**
@@ -548,15 +626,20 @@ public class KtorTransport private constructor(
                     socketTimeoutMillis = configuration.socketTimeout.toMillis()
                 }
             }
+            val tls13Client = newTls13Client(configuration)
             return KtorTransport(
             client = controlledClient,
             configuration = configuration,
             policies = policies,
             clock = clock,
             ownedResources = ownedResources + listOf(controlledClient) +
-                if (closeClient) listOf(client) else emptyList(),
+                (if (closeClient) listOf(client) else emptyList()) + listOfNotNull(tls13Client),
+            tls13Client = tls13Client,
             )
         }
+
+        private fun newTls13Client(configuration: KtorTransportConfig): Tls13HttpClient? =
+            if (configuration.normalizedTls13Hosts.isEmpty()) null else Tls13HttpClient(configuration)
 
         private fun newClient(configuration: KtorTransportConfig): HttpClient = HttpClient(CIO) {
             expectSuccess = false

@@ -51,5 +51,6 @@ Routine implementation details inside an already-approved boundary do not need a
 | [ADR-0008](0008-response-replay-output-lineage.md) | Accepted | Keep response replay, typed output, outbox delivery, and retention independent with caller-owned codecs and lineage protection. |
 | [ADR-0009](0009-flaresolverr-adapter-boundary.md) | Accepted | Keep challenge contracts in `trawler-flaresolverr`, resolve challenges only through visible engine retries, and document that browser-side navigation bypasses per-hop safety. |
 | [ADR-0010](0010-settled-failures-checkpoint-markers-paged-replay.md) | Accepted | Let opted-in harvests progress past settled item failures, commit watermarks at the searched window end, advance checkpoints without work, and page pipeline replay by store cursor. |
+| [ADR-0011](0011-per-host-tls13-jdk-client.md) | Accepted | Reach TLS 1.3-only hosts through an explicitly selected, transport-owned JDK client, keeping CIO for all others and refusing runtimes where a CIO guarantee cannot be kept. |
 
 `PLAN.md` remains the full architecture authority. These ADRs preserve its most consequential decisions in compact form.
