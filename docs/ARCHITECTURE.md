@@ -196,8 +196,9 @@ the fenced acknowledgement can produce a duplicate.
 ## Phase 2 database-free runtime
 
 The implemented core vertical slice uses one structured engine scope rooted in a
-`SupervisorJob`. `runOnce` starts the engine when needed, serializes finite
-engine runs, and executes selected pipeline runs under supervisor isolation.
+`SupervisorJob`. `runOnce` starts the engine when needed, overlaps engine runs
+whose pipeline selections are disjoint while queueing overlapping ones in arrival
+order, and executes selected pipeline runs under supervisor isolation.
 Engine extensions start in order and stop in reverse order; pipeline-owned
 extensions have the same ordering within each pipeline run. `awaitIdle` and
 shutdown waits are explicitly bounded. Caller cancellation propagates through

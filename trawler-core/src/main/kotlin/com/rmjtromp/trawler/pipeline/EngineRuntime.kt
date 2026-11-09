@@ -123,6 +123,7 @@ import kotlinx.coroutines.flow.collect
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -150,7 +151,8 @@ internal class EngineRuntime(
     private val configuration: EngineConfiguration,
 ) {
     private val lifecycleMutex = Mutex()
-    private val runMutex = Mutex()
+    private val runGate = PipelineRunGate()
+    private val activeRunTimeouts = ConcurrentHashMap<String, Duration>()
     private val rootJob = SupervisorJob()
     private val lifecycleScope = CoroutineScope(rootJob + Dispatchers.Default)
     private val activeRuns = linkedSetOf<Job>()
@@ -182,7 +184,7 @@ internal class EngineRuntime(
 
     /**
      * Reprocesses bounded stored responses through one registered typed
-     * pipeline. Replay is serialized with ordinary runs, performs no network
+     * pipeline. Replay excludes every ordinary run, performs no network
      * call, and never enqueues or transitions crawl work.
      */
     suspend fun <T : Any> replay(selection: ReplaySelection<T>): ReplayResult = coroutineScope {
@@ -204,7 +206,10 @@ internal class EngineRuntime(
         }
     }
 
-    private suspend fun <T : Any> replaySerialized(selection: ReplaySelection<T>): ReplayResult = runMutex.withLock {
+    private fun registeredPipelineIds(): Set<String> =
+        configuration.pipelineRegistrations.map { it.pipelineId }.toSet()
+
+    private suspend fun <T : Any> replaySerialized(selection: ReplaySelection<T>): ReplayResult = runGate.withPipelines(registeredPipelineIds()) {
         if (selection.query is com.rmjtromp.trawler.response.ResponseReplayQuery.ByPipelineId &&
             selection.query.pipelineId != selection.pipeline.id
         ) {
@@ -592,14 +597,28 @@ internal class EngineRuntime(
         }
     }
 
-    private suspend fun runSerialized(request: RunRequest): RunResult = runMutex.withLock {
+    /** Runs [request] once no other run holds any pipeline it selects; runs over disjoint pipelines overlap. */
+    private suspend fun runSerialized(request: RunRequest): RunResult {
+        val registered = registeredPipelineIds()
+        val selected = request.selectedPipelineIds
+        val unknown = selected.orEmpty() - registered
+        require(unknown.isEmpty()) { "Unknown pipeline IDs: ${unknown.sorted().joinToString()}" }
+        return runGate.withPipelines(selected ?: registered) {
+            val engineRunId = "engine-run-${UUID.randomUUID()}"
+            activeRunTimeouts[engineRunId] = request.timeout ?: configuration.runtimeOptions.runTimeout
+            try {
+                executeRun(request, engineRunId)
+            } finally {
+                activeRunTimeouts.remove(engineRunId)
+            }
+        }
+    }
+
+    private suspend fun executeRun(request: RunRequest, engineRunId: String): RunResult {
         val available = configuration.pipelineRegistrations
         val selected = request.selectedPipelineIds
-        val unknown = selected.orEmpty() - available.map { it.pipelineId }.toSet()
-        require(unknown.isEmpty()) { "Unknown pipeline IDs: ${unknown.sorted().joinToString()}" }
         ensureStarted()
         val registrations = available.filter { selected == null || it.pipelineId in selected }
-        val engineRunId = "engine-run-${UUID.randomUUID()}"
         val startedAt = configuration.clock.now()
         val runHistory = (configuration.stateStore as? RunHistoryStore)?.takeIf {
             configuration.stateStore.capabilities.any {
@@ -614,8 +633,8 @@ internal class EngineRuntime(
         ) {
             runHistory.recoverStaleRuns(
                 now = startedAt,
-                staleAfter = (request.timeout ?: configuration.runtimeOptions.runTimeout)
-                    .plus(configuration.runtimeOptions.shutdownTimeout),
+                // An overlapping run may have a longer timeout than this one; it must not look stale.
+                staleAfter = activeRunTimeouts.values.max().plus(configuration.runtimeOptions.shutdownTimeout),
             )
         }
         if (runHistory != null &&
@@ -631,7 +650,7 @@ internal class EngineRuntime(
             request.reason,
         )
 
-        return@withLock try {
+        return try {
             val timedResult = withTimeoutOrNull<RunResult>(
                 (request.timeout ?: configuration.runtimeOptions.runTimeout).toMillis().coerceAtLeast(1),
             ) {

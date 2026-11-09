@@ -167,7 +167,7 @@ interrupted by a budget stop is excluded, so the next page replays it again.
 To walk a whole history, replay with `after = lastReference` until a page
 returns fewer responses than its limit. Per-response failures do not stop a
 page; the caller decides whether to continue past a `FAILED` page. Each page
-is a separate replay operation, serialized with ordinary runs, and outputs see
+is a separate replay operation that excludes every ordinary run, and outputs see
 at-least-once delivery for a page interrupted between delivery and the next
 cursor. Custom `ResponseReplayStore` implementations must honor the ordering,
 cursor, and version contract for `ByPipelineId`.

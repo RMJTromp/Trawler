@@ -1077,7 +1077,11 @@ public class TrawlerEngine public constructor(
 ) {
     private val runtime: EngineRuntime = EngineRuntime(configuration)
 
-    /** Runs selected pipelines once and returns an aggregate lifecycle result. */
+    /**
+     * Runs selected pipelines once and returns an aggregate lifecycle result. Runs over disjoint pipeline
+     * selections overlap; a run sharing a pipeline with a running or earlier-queued run waits in arrival order.
+     * Cancellation of a waiting run removes it from the queue.
+     */
     public suspend fun runOnce(request: RunRequest = RunRequest()): RunResult = runtime.runOnce(request)
 
     /** Replays stored responses through a registered typed pipeline without network or crawl jobs. */

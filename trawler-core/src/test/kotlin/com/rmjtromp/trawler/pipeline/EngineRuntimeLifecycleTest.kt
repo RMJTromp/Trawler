@@ -18,6 +18,7 @@ import com.rmjtromp.trawler.schedule.ScheduleTrigger
 import com.rmjtromp.trawler.schedule.Scheduler
 import com.rmjtromp.trawler.schedule.SchedulerEvent
 import com.rmjtromp.trawler.schedule.SchedulerHandle
+import com.rmjtromp.trawler.state.CrawlStateCapability
 import java.time.Duration
 import java.time.Instant
 import kotlin.test.assertEquals
@@ -63,6 +64,70 @@ class EngineRuntimeLifecycleTest {
             assertTrue(engine.awaitIdle(Duration.ofSeconds(1)))
             assertEquals(RunStatus.COMPLETED, run.await().status)
             assertFailsWith<IllegalArgumentException> { engine.awaitIdle(Duration.ofMillis(-1)) }
+        } finally {
+            engine.shutdown()
+        }
+    }
+
+    @Test
+    fun `runs over disjoint pipelines overlap while a run on a busy pipeline waits`() = runTest {
+        val aEntered = CompletableDeferred<Unit>()
+        val bEntered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        fun blocking(entered: CompletableDeferred<Unit>) = ScriptedTransport { request ->
+            entered.complete(Unit)
+            release.await()
+            okResponse(request)
+        }
+        val a = testPipeline("a", bodyExtractor(), clock, transport = blocking(aEntered), discoveries = listOf(seeds("a1")))
+        val b = testPipeline("b", bodyExtractor(), clock, transport = blocking(bEntered), discoveries = listOf(seeds("b1")))
+        val engine = testEngine(listOf(a, b), clock)
+        try {
+            val runA = async(start = CoroutineStart.UNDISPATCHED) { engine.runOnce(RunRequest(setOf("a"))) }
+            aEntered.await()
+            val runB = async(start = CoroutineStart.UNDISPATCHED) { engine.runOnce(RunRequest(setOf("b"))) }
+            bEntered.await()
+            assertFalse(runA.isCompleted, "b started while a was still inside its request")
+            val secondA = async(start = CoroutineStart.UNDISPATCHED) { engine.runOnce(RunRequest(setOf("a"))) }
+            assertFalse(engine.awaitIdle(Duration.ofMillis(50)))
+            assertFalse(secondA.isCompleted, "a second run of a busy pipeline must wait for it")
+            release.complete(Unit)
+            assertEquals(RunStatus.COMPLETED, runA.await().status)
+            assertEquals(RunStatus.COMPLETED, runB.await().status)
+            assertEquals(RunStatus.COMPLETED, secondA.await().status)
+        } finally {
+            engine.shutdown()
+        }
+    }
+
+    @Test
+    fun `stale-run recovery allows for the longest timeout among overlapping runs`() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val slow = testPipeline(
+            "slow",
+            bodyExtractor(),
+            clock,
+            transport = ScriptedTransport { request ->
+                entered.complete(Unit)
+                release.await()
+                okResponse(request)
+            },
+            discoveries = listOf(seeds("s")),
+        )
+        val quick = testPipeline("quick", bodyExtractor(), clock, transport = ScriptedTransport { okResponse(it) }, discoveries = listOf(seeds("q")))
+        val state = RunHistoryStateStore(clock, setOf(CrawlStateCapability.RUN_RECOVERY))
+        val options = EngineRuntimeOptions(runTimeout = Duration.ofMinutes(1), shutdownTimeout = Duration.ofSeconds(4))
+        val engine = testEngine(listOf(slow, quick), clock, state = state, options = options)
+        try {
+            val longRun = async(start = CoroutineStart.UNDISPATCHED) { engine.runOnce(RunRequest(setOf("slow"), timeout = Duration.ofHours(3))) }
+            entered.await()
+            assertEquals(RunStatus.COMPLETED, engine.runOnce(RunRequest(setOf("quick"), timeout = Duration.ofSeconds(30))).status)
+            assertEquals(Duration.ofHours(3).plusSeconds(4), state.recoveredStaleAfter, "the 3 h run must not look stale to the 30 s run")
+            release.complete(Unit)
+            assertEquals(RunStatus.COMPLETED, longRun.await().status)
+            assertEquals(RunStatus.COMPLETED, engine.runOnce(RunRequest(setOf("quick"), timeout = Duration.ofSeconds(30))).status)
+            assertEquals(Duration.ofSeconds(34), state.recoveredStaleAfter, "a finished run no longer counts")
         } finally {
             engine.shutdown()
         }

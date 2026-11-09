@@ -29,7 +29,7 @@ If two authoritative rules still conflict, stop and ask. Do not silently select 
 
 ## 2. Current project status
 
-Phases 0–6 of `PLAN.md` are implemented and released as `1.1.0`. The Maven reactor contains the build-only `trawler-parent`, the version-alignment `trawler-bom`, the runtime artifacts `trawler-core`, `trawler-web`, `trawler-postgres`, and the Phase 7 `trawler-flaresolverr` adapter, and the non-published `trawler-coverage` aggregate. `README.md` and the feature records under `docs/` describe exactly what each artifact implements; other Phase 7 integrations exist only when their module is present in the reactor.
+Phases 0–6 of `PLAN.md` are implemented and released as `1.2.0`. The Maven reactor contains the build-only `trawler-parent`, the version-alignment `trawler-bom`, the runtime artifacts `trawler-core`, `trawler-web`, `trawler-postgres`, and the Phase 7 `trawler-flaresolverr` adapter, and the non-published `trawler-coverage` aggregate. `README.md` and the feature records under `docs/` describe exactly what each artifact implements; other Phase 7 integrations exist only when their module is present in the reactor.
 
 Do not:
 

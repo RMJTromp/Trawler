@@ -125,8 +125,9 @@ the crawl-state extension, and returns to `NEW` after its bounded response
 processing completes. A replay running beside an already `RUNNING` engine does
 not restart shared engine extensions.
 
-One `runOnce` call is an engine run. Direct runs are serialized at the engine
-boundary while selected pipeline runs execute under `supervisorScope`, so a
+One `runOnce` call is an engine run. Runs that select disjoint pipelines overlap;
+a run that shares a pipeline with a running or earlier-queued run waits in arrival
+order. Selected pipeline runs execute under `supervisorScope`, so a
 failure in one pipeline produces a failed pipeline result without
 automatically cancelling unrelated pipelines. Caller cancellation propagates
 as coroutine cancellation rather than being misreported as successful work.
