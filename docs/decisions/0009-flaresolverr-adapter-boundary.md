@@ -91,6 +91,10 @@ egress.
    points: request middleware sets the clearance `User-Agent` (which
    `KtorTransport` preserves) and a `CookieSession` decorator merges clearance
    cookies per hop for the exact origin. No `trawler-web` change is made.
+   *Amended 2026-11-23:* the decorator also sets the hop origin's clearance
+   `User-Agent` on that hop, and a challenge met on a cross-origin redirect
+   hop is resolved for the hop's origin on the next attempt. Both stay inside
+   the same extension points; `trawler-web` is still unchanged.
 5. FlareSolverr fetches are evaluated by destination policy at the initial and
    final URL only; browser-side navigation is a documented limitation, not a
    claimed guarantee.

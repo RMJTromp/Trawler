@@ -342,6 +342,167 @@ class ChallengeClearanceTest {
     }
 
     @Test
+    fun `a challenge on a cross-origin redirect hop resolves that hop origin on the next attempt`(): Unit = runBlocking {
+        val hop = WebOrigin.fromTarget("https://www.example.test/")
+        val request = CrawlRequest("http://www.example.test/x.jpg")
+        val error = assertFailsWith<ChallengeDetectedException> {
+            respond(request, challengeResponse(request, finalTarget = "https://www.example.test/x.jpg"))
+        }
+        assertEquals(hop, error.origin)
+        assertNotNull(store.pendingChallenge(hop))
+        assertNull(store.pendingChallenge(WebOrigin.fromTarget(request.target)))
+        assertTrue(resolver.calls.isEmpty(), "detection never resolves")
+
+        send(request)
+        assertEquals(
+            listOf(ChallengeResolutionRequest(hop, "https://www.example.test/x.jpg", ChallengeKind.CLOUDFLARE)),
+            resolver.calls,
+        )
+        assertNotNull(store.current(hop))
+        assertSame(request, forwarded.single().first, "the hop receives clearance from the cookie session, not the request")
+
+        send(request)
+        assertEquals(1, resolver.calls.size, "the hop clearance is reused")
+    }
+
+    @Test
+    fun `a request origin and a linked hop origin are each resolved with their own target`(): Unit = runBlocking {
+        val hop = WebOrigin.fromTarget("https://hop.test/")
+        val request = CrawlRequest("$SITE/start", headers = Headers.of(Header("User-Agent", "TrawlerBot/0.1")))
+        assertFailsWith<ChallengeDetectedException> {
+            respond(request, challengeResponse(request, finalTarget = "https://hop.test/landing"))
+        }
+        store.recordChallenge(origin, ChallengeKind.CLOUDFLARE, null)
+
+        send(request)
+        assertEquals(
+            listOf(
+                ChallengeResolutionRequest(origin, "$SITE/start", ChallengeKind.CLOUDFLARE),
+                ChallengeResolutionRequest(hop, "https://hop.test/landing", ChallengeKind.CLOUDFLARE),
+            ),
+            resolver.calls,
+        )
+        val sent = forwarded.single().first
+        assertEquals(listOf(BROWSER_UA), sent.headers["User-Agent"])
+        assertEquals(store.current(origin)!!.generation.toString(), sent.attributes[ChallengeClearance.GENERATION_ATTRIBUTE])
+        assertNotNull(store.current(hop))
+    }
+
+    @Test
+    fun `a failed hop resolution fails the attempt before sending and cools the hop origin down`(): Unit = runBlocking {
+        val hop = WebOrigin.fromTarget("https://hop.test/")
+        val request = CrawlRequest("$SITE/start")
+        assertFailsWith<ChallengeDetectedException> {
+            respond(request, challengeResponse(request, finalTarget = "https://hop.test/landing"))
+        }
+        resolver.behavior = { throw IOException("down") }
+        val failure = assertFailsWith<ChallengeResolutionException> { send(request) }
+        assertEquals("resolver-failed", failure.reason)
+        assertTrue(forwarded.isEmpty())
+        assertTrue(store.inResolutionCooldown(hop))
+        assertFalse(store.inResolutionCooldown(origin))
+    }
+
+    @Test
+    fun `a hop challenge invalidates the hop clearance only when the reported hop carried its cookies`(): Unit = runBlocking {
+        val hop = WebOrigin.fromTarget("https://hop.test/")
+        val stored = store.store(clearanceFor(hop, token = "hop-token"))
+        val request = CrawlRequest("$SITE/start")
+        fun challengeVia(sent: CrawlRequest) = CrawlResponse(
+            request = sent,
+            statusCode = 403,
+            headers = Headers.of(Header("cf-mitigated", "challenge")),
+            body = ResponseBody.from("challenge".toByteArray()),
+            receivedAt = clock.now(),
+            finalTarget = "https://hop.test/landing",
+        )
+        fun hopRequest(vararg headers: Header) = CrawlRequest("https://hop.test/landing", headers = Headers.of(*headers))
+        listOf(
+            hopRequest(),
+            hopRequest(Header("Cookie", "jar=1; cf_clearance=old-token"), Header("User-Agent", BROWSER_UA)),
+            CrawlRequest("$SITE/start", headers = Headers.of(Header("Cookie", "cf_clearance=hop-token"))),
+        ).forEach { sent ->
+            assertFailsWith<ChallengeDetectedException> { respond(request, challengeVia(sent)) }
+            assertSame(stored, store.current(hop), "a hop without the current clearance must not invalidate it")
+            assertNull(store.pendingChallenge(hop))
+        }
+
+        assertFailsWith<ChallengeDetectedException> {
+            respond(request, challengeVia(hopRequest(Header("cookie", "jar=1;cf_clearance=hop-token"))))
+        }
+        assertNull(store.current(hop))
+        assertNotNull(store.pendingChallenge(hop))
+        send(request)
+        assertEquals("https://hop.test/landing", resolver.calls.single().target)
+    }
+
+    @Test
+    fun `a cookie-less hop clearance counts as sent when the hop carried its user agent`(): Unit = runBlocking {
+        val hop = WebOrigin.fromTarget("https://hop.test/")
+        val stored = store.store(Clearance(hop, emptyList(), BROWSER_UA, clock.now()))
+        val request = CrawlRequest("$SITE/start")
+        fun challengeWith(userAgent: String): CrawlResponse {
+            val sent = CrawlRequest("https://hop.test/landing", headers = Headers.of(Header("User-Agent", userAgent)))
+            return challengeResponse(sent, finalTarget = sent.target)
+        }
+        assertFailsWith<ChallengeDetectedException> { respond(request, challengeWith("TrawlerBot/0.1")) }
+        assertSame(stored, store.current(hop))
+        assertFailsWith<ChallengeDetectedException> { respond(request, challengeWith(BROWSER_UA)) }
+        assertNull(store.current(hop))
+    }
+
+    @Test
+    fun `a secure-only clearance challenged on plain http fails as not applicable instead of retrying`(): Unit = runBlocking {
+        val plain = WebOrigin.fromTarget("http://www.example.test/")
+        val stored = store.store(Clearance(plain, listOf(ClearanceCookie("sucuri", "v", secure = true)), BROWSER_UA, clock.now()))
+        val request = CrawlRequest("$SITE/")
+        var called = false
+        val error = assertFailsWith<ChallengeResolutionException> {
+            respond(
+                request,
+                challengeResponse(request, finalTarget = "http://www.example.test/wp/"),
+                ResponseHandler { r, _ -> called = true; r },
+            )
+        }
+        assertFalse(called)
+        assertEquals("clearance-not-applicable", error.reason)
+        assertEquals(ChallengeKind.CLOUDFLARE, error.kind)
+        assertEquals("Challenge 'cloudflare' resolution failed: clearance-not-applicable", error.message)
+        assertSame(stored, store.current(plain))
+        assertNull(store.pendingChallenge(plain))
+        assertNull(store.redirectedChallenge(request.target))
+
+        val direct = CrawlRequest("http://www.example.test/wp/")
+        assertEquals(
+            "clearance-not-applicable",
+            assertFailsWith<ChallengeResolutionException> { respond(direct, challengeResponse(direct)) }.reason,
+        )
+
+        store.store(
+            Clearance(
+                plain,
+                listOf(ClearanceCookie("sucuri", "v", secure = true), ClearanceCookie("plain", "p")),
+                BROWSER_UA,
+                clock.now(),
+            ),
+        )
+        assertFailsWith<ChallengeDetectedException> { respond(direct, challengeResponse(direct)) }
+
+        store.store(
+            Clearance(
+                plain,
+                listOf(ClearanceCookie("sucuri", "v", secure = true, expiresAt = clock.now().plusSeconds(1))),
+                BROWSER_UA,
+                clock.now(),
+            ),
+        )
+        clock.advance(Duration.ofSeconds(1))
+        assertFailsWith<ChallengeDetectedException>("expired cookies are not blocked by the scheme") {
+            respond(direct, challengeResponse(direct))
+        }
+    }
+
+    @Test
     fun `challenges on responses without a web origin are passed through`(): Unit = runBlocking {
         val request = CrawlRequest("custom-scheme:resource")
         val response = challengeResponse(request, finalTarget = null)

@@ -4,7 +4,7 @@
 >
 > **Owner:** `trawler-flaresolverr`
 >
-> **Since:** 1.0.0
+> **Since:** 1.0.0. Since 1.3.2 a challenge met on a cross-origin redirect hop is cleared for that hop's origin.
 
 ## Purpose
 
@@ -44,7 +44,7 @@ constructed and installed explicitly.
 | Detection (B) | `ChallengeDetector`, `ChallengeDetection`, `ChallengeKind`, `CloudflareChallengeDetector` | Pure, replaceable policy over a bounded core response. |
 | Resolution (B) | `ChallengeResolver`, `ChallengeResolutionRequest`, `FlareSolverrChallengeResolver`, `FlareSolverrResolverConfig` | One resolution per call, no internal retry; the FlareSolverr resolver owns its client. |
 | Clearance state (B) | `Clearance`, `ClearanceCookie`, `StoredClearance`, `ClearanceStore`, `ClearanceStoreConfig` | Bounded, expiring, process-local, exact-origin store. |
-| Coordination (B) | `ChallengeClearance` (`requestMiddleware`, `responseMiddleware`, `cookieSession(delegate)`), `ChallengeRetryPolicy` | Per-origin single-flight resolution, User-Agent application, cookie merging, and visible retry. |
+| Coordination (B) | `ChallengeClearance` (`requestMiddleware`, `responseMiddleware`, `cookieSession(delegate)`), `ChallengeRetryPolicy` | Per-origin single-flight resolution (including the origin of a challenged cross-origin redirect hop), per-hop User-Agent application, cookie merging, and visible retry. |
 | Failures | `FlareSolverrException` (sealed: `FlareSolverrUnavailableException`, `FlareSolverrErrorException`, `FlareSolverrProtocolException`, `FlareSolverrResponseLimitException`, `UnsupportedFlareSolverrRequestException`), `ChallengeDetectedException`, `ChallengeResolutionException`, `FlareSolverrFailureClassifier`, `FlareSolverrFailureCategories` | Classification into extensible core categories; retry stays with the selected core `RetryPolicy`. |
 
 Ktor and kotlinx-serialization types are used only internally; no public
@@ -230,9 +230,47 @@ attempt 2  requestMiddleware: marker present, no clearance
               store.store(clearance)                    (generation N)
            -> request User-Agent := clearance UA; attribute generation=N
            -> KtorTransport: cookieSession decorator adds clearance cookies
-              for the matching origin, merged with jar cookies, per hop
+              and the clearance UA for the matching origin, merged with
+              jar cookies, per hop
            -> 200
 ```
+
+### Challenge on a cross-origin redirect hop
+
+`KtorTransport` follows redirects inside one attempt, so request middleware
+only ever sees the request's own target. A challenge served by a hop on
+another origin (for example `http://www.example.aw/x.jpg` → `301` →
+`https://www.example.aw/x.jpg`, or `https://example.aw/` →
+`http://www.example.aw/wp/`) is handled like this:
+
+```text
+attempt 1  GET A -> 301 -> GET B -> 403 + cf-mitigated: challenge
+           -> responseMiddleware: challenged origin = B (final hop)
+              store.recordChallenge(B)                  (marker for B)
+              store.recordRedirectedChallenge(A target -> B hop target)
+              throw ChallengeDetectedException(origin = B)
+attempt 2  requestMiddleware: A has no marker or clearance
+              link for A target -> B has a marker -> resolve B once,
+              FlareSolverr loads the B hop target, store.store(clearance B)
+           -> request goes out unchanged
+           -> KtorTransport hop A: no clearance (A has none)
+           -> KtorTransport hop B: cookieSession decorator adds B's cookies
+              and B's User-Agent
+           -> 200
+```
+
+The link is keyed by the request target, which the engine keeps across
+attempts of the same work item; other work that redirects to B afterwards
+already receives B's clearance on that hop. Hop clearance is never forwarded
+to the redirecting origin: each hop gets only the clearance of its own exact
+origin.
+
+A clearance whose cookies are all `Secure` can never be sent to a plain
+`http` hop. When a challenge is met on such a target while its origin holds
+that clearance, the response middleware throws `ChallengeResolutionException`
+with reason `clearance-not-applicable` instead of `ChallengeDetectedException`,
+so the work fails clearly instead of spending its remaining attempts on a
+retry that cannot succeed.
 
 Why this integration: `KtorTransport` keeps a caller-supplied `User-Agent`
 header (it adds its configured UA only when none is present) and consults the
@@ -241,11 +279,22 @@ selected `CookieSession` for every hop after redirect-header stripping.
 present, so injecting `Cookie` from request middleware would silently drop the
 jar's cookies and would bypass per-hop origin matching. The decorator instead
 merges clearance cookies into the delegate's result for the exact origin of
-each hop. **No `trawler-web` or `trawler-core` change was needed.**
+each hop, and replaces the hop's `User-Agent` with that origin's clearance
+User-Agent, because clearance is bound to it. A caller-supplied `Cookie`
+header opts the hop out of clearance entirely (no cookies, no User-Agent
+change). **No `trawler-web` or `trawler-core` change was needed.**
 
 The clearance generation lets the response middleware distinguish "the
 current clearance was rejected" (invalidate and re-mark) from "a request sent
-before the clearance existed was challenged" (keep the newer clearance).
+before the clearance existed was challenged" (keep the newer clearance). The
+generation attribute describes the request origin only. For a challenge on a
+hop to another origin, the clearance counts as sent when the hop request that
+the transport reports in `CrawlResponse.request` targets that origin and its
+`Cookie` header carries one of the clearance cookies (for a clearance without
+cookies, when it carries the clearance User-Agent). `KtorTransport` reports
+the effective final hop request. A transport that reports the original
+request instead never invalidates a hop clearance this way; the clearance
+then lives until its lifetime ends.
 
 ## Lifecycle and state
 
@@ -268,7 +317,14 @@ before the clearance existed was challenged" (keep the newer clearance).
   resolution; clears marker and cooldown; expires after
   `maxClearanceLifetime`; individual cookies also expire by their own
   `expires`) → back to *marker* when a request carrying the current
-  generation is challenged. A failed resolution records a cooldown timestamp.
+  generation (or a redirect hop carrying the current clearance) is
+  challenged. A failed resolution records a cooldown timestamp.
+- `ClearanceStore` redirect links: request target → challenged hop origin and
+  target, recorded when a challenge is met on a hop to another origin,
+  replaced by a newer link for the same request target, expiring after
+  `challengeMarkerLifetime`, and removed by `clear(origin)` for either side
+  or by `clearAll`. A link triggers a resolution only while the hop origin
+  has a challenge marker.
 
 ## Concurrency and resource bounds
 
@@ -289,7 +345,12 @@ before the clearance existed was challenged" (keep the newer clearance).
   service timeouts).
 - The store is bounded by `maxOrigins` and per-origin cookie counts; the
   merged cookie header is bounded and an overflow raises `trawler-web`'s
-  `CookieHeaderLimitException`.
+  `CookieHeaderLimitException`. Redirect links are separately bounded by
+  `maxOrigins` (expired links evicted first, then least recently used); each
+  holds two caller-bounded target strings and no clearance value.
+- A request whose target origin and linked hop origin both have markers
+  resolves them one after the other inside its attempt, each through that
+  origin's single-flight gate.
 - No `GlobalScope`, no blocking sleeps, no background coroutines.
 
 ## Failure and retry semantics
@@ -297,7 +358,7 @@ before the clearance existed was challenged" (keep the newer clearance).
 | Failure | Category | Retryable by default |
 |---|---|---|
 | `ChallengeDetectedException` | `flaresolverr-challenge-detected` (detail: kind) | yes |
-| `ChallengeResolutionException` | `flaresolverr-challenge-resolution-failed` (detail: `resolver-failed`, `resolution-cooldown`, `origin-mismatch`) | yes for cooldown or an unavailable/erroring service; otherwise no |
+| `ChallengeResolutionException` | `flaresolverr-challenge-resolution-failed` (detail: `resolver-failed`, `resolution-cooldown`, `origin-mismatch`, `clearance-not-applicable`) | yes for cooldown or an unavailable/erroring service; otherwise no |
 | `FlareSolverrUnavailableException` | `flaresolverr-unavailable` | yes |
 | `FlareSolverrErrorException` | `flaresolverr-service-error` | yes |
 | `FlareSolverrProtocolException` | `flaresolverr-protocol` | no |
@@ -359,8 +420,11 @@ FlareSolverr. Mode A makes no delivery claim beyond core's; FlareSolverr
   ([ADR-0009](decisions/0009-flaresolverr-adapter-boundary.md)).
 - **Origin scoping:** clearance is stored and applied per exact origin; only
   cookies whose domain matches the origin host are kept; `Secure` and `Path`
-  attributes are honored; cross-origin redirect hops never receive another
-  origin's clearance.
+  attributes are honored (a `Secure` cookie is never sent to an `http` hop);
+  cross-origin redirect hops never receive another origin's clearance. A hop
+  whose own origin has clearance receives that clearance and its
+  User-Agent; the User-Agent then stays on later hops of the same chain, as
+  any request `User-Agent` does (it is not a credential).
 - **FlareSolverr's own logs:** FlareSolverr logs each incoming request body at
   INFO level, which can include request cookies and, for `sessions.create`,
   proxy credentials. Operators must restrict FlareSolverr log access and
@@ -415,6 +479,17 @@ Performed for this change:
   redacted `toString`, store cleared on stop. No live third-party site was
   contacted. The container and fixture were removed afterwards.
 
+Performed for the cross-origin redirect hop fix (issue #3):
+
+- `mvn -B clean verify` for the full reactor passes; `trawler-flaresolverr`
+  runs 121 unit tests and 7 integration tests. JaCoCo for the module: 99.50%
+  line (1000/1005) and 96.06% branch (903/940) coverage.
+- With the coordinator sources reverted to 1.3.1 and the new tests kept,
+  11 tests fail, including both engine-level redirect scenarios: the
+  resolver is never called and the work fails after its challenge attempts.
+- No manual check against a real FlareSolverr or a real protected site was
+  run for this fix.
+
 ### Automated tests
 
 All tests live in `trawler-flaresolverr/src/test/kotlin` and use no Docker,
@@ -428,10 +503,10 @@ no live FlareSolverr, and no public network:
 | `FlareSolverrChallengeResolverTest` | `returnOnlyCookies` command; domain/value/duplicate cookie filtering and `maxCookies`; origin/scheme/length rejection; initial and final destination checks; typed failures; closed-resolver lifecycle. |
 | `FlareSolverrFailureClassifierTest` | Every category and retryability, cause-chain depth bound, delegation of destination rejections and foreign errors, no secret in details. |
 | `challenge/CloudflareChallengeDetectorTest` | Header and marker positives, Cloudflare-evidence requirement, status negatives, inspected-prefix boundary, replaceable statuses/markers, value-type validation. |
-| `challenge/ClearanceStoreTest` | Cookie/clearance validation and redaction, expiry, exact-origin keying, cookie bound, generations, expiry-first then LRU eviction, marker lifetime, generation-checked invalidation, cooldown. |
-| `challenge/ChallengeClearanceTest` | Pass-through, User-Agent replacement and generation tagging, single-flight (8 concurrent requests → 1 resolution, virtual time), independent origins, leader cancellation hand-off, failure cooldown fast-fail, origin mismatch, marker expiry while queued, stale vs current generation, lifecycle forwarding, `ChallengeRetryPolicy`. |
-| `challenge/ClearanceCookieSessionTest` | Merge with a real `InMemoryCookieSession`, same-name replacement, path/secure/expiry/exact-origin rules, caller `Cookie` header honored, header bound, and per-hop application through `KtorTransport` redirects (never sent cross-origin). |
-| `ChallengeClearanceEngineTest` | `TrawlerEngine` + `KtorTransport` (MockEngine target site) + resolver (fake FlareSolverr): 3 concurrent challenged items → 1 resolution, 6 attempts, 3 `RETRY_SCHEDULED`, no token in events; a site that keeps rejecting clearance → 2 resolutions, 3 attempts, `FAILED`; a failed resolution → `RetryAt`, `ABANDONED` with retained work. |
+| `challenge/ClearanceStoreTest` | Cookie/clearance validation and redaction, expiry, exact-origin keying, cookie bound, generations, expiry-first then LRU eviction, marker lifetime, generation-checked invalidation, cooldown; redirect-link lifetime, replacement, expiry-first then LRU bound, and removal by `clear`/`clearAll`. |
+| `challenge/ChallengeClearanceTest` | Pass-through, User-Agent replacement and generation tagging, single-flight (8 concurrent requests → 1 resolution, virtual time), independent origins, leader cancellation hand-off, failure cooldown fast-fail, origin mismatch, marker expiry while queued, stale vs current generation, lifecycle forwarding, `ChallengeRetryPolicy`; cross-origin hop challenge resolved for the hop origin with the hop target on the next attempt, request and hop origins both resolved, hop resolution failure and cooldown, hop clearance invalidated only when the reported hop carried it (cookies, or User-Agent without cookies), `clearance-not-applicable` for `Secure`-only clearance on `http`. |
+| `challenge/ClearanceCookieSessionTest` | Merge with a real `InMemoryCookieSession`, same-name replacement, path/secure/expiry/exact-origin rules, caller `Cookie` header honored, header bound, clearance User-Agent per hop, and per-hop application through `KtorTransport` redirects (never sent cross-origin; a cross-origin hop gets its own origin's clearance and User-Agent). |
+| `ChallengeClearanceEngineTest` | `TrawlerEngine` + `KtorTransport` (MockEngine target site) + resolver (fake FlareSolverr): 3 concurrent challenged items → 1 resolution, 6 attempts, 3 `RETRY_SCHEDULED`, no token in events; a site that keeps rejecting clearance → 2 resolutions, 3 attempts, `FAILED`; a failed resolution → `RetryAt`, `ABANDONED` with retained work; a challenge after an `http`→`https` or cross-host `301` → 1 resolution of the hop URL, 2 attempts, `COMPLETED`; `Secure`-only clearance for an `http` hop → `clearance-not-applicable`, 2 attempts, `FAILED`. |
 | `FlareSolverrCioIT` | Real Ktor CIO against a loopback JDK `HttpServer`: session lifecycle and mapping, resolver, HTTP 500 error, declared and chunked size bounds, refused connection, and the call timeout. |
 
 The FlareSolverr client accepts an internal `HttpClientEngine` seam
@@ -460,10 +535,17 @@ Two production defects were found and fixed while adding the suite:
   are not forwarded.
 - Navigation inside FlareSolverr's browser bypasses per-hop redirect safety,
   robots, pacing, and origin concurrency.
-- A challenge reached through a cross-origin redirect marks the final origin,
-  but resolution happens only when a request targets that origin directly; a
-  redirect from an uncleared origin to a cleared one carries the default
-  User-Agent and is likely to be challenged again.
+- A challenge reached through a cross-origin redirect is linked to the
+  request by its exact target string. A request middleware installed before
+  `ChallengeClearance.requestMiddleware` that changes the target between
+  attempts breaks the link; the request then exhausts its challenge attempts
+  without resolving the hop origin.
+- Whether a hop clearance was sent is read from the hop request the
+  transport reports in `CrawlResponse.request` (see
+  [Mode B sequence](#mode-b-sequence-and-integration-with-ktortransport)).
+- A clearance made only of `Secure` cookies cannot clear a plain `http` hop;
+  such a challenge fails with `clearance-not-applicable`. Point the crawl at
+  the `https` form of the target instead.
 - A caller-supplied `Cookie` header disables clearance cookies for that
   request (the `CookieSession` contract).
 - A resolution that returns no clearance cookies is accepted (User-Agent only);

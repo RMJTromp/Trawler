@@ -47,6 +47,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CopyOnWriteArrayList
@@ -83,11 +84,16 @@ class ChallengeClearanceEngineTest {
         fake: FakeFlareSolverr = FakeFlareSolverr {
             replyJson(okRoot(solution(response = null, cookies = cookies(cookie("cf_clearance", token)))))
         },
+        seedTargets: List<String> = (1..seeds).map { "$SITE/item?id=$it" },
+        redirects: Map<String, String> = emptyMap(),
     ): Harness {
         val siteRequests = CopyOnWriteArrayList<HttpRequestData>()
         val challenged = AtomicInteger()
         val site = MockEngine { request ->
             siteRequests += request
+            redirects[request.url.toString()]?.let { location ->
+                return@MockEngine respond("", HttpStatusCode.MovedPermanently, headersOf(HttpHeaders.Location, location))
+            }
             val cookie = request.headers[HttpHeaders.Cookie].orEmpty()
             val cleared = siteAccepts &&
                 cookie.contains("cf_clearance=$token") &&
@@ -138,7 +144,7 @@ class ChallengeClearanceEngineTest {
         val produced = CopyOnWriteArrayList<String>()
         val pipeline = PipelineBuilder<String>("protected")
             .transport(ktor)
-            .discover(SeedDiscovery(requests = (1..seeds).map { CrawlRequest("$SITE/item?id=$it") }))
+            .discover(SeedDiscovery(requests = seedTargets.map(::CrawlRequest)))
             .addRequestMiddleware(clearance.requestMiddleware)
             .addResponseMiddleware(clearance.responseMiddleware)
             .classifyFailures(FlareSolverrFailureClassifier(DefaultWebFailureClassifier))
@@ -246,5 +252,69 @@ class ChallengeClearanceEngineTest {
         assertIs<ChallengeResolutionException>(resolution)
         assertEquals("resolver-failed", resolution.reason)
         assertIs<FlareSolverrErrorException>(resolution.cause)
+    }
+
+    private fun assertClearedAfterCrossOriginRedirect(start: String, challenged: String) {
+        val harness = harness(seeds = 1, seedTargets = listOf(start), redirects = mapOf(start to challenged))
+        val result = run(harness)
+        val pipeline = result.pipelineRuns.single()
+
+        assertEquals(RunStatus.COMPLETED, result.status)
+        assertEquals(2L, pipeline.requestsStarted, "one challenged attempt + one cleared retry")
+        assertEquals(listOf("cleared:/landing"), harness.produced)
+        val solve = harness.fake.commands("request.get").single()
+        assertEquals(JsonPrimitive(challenged), solve.json["url"], "the challenged hop is what FlareSolverr loads")
+        assertEquals(
+            listOf(start, challenged, start, challenged),
+            harness.siteRequests.map { it.url.toString() },
+        )
+        val retriedStart = harness.siteRequests[2]
+        assertFalse(
+            retriedStart.headers[HttpHeaders.Cookie].orEmpty().contains("cf_clearance"),
+            "hop clearance never reaches the redirecting origin",
+        )
+        assertTrue(retriedStart.headers[HttpHeaders.UserAgent] != BROWSER_UA)
+        val clearedHop = harness.siteRequests[3]
+        assertEquals(BROWSER_UA, clearedHop.headers[HttpHeaders.UserAgent])
+        assertTrue(clearedHop.headers[HttpHeaders.Cookie]!!.contains("cf_clearance=$token"))
+        val failure = assertIs<ChallengeDetectedException>(pipeline.failures.single().error)
+        assertEquals(WebOrigin.fromTarget(challenged), failure.origin)
+        assertFalse(harness.events.any { it.toString().contains(token) })
+    }
+
+    @Test
+    fun `a challenge met after a scheme-upgrade redirect is resolved for the https hop`() {
+        assertClearedAfterCrossOriginRedirect(start = "http://example.test/landing", challenged = "$SITE/landing")
+    }
+
+    @Test
+    fun `a challenge met after a redirect to another host is resolved for that host`() {
+        assertClearedAfterCrossOriginRedirect(start = "https://old.test/landing", challenged = "$SITE/landing")
+    }
+
+    @Test
+    fun `secure-only clearance for a plain http hop fails clearly instead of exhausting attempts`() {
+        val start = "$SITE/"
+        val challenged = "http://www.example.test/wp/"
+        val secureOnly = FakeFlareSolverr {
+            replyJson(okRoot(solution(response = null, cookies = cookies(cookie("cf_clearance", token, secure = true)))))
+        }
+        val harness = harness(
+            seeds = 1,
+            fake = secureOnly,
+            seedTargets = listOf(start),
+            redirects = mapOf(start to challenged),
+        )
+        val result = run(harness)
+        val pipeline = result.pipelineRuns.single()
+
+        assertEquals(RunStatus.FAILED, result.status)
+        assertEquals(2L, pipeline.requestsStarted, "no attempt is spent on a retry that cannot succeed")
+        assertEquals(1, secureOnly.commands("request.get").size)
+        assertEquals(JsonPrimitive(challenged), secureOnly.commands("request.get").single().json["url"])
+        assertFalse(harness.siteRequests.last().headers[HttpHeaders.Cookie].orEmpty().contains("cf_clearance"))
+        val resolution = assertIs<ChallengeResolutionException>(pipeline.failures.last().error)
+        assertEquals("clearance-not-applicable", resolution.reason)
+        assertEquals(1, harness.events.count { it.type == CrawlerEventType.RETRY_SCHEDULED })
     }
 }
