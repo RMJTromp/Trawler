@@ -4,7 +4,7 @@
 >
 > **Owner:** `trawler-flaresolverr`
 >
-> **Since:** 1.0.0
+> **Since:** 1.0.0. Since 1.3.2 a challenge met on a cross-origin redirect hop is cleared for that hop's origin.
 
 ## Purpose
 
