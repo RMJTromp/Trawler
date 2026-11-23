@@ -129,6 +129,14 @@ public data class ClearanceStoreConfig(
  * the least recently used origin is evicted when [ClearanceStoreConfig.maxOrigins]
  * is reached. Nothing is persisted; clearance values are lost on process exit.
  *
+ * The store also holds redirect links: when a request was challenged on a
+ * redirect hop to another origin, the request target is linked to the
+ * challenged hop target so the next attempt of that request can resolve the
+ * hop's origin. Links expire with [ClearanceStoreConfig.challengeMarkerLifetime],
+ * at most [ClearanceStoreConfig.maxOrigins] links are held (expired links
+ * evicted first, then the least recently used), and a link never carries a
+ * clearance value.
+ *
  * All operations are non-suspending, short critical sections under one lock
  * and are safe to call from any coroutine. The store performs no network work.
  */
@@ -144,6 +152,7 @@ public class ClearanceStore(
 
     private val lock = ReentrantLock()
     private val entries = LinkedHashMap<WebOrigin, Entry>(16, 0.75f, true)
+    private val redirectLinks = LinkedHashMap<String, RedirectedChallenge>(16, 0.75f, true)
     private var generationSequence: Long = 0
 
     /** Returns the unexpired clearance for [origin], or `null`. */
@@ -187,14 +196,22 @@ public class ClearanceStore(
         stored
     }
 
-    /** Removes all state for [origin]. */
+    /** Removes all state for [origin], including redirect links to or from it. */
     public fun clear(origin: WebOrigin) {
-        lock.withLock { entries.remove(origin) }
+        lock.withLock {
+            entries.remove(origin)
+            redirectLinks.entries.removeIf { (requestTarget, link) ->
+                link.origin == origin || originOrNull(requestTarget) == origin
+            }
+        }
     }
 
     /** Removes all state held by this store. */
     public fun clearAll() {
-        lock.withLock { entries.clear() }
+        lock.withLock {
+            entries.clear()
+            redirectLinks.clear()
+        }
     }
 
     /**
@@ -226,6 +243,41 @@ public class ClearanceStore(
             return null
         }
         pending
+    }
+
+    /**
+     * Links [requestTarget] to [challengedTarget], a redirect hop on another
+     * origin that served a challenge, replacing any older link for the same
+     * request target. At [ClearanceStoreConfig.maxOrigins] links, expired
+     * links are evicted first, then the least recently used.
+     */
+    internal fun recordRedirectedChallenge(requestTarget: String, challengedOrigin: WebOrigin, challengedTarget: String) {
+        lock.withLock {
+            val now = clock.now()
+            redirectLinks.remove(requestTarget)
+            if (redirectLinks.size >= configuration.maxOrigins) {
+                redirectLinks.entries.removeIf { !it.value.expiresAt.isAfter(now) }
+            }
+            while (redirectLinks.size >= configuration.maxOrigins) {
+                val eldest = redirectLinks.keys.firstOrNull() ?: break
+                redirectLinks.remove(eldest)
+            }
+            redirectLinks[requestTarget] = RedirectedChallenge(
+                origin = challengedOrigin,
+                target = challengedTarget,
+                expiresAt = now.plus(configuration.challengeMarkerLifetime),
+            )
+        }
+    }
+
+    /** Returns the unexpired challenged redirect hop linked to [requestTarget], or `null`. */
+    internal fun redirectedChallenge(requestTarget: String): RedirectedChallenge? = lock.withLock {
+        val link = redirectLinks[requestTarget] ?: return null
+        if (!link.expiresAt.isAfter(clock.now())) {
+            redirectLinks.remove(requestTarget)
+            return null
+        }
+        link
     }
 
     /** Records a failed resolution so concurrent and immediate retries fail fast during the cooldown. */
@@ -278,5 +330,12 @@ public class ClearanceStore(
 /** A challenge observed for an origin that has no usable clearance yet. */
 internal class PendingChallenge(
     val kind: ChallengeKind,
+    val expiresAt: Instant,
+)
+
+/** A challenge served by a redirect hop on [origin] at [target], linked to the request that was redirected there. */
+internal class RedirectedChallenge(
+    val origin: WebOrigin,
+    val target: String,
     val expiresAt: Instant,
 )

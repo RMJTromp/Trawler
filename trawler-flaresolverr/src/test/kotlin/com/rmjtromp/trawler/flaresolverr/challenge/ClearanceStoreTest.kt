@@ -235,6 +235,65 @@ class ClearanceStoreTest {
     }
 
     @Test
+    fun `redirect links expire with the marker lifetime and are replaced per request target`() {
+        val store = ClearanceStore(ClearanceStoreConfig(challengeMarkerLifetime = Duration.ofMinutes(10)), clock)
+        val hop = WebOrigin.fromTarget("https://hop.test/")
+        assertNull(store.redirectedChallenge("$SITE/start"))
+        store.recordRedirectedChallenge("$SITE/start", hop, "https://hop.test/a")
+        clock.advance(Duration.ofMinutes(5))
+        store.recordRedirectedChallenge("$SITE/start", hop, "https://hop.test/b")
+        val link = assertNotNull(store.redirectedChallenge("$SITE/start"))
+        assertEquals(hop, link.origin)
+        assertEquals("https://hop.test/b", link.target)
+        assertNull(store.redirectedChallenge("https://hop.test/b"), "links are keyed by the request target only")
+        clock.advance(Duration.ofMinutes(9))
+        assertNotNull(store.redirectedChallenge("$SITE/start"), "the replacement restarted the lifetime")
+        clock.advance(Duration.ofMinutes(1))
+        assertNull(store.redirectedChallenge("$SITE/start"))
+        assertNull(store.pendingChallenge(hop), "a link is not a challenge marker")
+    }
+
+    @Test
+    fun `redirect links are bounded and evicted expired first then least recently used`() {
+        val store = ClearanceStore(
+            ClearanceStoreConfig(maxOrigins = 2, challengeMarkerLifetime = Duration.ofMinutes(10)),
+            clock,
+        )
+        val hop = WebOrigin.fromTarget("https://hop.test/")
+        store.recordRedirectedChallenge("$SITE/old", hop, "https://hop.test/")
+        clock.advance(Duration.ofMinutes(5))
+        store.recordRedirectedChallenge("$SITE/a", hop, "https://hop.test/")
+        assertNotNull(store.redirectedChallenge("$SITE/old"), "touching makes the oldest link most recently used")
+        clock.advance(Duration.ofMinutes(5))
+        store.recordRedirectedChallenge("$SITE/b", hop, "https://hop.test/")
+        assertNotNull(store.redirectedChallenge("$SITE/a"), "the expired link is evicted before a live one")
+        store.recordRedirectedChallenge("$SITE/c", hop, "https://hop.test/")
+        assertNull(store.redirectedChallenge("$SITE/b"), "the least recently used live link is evicted at the bound")
+        assertNotNull(store.redirectedChallenge("$SITE/a"))
+        assertNotNull(store.redirectedChallenge("$SITE/c"))
+    }
+
+    @Test
+    fun `clear removes redirect links to and from the origin and clearAll removes every link`() {
+        val store = ClearanceStore(clock = clock)
+        val hop = WebOrigin.fromTarget("https://hop.test/")
+        val other = WebOrigin.fromTarget("https://other.test/")
+        store.recordRedirectedChallenge("$SITE/to-hop", hop, "https://hop.test/x")
+        store.recordRedirectedChallenge("https://other.test/from-other", origin, "$SITE/y")
+        store.recordRedirectedChallenge("https://third.test/", other, "https://other.test/z")
+        store.recordRedirectedChallenge("custom-scheme:thing", hop, "https://hop.test/w")
+        store.clear(origin)
+        assertNull(store.redirectedChallenge("https://other.test/from-other"), "link to the cleared origin")
+        assertNull(store.redirectedChallenge("$SITE/to-hop"), "link from the cleared origin")
+        assertNotNull(store.redirectedChallenge("https://third.test/"))
+        store.clear(other)
+        assertNull(store.redirectedChallenge("https://third.test/"))
+        assertNotNull(store.redirectedChallenge("custom-scheme:thing"))
+        store.clearAll()
+        assertNull(store.redirectedChallenge("custom-scheme:thing"))
+    }
+
+    @Test
     fun `clear and clearAll remove state`() {
         val store = ClearanceStore(clock = clock)
         val other = WebOrigin.fromTarget("https://other.test/")

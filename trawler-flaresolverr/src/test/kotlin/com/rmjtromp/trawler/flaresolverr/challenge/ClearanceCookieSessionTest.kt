@@ -114,6 +114,25 @@ class ClearanceCookieSessionTest {
     }
 
     @Test
+    fun `a hop with clearance gets the clearance user agent even when no cookie can be sent`(): Unit = runBlocking {
+        storeClearance(origin, ClearanceCookie("cf_clearance", "fresh"))
+        val headers = Headers.of(Header("User-Agent", "TrawlerBot/0.1"), Header("user-agent", "dup"), Header("Accept", "*/*"))
+        val applied = session.apply("$SITE/", headers)
+        assertEquals(listOf(BROWSER_UA), applied["User-Agent"])
+        assertEquals(listOf("*/*"), applied["Accept"])
+        assertEquals(mapOf("cf_clearance" to "fresh"), pairs(applied))
+
+        storeClearance(WebOrigin.fromTarget("http://plain.test/"), ClearanceCookie("secure_only", "s", secure = true))
+        val blocked = session.apply("http://plain.test/", headers)
+        assertEquals(listOf(BROWSER_UA), blocked["User-Agent"])
+        assertTrue(blocked["Cookie"].isEmpty())
+
+        assertEquals(listOf("TrawlerBot/0.1", "dup"), session.apply("https://other.test/", headers)["User-Agent"])
+        val callerCookie = session.apply("$SITE/", headers.plus(Header("Cookie", "mine=1")))
+        assertEquals(listOf("TrawlerBot/0.1", "dup"), callerCookie["User-Agent"], "a caller Cookie header opts out of clearance")
+    }
+
+    @Test
     fun `observe is forwarded to the delegate and never writes clearance into the jar`(): Unit = runBlocking {
         val observed = CopyOnWriteArrayList<Pair<String, List<String>>>()
         val delegate = object : CookieSession {
@@ -167,26 +186,51 @@ class ClearanceCookieSessionTest {
                 else -> respond("landed", HttpStatusCode.OK)
             }
         }
-        val transport = KtorTransport.fromClient(
-            client = HttpClient(engine),
-            configuration = KtorTransportConfig(),
-            policies = WebTransportPolicies(
-                destination = AllowAllWebDestinationPolicy,
-                robots = NoRobotsPolicy,
-                concurrency = NoOriginConcurrencyPolicy,
-                pacing = NoOriginPacingPolicy,
-                cookies = coordinator.cookieSession(InMemoryCookieSession(clock = clock)),
-                failureClassifier = DefaultHttpFailureClassifier,
-                retryAfter = DefaultRetryAfterPolicy,
-                redirectHeaders = DefaultRedirectHeaderPolicy(),
-                headerRedaction = DefaultHeaderRedactionPolicy(),
-            ),
-            closeClient = true,
-        )
-        transport.use { it.execute(CrawlRequest("$SITE/start")) }
+        transport(engine).use { it.execute(CrawlRequest("$SITE/start")) }
         assertEquals(3, seen.size)
         assertEquals(listOf("cf_clearance=fresh"), seen[0].headers.getAll(HttpHeaders.Cookie))
         assertEquals(listOf("cf_clearance=fresh"), seen[1].headers.getAll(HttpHeaders.Cookie))
         assertEquals(null, seen[2].headers.getAll(HttpHeaders.Cookie))
     }
+
+    @Test
+    fun `KtorTransport gives a cross-origin hop that origin's clearance and user agent`(): Unit = runBlocking {
+        val hop = WebOrigin.fromTarget("https://www.example.test/")
+        storeClearance(hop, ClearanceCookie("cf_clearance", "hop-only"))
+        val seen = CopyOnWriteArrayList<HttpRequestData>()
+        val engine = MockEngine { request ->
+            seen += request
+            when (request.url.toString()) {
+                "http://www.example.test/x.jpg" ->
+                    respond("", HttpStatusCode.MovedPermanently, headersOf(HttpHeaders.Location, "https://www.example.test/x.jpg"))
+                else -> respond("image", HttpStatusCode.OK)
+            }
+        }
+        val request = CrawlRequest("http://www.example.test/x.jpg", headers = Headers.of(Header("User-Agent", "TrawlerBot/0.1")))
+        val response = transport(engine).use { it.execute(request) }
+        assertEquals("https://www.example.test/x.jpg", response.finalTarget)
+        assertEquals(2, seen.size)
+        assertEquals(null, seen[0].headers.getAll(HttpHeaders.Cookie), "the request origin has no clearance")
+        assertEquals(listOf("TrawlerBot/0.1"), seen[0].headers.getAll(HttpHeaders.UserAgent))
+        assertEquals(listOf("cf_clearance=hop-only"), seen[1].headers.getAll(HttpHeaders.Cookie))
+        assertEquals(listOf(BROWSER_UA), seen[1].headers.getAll(HttpHeaders.UserAgent))
+        assertEquals(listOf("cf_clearance=hop-only"), response.request.headers["Cookie"], "the response reports the hop as sent")
+    }
+
+    private fun transport(engine: MockEngine): KtorTransport = KtorTransport.fromClient(
+        client = HttpClient(engine),
+        configuration = KtorTransportConfig(),
+        policies = WebTransportPolicies(
+            destination = AllowAllWebDestinationPolicy,
+            robots = NoRobotsPolicy,
+            concurrency = NoOriginConcurrencyPolicy,
+            pacing = NoOriginPacingPolicy,
+            cookies = coordinator.cookieSession(InMemoryCookieSession(clock = clock)),
+            failureClassifier = DefaultHttpFailureClassifier,
+            retryAfter = DefaultRetryAfterPolicy,
+            redirectHeaders = DefaultRedirectHeaderPolicy(),
+            headerRedaction = DefaultHeaderRedactionPolicy(),
+        ),
+        closeClient = true,
+    )
 }

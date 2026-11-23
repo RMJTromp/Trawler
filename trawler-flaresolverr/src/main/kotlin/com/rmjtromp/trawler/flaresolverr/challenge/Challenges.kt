@@ -161,12 +161,15 @@ public class ChallengeDetectedException(
 ) : IllegalStateException("Anti-bot challenge '${kind.value}' detected ($signal)")
 
 /**
- * Raised when clearance could not be obtained before a request.
+ * Raised when clearance could not be obtained or cannot be used.
  *
  * [reason] is a non-sensitive code: `resolver-failed` (the original resolver
  * failure is the [cause]), `resolution-cooldown` (a recent resolution for the
- * origin failed and the configured cooldown has not elapsed), or
- * `origin-mismatch` (the resolver returned clearance for another origin).
+ * origin failed and the configured cooldown has not elapsed),
+ * `origin-mismatch` (the resolver returned clearance for another origin), or
+ * `clearance-not-applicable` (a challenge was met on a plain `http` target
+ * whose origin holds a clearance made only of `Secure` cookies, which are
+ * never sent over `http`, so a retry cannot succeed).
  */
 public class ChallengeResolutionException(
     public val kind: ChallengeKind,
